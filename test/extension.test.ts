@@ -21,6 +21,65 @@ import {
 import { providerQueueSnapshot } from "../src/core/provider-queue.js";
 
 describe("pi-company extension", () => {
+  it("stays inactive in ordinary Pi sessions outside a company project", async () => {
+    const root = tempRoot();
+    const { handlers, pi, tools, commands } = withWorkingDirectory(root, () => fakePi({}));
+    const { ctx, ui } = fakeContext(root);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    await handlers.before_provider_request?.({}, ctx);
+    const inputResult = await handlers.input?.({ source: "interactive", text: "ordinary pi steering" }, ctx);
+    await handlers.session_shutdown?.({}, ctx);
+
+    expect(fs.existsSync(path.join(root, ".pi-company"))).toBe(false);
+    expect(tools).toHaveLength(0);
+    expect(commands.some((command) => command.name === "company-resume")).toBe(true);
+    expect(ui.setTitle).not.toHaveBeenCalled();
+    expect(ui.setStatus).not.toHaveBeenCalledWith("pi-company", expect.any(String));
+    expect(ui.setWidget).not.toHaveBeenCalled();
+    expect(inputResult).toEqual({ action: "continue" });
+  });
+
+  it("does not initialize a company from /company-resume in an ordinary Pi session", async () => {
+    const root = tempRoot();
+    const { pi, commands } = withWorkingDirectory(root, () => fakePi({}));
+    const { ctx, ui } = fakeContext(root);
+
+    companyExtension(pi);
+    const resume = commands.find((command) => command.name === "company-resume");
+    if (!resume) throw new Error("company-resume command was not registered");
+    await resume.handler("", ctx);
+
+    expect(fs.existsSync(path.join(root, ".pi-company"))).toBe(false);
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(ui.notify).toHaveBeenCalledWith(expect.stringContaining("No pi-company project found"), "error");
+  });
+
+  it("discovers a parent company project from a subdirectory", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-parent-discovery" });
+    const child = path.join(root, "src", "feature");
+    fs.mkdirSync(child, { recursive: true });
+    const { handlers, tools } = withWorkingDirectory(child, () => {
+      const harness = fakePi({});
+      companyExtension(harness.pi);
+      return harness;
+    });
+    const { ctx, ui } = fakeContext(child);
+
+    await handlers.session_start?.({}, ctx);
+    await handlers.session_shutdown?.({}, ctx);
+
+    expect(tools.some((tool) => tool.name === "company_status")).toBe(true);
+    expect(ui.setTitle).toHaveBeenCalledWith("pi-company lead");
+    expect(ui.setWidget).toHaveBeenCalledWith(
+      "pi-company",
+      expect.arrayContaining([expect.stringContaining("pi-company extension-parent-discovery")]),
+      { placement: "belowEditor" },
+    );
+  });
+
   it("surfaces startup registration errors in the Pi UI", async () => {
     const root = tempRoot();
     initCompany({ root, id: "extension-startup-error" });
@@ -63,6 +122,7 @@ describe("pi-company extension", () => {
 
   it("resumes pi-company context from a plain Pi session through a slash command", async () => {
     const root = tempRoot();
+    initCompany({ root, id: "extension-resume" });
     const { handlers, pi, commands } = fakePi({
       "company-root": root,
       "company-agent": "lead",
@@ -580,6 +640,16 @@ function fakeContext(cwd: string): {
 function tempRoot(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-company-extension-"));
   return root;
+}
+
+function withWorkingDirectory<T>(cwd: string, fn: () => T): T {
+  const previous = process.cwd();
+  process.chdir(cwd);
+  try {
+    return fn();
+  } finally {
+    process.chdir(previous);
+  }
 }
 
 function restoreEnv(name: string, value: string | undefined): void {

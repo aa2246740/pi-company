@@ -57,8 +57,10 @@ npm run build
 如果你习惯先启动 Pi，先把 pi-company 装成 Pi package：
 
 ```bash
+npm install -g pi-company
 pi install npm:pi-company
 cd ~/Documents/cmux/tarot-draw
+pi-company init
 pi
 ```
 
@@ -68,7 +70,9 @@ pi
 /company-resume
 ```
 
-`/company-resume` 会在当前目录初始化或恢复 `.pi-company`，注入当前 agent 的角色职责和权威 brief。默认 agent 是 `lead`，所以这是最接近普通 Pi 用户习惯的入口。
+`pi-company init` 会创建项目本地 `.pi-company/` 状态。`/company-resume` 只恢复已有 company，注入当前 agent 的角色职责和权威 brief。默认 agent 是 `lead`，所以这是最接近普通 Pi 用户习惯的入口。
+
+安装 Pi package 不等于让每个 `pi` 都变成 company session。普通目录里没有 `.pi-company/` 时，Pi 仍然是普通 Pi：pi-company 不会创建文件、不会注册 company tools、不会镜像人类输入、不会拦 provider 请求，也不会显示 company 工作面板。
 
 然后你主要用自然语言对 lead 说需求，例如：
 
@@ -151,7 +155,7 @@ package 通过 `package.json` 暴露编译后的扩展：
 ```json
 {
   "pi": {
-    "extensions": ["./dist/extensions"]
+    "extensions": ["./dist/extensions/company.js"]
   }
 }
 ```

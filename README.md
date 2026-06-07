@@ -64,8 +64,10 @@ npm run build
 If you are used to starting Pi first, install pi-company as a Pi package:
 
 ```bash
+npm install -g pi-company
 pi install npm:pi-company
 cd ~/Documents/cmux/tarot-draw
+pi-company init
 pi
 ```
 
@@ -75,7 +77,9 @@ Then run inside Pi:
 /company-resume
 ```
 
-`/company-resume` initializes or resumes `.pi-company` in the current directory, injects the current agent's role instructions, and injects the authoritative lead brief. The default agent is `lead`, so this is the most natural path for existing Pi users.
+`pi-company init` creates the project-local `.pi-company/` state. `/company-resume` resumes that existing company, injects the current agent's role instructions, and injects the authoritative lead brief. The default agent is `lead`, so this is the most natural path for existing Pi users.
+
+Installing the Pi package does not make every `pi` session a company session. In ordinary directories without `.pi-company/`, Pi stays ordinary: pi-company does not create files, register company tools, mirror human input, gate provider requests, or show the company desk panel.
 
 Then talk to lead in natural language:
 
@@ -221,7 +225,7 @@ The package exposes the compiled extension through `package.json`:
 ```json
 {
   "pi": {
-    "extensions": ["./dist/extensions"]
+    "extensions": ["./dist/extensions/company.js"]
   }
 }
 ```

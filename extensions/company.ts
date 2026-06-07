@@ -18,7 +18,6 @@ import {
   ensurePendingMergeReminder,
   getPrGateStatus,
   heartbeatAgent,
-  initCompany,
   launchCommand,
   listInbox,
   loadConfig,
@@ -111,7 +110,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
   pi.registerFlag("company-root", {
     description: "Project root containing .pi-company",
     type: "string",
-    default: process.cwd(),
+    default: "",
   });
   pi.registerFlag("company-agent", {
     description: "Current pi-company agent name",
@@ -134,7 +133,8 @@ export default function companyExtension(pi: ExtensionAPI): void {
     default: "3000",
   });
 
-  const root = configString(pi, "company-root", "PI_COMPANY_ROOT", process.cwd());
+  const explicitRoot = configString(pi, "company-root", "PI_COMPANY_ROOT", "");
+  const root = explicitRoot ? path.resolve(explicitRoot) : findCompanyRoot(process.cwd()) ?? process.cwd();
   const agentName = configString(pi, "company-agent", "PI_COMPANY_AGENT", "lead");
   const role = configString(pi, "company-role", "PI_COMPANY_ROLE", "lead");
   const lead = configString(pi, "company-lead", "PI_COMPANY_LEAD", "lead");
@@ -146,8 +146,16 @@ export default function companyExtension(pi: ExtensionAPI): void {
   let lastAutomaticRateLimitReportAt = 0;
   const activeProviderLeases: ProviderRequestLease[] = [];
 
-  function ensureInitialized(): void {
-    if (!loadConfig(root)) initCompany({ root });
+  function isCompanyActive(): boolean {
+    return loadConfig(root) !== null;
+  }
+
+  function requireCompany(): void {
+    if (!isCompanyActive()) throw new Error(noCompanyMessage(root));
+  }
+
+  function notifyNoCompany(ctx: ExtensionContext): void {
+    if (ctx.hasUI) ctx.ui.notify(noCompanyMessage(root), "error");
   }
 
   function recordLiveHeartbeat(): void {
@@ -178,7 +186,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
   }
 
   async function refreshUi(ctx: ExtensionContext): Promise<void> {
-    ensureInitialized();
+    if (!isCompanyActive()) return;
     const state = loadState(root);
     const current = state.agents[agentName];
     if (!ctx.hasUI) return;
@@ -190,6 +198,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
   }
 
   async function deliverInbox(ctx: ExtensionContext, mode: "auto" | "manual" = "auto"): Promise<void> {
+    if (!isCompanyActive()) return;
     if (delivering) return;
     if (mode === "auto" && !canAutoDeliverFollowUp(ctx)) {
       await refreshUi(ctx);
@@ -197,7 +206,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
     }
     delivering = true;
     try {
-      ensureInitialized();
+      requireCompany();
       ensurePendingMergeReminder(root, agentName);
       const state = loadState(root);
       const messages = listInbox(root, agentName)
@@ -234,6 +243,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
   }
 
   function startPolling(ctx: ExtensionContext): void {
+    if (!isCompanyActive()) return;
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = setInterval(() => {
       void deliverInbox(ctx, "auto").catch((error) => {
@@ -243,10 +253,11 @@ export default function companyExtension(pi: ExtensionAPI): void {
   }
 
   function startHeartbeat(): void {
+    if (!isCompanyActive()) return;
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     heartbeatTimer = setInterval(() => {
       try {
-        ensureInitialized();
+        requireCompany();
         recordLiveHeartbeat();
       } catch {
         // Heartbeat should not interrupt an agent turn.
@@ -256,7 +267,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     try {
-      ensureInitialized();
+      if (!isCompanyActive()) return;
       const state = loadState(root);
       const existing = state.agents[agentName];
       registerAgent(root, {
@@ -289,7 +300,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
     heartbeatTimer = null;
     await releaseAllProviderLeases();
     try {
-      ensureInitialized();
+      if (!isCompanyActive()) return;
       heartbeatAgent(root, { name: agentName, status: "offline" });
     } catch {
       // Shutdown must not fail because state cleanup failed.
@@ -297,7 +308,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("before_provider_request", async (event, ctx) => {
-    ensureInitialized();
+    if (!isCompanyActive()) return undefined;
     await waitForProviderBackoff(ctx);
     const state = loadState(root);
     const provider = providerNameFromRequest(event, ctx);
@@ -312,7 +323,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
 
   pi.on("after_provider_response", async (event, ctx) => {
     if (event.status !== 429) return;
-    ensureInitialized();
+    if (!isCompanyActive()) return;
     const retryAfter = typeof event.headers?.["retry-after"] === "string"
       ? ` retry-after=${event.headers["retry-after"]}`
       : "";
@@ -325,18 +336,20 @@ export default function companyExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("turn_end", async (_event, ctx) => {
+    if (!isCompanyActive()) return;
     await releaseOldestProviderLease();
     await refreshUi(ctx);
   });
 
   pi.on("agent_end", async (_event, ctx) => {
+    if (!isCompanyActive()) return;
     await releaseAllProviderLeases();
     await refreshUi(ctx);
   });
 
   pi.on("input", async (event, ctx) => {
     if (event.source !== "interactive") return { action: "continue" };
-    ensureInitialized();
+    if (!isCompanyActive()) return { action: "continue" };
     recordHumanSteering(root, agentName, event.text, event.streamingBehavior ?? null);
     await refreshUi(ctx);
     if (agentName !== lead) {
@@ -367,13 +380,20 @@ export default function companyExtension(pi: ExtensionAPI): void {
   pi.registerCommand("company-status", {
     description: "Refresh and show pi-company desk panel",
     handler: async (_args, ctx) => {
+      if (!isCompanyActive()) {
+        notifyNoCompany(ctx);
+        return;
+      }
       await refreshUi(ctx);
       if (ctx.hasUI) ctx.ui.notify(`pi-company status refreshed for ${agentName}`, "info");
     },
   });
 
   async function resumeCompany(ctx: ExtensionContext): Promise<void> {
-    ensureInitialized();
+    if (!isCompanyActive()) {
+      notifyNoCompany(ctx);
+      return;
+    }
     recordLiveHeartbeat();
     await refreshUi(ctx);
     await pi.sendUserMessage(renderResumePrompt(root, agentName, role, lead), { deliverAs: "followUp" });
@@ -397,6 +417,10 @@ export default function companyExtension(pi: ExtensionAPI): void {
   pi.registerCommand("company-brief", {
     description: "Inject the authoritative lead/global delivery brief",
     handler: async (_args, ctx) => {
+      if (!isCompanyActive()) {
+        notifyNoCompany(ctx);
+        return;
+      }
       await pi.sendUserMessage(renderLeadBrief(buildLeadBrief(root)), { deliverAs: "followUp" });
       await refreshUi(ctx);
     },
@@ -405,6 +429,10 @@ export default function companyExtension(pi: ExtensionAPI): void {
   pi.registerCommand("company-inbox", {
     description: "Inject unread pi-company mailbox messages into this agent",
     handler: async (_args, ctx) => {
+      if (!isCompanyActive()) {
+        notifyNoCompany(ctx);
+        return;
+      }
       await deliverInbox(ctx, "manual");
       if (ctx.hasUI) ctx.ui.notify(`Checked inbox for ${agentName}`, "info");
     },
@@ -413,6 +441,10 @@ export default function companyExtension(pi: ExtensionAPI): void {
   pi.registerCommand("company-ack", {
     description: "Acknowledge unread pi-company mailbox messages without injecting them",
     handler: async (_args, ctx) => {
+      if (!isCompanyActive()) {
+        notifyNoCompany(ctx);
+        return;
+      }
       const messages = listInbox(root, agentName);
       acknowledgeInbox(root, agentName, messages.map((message) => message.id));
       await refreshUi(ctx);
@@ -423,6 +455,10 @@ export default function companyExtension(pi: ExtensionAPI): void {
   pi.registerCommand("company-send", {
     description: "Send a pi-company message: /company-send <agent> <text>",
     handler: async (args, ctx) => {
+      if (!isCompanyActive()) {
+        notifyNoCompany(ctx);
+        return;
+      }
       const [to, ...rest] = args.trim().split(/\s+/);
       const text = rest.join(" ").trim();
       if (!to || !text) {
@@ -444,18 +480,38 @@ export default function companyExtension(pi: ExtensionAPI): void {
   pi.registerCommand("company-configure-models", {
     description: "Configure role or agent Pi model policy through choices",
     handler: async (_args, ctx) => {
+      if (!isCompanyActive()) {
+        notifyNoCompany(ctx);
+        return;
+      }
       const result = await configureModelPolicyInteractively(root, agentName, lead, ctx);
       await refreshUi(ctx);
       if (ctx.hasUI) ctx.ui.notify(result, "info");
     },
   });
 
-  registerTools(pi, {
-    root,
-    agentName,
-    lead,
-    refreshUi,
-  });
+  if (isCompanyActive()) {
+    registerTools(pi, {
+      root,
+      agentName,
+      lead,
+      refreshUi,
+    });
+  }
+}
+
+function findCompanyRoot(start: string): string | null {
+  let current = path.resolve(start);
+  for (;;) {
+    if (loadConfig(current)) return current;
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+function noCompanyMessage(root: string): string {
+  return `No pi-company project found at ${root}. Run pi-company init first, or start Pi from a directory that already contains .pi-company.`;
 }
 
 function renderResumePrompt(root: string, agentName: string, fallbackRole: string, lead: string): string {
