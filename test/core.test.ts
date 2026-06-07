@@ -1,0 +1,2925 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+import { describe, expect, it } from "vitest";
+import {
+  acknowledgeInbox,
+  abandonPr,
+  agentRateLimitResumeAt,
+  adoptIntegratedPr,
+  assignIssue,
+  blockTask,
+  buildLeadBrief,
+  clearRateLimit,
+  completeTask,
+  createIssue,
+  createPr,
+  ensureCoderWorktree,
+  ensurePendingMergeReminder,
+  getPrGateStatus,
+  heartbeatAgent,
+  initCompany,
+  launchCommand,
+  listInbox,
+  loadState,
+  markPrReady,
+  mergePr,
+  pendingMergeRequests,
+  recordEvent,
+  registerAgent,
+  recordAutomatedTests,
+  recordHumanSteering,
+  reportTask,
+  requestAgentSpawn,
+  requestMerge,
+  normalizeMessagePolicy,
+  rateLimitIsActive,
+  reportRateLimit,
+  startTask,
+  submitReview,
+  sendCompanyMessage,
+  renderLeadBrief,
+  setModelPolicy,
+  shouldAutoDeliverMessage,
+  syncRenderedRecords,
+  submitAcceptance,
+  submitTest,
+} from "../src/core/company.js";
+import { DEFAULT_MESSAGE_POLICY, DEFAULT_RATE_LIMIT_POLICY } from "../src/core/defaults.js";
+import { makeEvent } from "../src/core/events.js";
+import { companyPaths } from "../src/core/paths.js";
+import {
+  acquireProviderRequestLease,
+  providerQueueSnapshot,
+  releaseProviderRequestLease,
+} from "../src/core/provider-queue.js";
+import { classifyRateLimitText } from "../src/core/rate-limit.js";
+import { hasGateCaveat } from "../src/core/reducer.js";
+
+describe("pi-company core", () => {
+  it("classifies visible provider rate-limit failures from screen text", () => {
+    const result = classifyRateLimitText(`Error: 429 Too many requests
+Error: Retry failed after 3 attempts: 429 Too many requests`);
+
+    expect(result?.kind).toBe("provider_429");
+    expect(result?.reason).toContain("Retry failed after 3 attempts");
+  });
+
+  it("classifies visible quota failures separately from provider 429", () => {
+    const result = classifyRateLimitText("Quota exhausted. Account credits are used up.");
+
+    expect(result?.kind).toBe("quota_exhausted");
+  });
+
+  it("does not classify ordinary API usage documentation as quota exhaustion", () => {
+    const result = classifyRateLimitText(`usage object | null
+该对话补全请求的用量信息。
+usage.total_tokens integer 请求中使用的 token 总数。
+api-key: $PROVIDER_API_KEY`);
+
+    expect(result).toBeNull();
+  });
+
+  it("does not classify pi-company rate-limit status text as a fresh provider failure", () => {
+    const result = classifyRateLimitText(`rate-limit: recent provider_429 until 2099-01-01T00:01:00.000Z
+Sent msg_123 to lead (digest: organization rate-limit backoff until 2099-01-01T00:01:00.000Z)`);
+
+    expect(result).toBeNull();
+  });
+
+  it("keeps historical pi-company rate-limit reasons out of fresh screen-scan incidents", () => {
+    const result = classifyRateLimitText(`Rate Limit:
+- reason: old provider_429 storm from a previous scan
+Error: 429 Too many requests`);
+
+    expect(result?.kind).toBe("provider_429");
+    expect(result?.reason).toBe("Error: 429 Too many requests");
+  });
+
+  it("does not treat ordinary wake-policy wording as a provider failure", () => {
+    const result = classifyRateLimitText(`Sent msg_123 to coder-api (immediate: message type and rate limits allow wake)
+rate-limit: recent manual until 2099-01-01T00:01:00.000Z
+Rate limit 已过期，可以恢复正常工作`);
+
+    expect(result).toBeNull();
+  });
+
+  it("still recognizes explicit provider rate-limit exceeded failures", () => {
+    const result = classifyRateLimitText("Provider error: rate limit exceeded, retry later.");
+
+    expect(result?.kind).toBe("provider_429");
+  });
+
+  it("does not treat preventive guidance mentioning 429 as a fresh failure", () => {
+    const result = classifyRateLimitText("If a provider gate makes a worker wait a few seconds, that is expected and better than hitting 429.");
+
+    expect(result).toBeNull();
+  });
+
+  it("does not treat terminology guidance around 429 as a fresh failure", () => {
+    const result = classifyRateLimitText(
+      'Terms to avoid: use "provider throttling / request pressure" instead of making "429" primary user-facing language.',
+    );
+
+    expect(result).toBeNull();
+  });
+
+  it("recognizes explicit HTTP 429 failures", () => {
+    const result = classifyRateLimitText("Provider HTTP 429: Too many requests.");
+
+    expect(result?.kind).toBe("provider_429");
+  });
+
+  it("initializes a company with default roles and files", () => {
+    const root = tempRoot();
+    const state = initCompany({ root, id: "demo" });
+    const leadRole = fs.readFileSync(path.join(companyPaths(root).rolesDir, "lead.md"), "utf8");
+    const pmRole = fs.readFileSync(path.join(companyPaths(root).rolesDir, "pm.md"), "utf8");
+
+    expect(state.config?.id).toBe("demo");
+    expect(state.agents.lead.role).toBe("lead");
+    expect(state.agents.tester.role).toBe("tester");
+    expect(fs.existsSync(companyPaths(root).events)).toBe(true);
+    expect(fs.existsSync(path.join(companyPaths(root).rolesDir, "coder.md"))).toBe(true);
+    expect(leadRole).toContain("treat PM as product staff, not the final client");
+    expect(leadRole).toContain("do not bounce routine scope, copy, flow, style, or acceptance-criteria defaults back to the human");
+    expect(leadRole).toContain("execute the local merge instead of stopping at a merge request");
+    expect(pmRole).toContain("ask lead once with your recommended default and fallback");
+    expect(fs.readFileSync(path.join(root, ".gitignore"), "utf8")).toContain(".pi-company/");
+  });
+
+  it("does not reset an existing company when init is run again", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "first" });
+    registerAgent(root, {
+      name: "pm",
+      role: "pm",
+      cwd: root,
+      status: "online",
+    });
+
+    const state = initCompany({ root, id: "second" });
+
+    expect(state.config?.id).toBe("first");
+    expect(state.agents.pm.status).toBe("online");
+    const ignoreEntries = fs.readFileSync(path.join(root, ".gitignore"), "utf8")
+      .split(/\r?\n/)
+      .filter((line) => line.trim() === ".pi-company/");
+    expect(ignoreEntries).toHaveLength(1);
+  });
+
+  it("uses the current company yaml config after event replay", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "config-replay-demo" });
+    const configPath = companyPaths(root).config;
+    const config = fs.readFileSync(configPath, "utf8")
+      .replace("agent_cooldown_ms: 10000", "agent_cooldown_ms: 1234")
+      .replace("agent_max_immediate_per_minute: 6", "agent_max_immediate_per_minute: 7")
+      .replace("org_max_immediate_per_minute: 12", "org_max_immediate_per_minute: 8");
+    fs.writeFileSync(configPath, config, "utf8");
+
+    const state = loadState(root);
+
+    expect(state.config?.message_policy?.agent_cooldown_ms).toBe(1234);
+    expect(state.config?.message_policy?.agent_max_immediate_per_minute).toBe(7);
+    expect(state.config?.message_policy?.org_max_immediate_per_minute).toBe(8);
+  });
+
+  it("mirrors human steering sent to a worker into lead inbox", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "steering-demo" });
+    registerCoder(root, "coder-api");
+
+    const mirrored = recordHumanSteering(root, "coder-api", "Please keep this backwards compatible.", "steer");
+    const state = loadState(root);
+
+    expect(mirrored?.to).toBe("lead");
+    expect(state.human_steering).toHaveLength(1);
+    expect(state.inbox_counts.lead).toBe(1);
+    expect(listInbox(root, "lead")[0].type).toBe("human_steering");
+  });
+
+  it("acknowledges unread mailbox messages", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "inbox-demo" });
+    const mirrored = recordHumanSteering(root, "tester", "Check the edge case.", "followUp");
+
+    expect(listInbox(root, "lead")).toHaveLength(1);
+    acknowledgeInbox(root, "lead", [mirrored?.id ?? "missing"]);
+
+    expect(listInbox(root, "lead")).toHaveLength(0);
+    expect(loadState(root).inbox_counts.lead).toBe(0);
+  });
+
+  it("keeps inbox counts accurate for invalid or repeated acknowledgements", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "ack-guard-demo" });
+    const first = sendCompanyMessage(root, {
+      from: "lead",
+      to: "pm",
+      type: "assignment",
+      text: "Real message.",
+    });
+
+    expect(() => acknowledgeInbox(root, "pm", ["msg_missing"])).toThrow(/Unknown message msg_missing in pm's inbox/);
+    expect(loadState(root).inbox_counts.pm).toBe(1);
+    expect(listInbox(root, "pm")).toHaveLength(1);
+
+    recordEvent(root, makeEvent("message.delivered", "pm", {
+      to: "pm",
+      message_id: "msg_missing",
+    }));
+    expect(loadState(root).inbox_counts.pm).toBe(1);
+    expect(listInbox(root, "pm")).toHaveLength(1);
+
+    acknowledgeInbox(root, "pm", [first.id]);
+    expect(loadState(root).inbox_counts.pm).toBe(0);
+    expect(listInbox(root, "pm")).toHaveLength(0);
+
+    const second = sendCompanyMessage(root, {
+      from: "lead",
+      to: "pm",
+      type: "assignment",
+      text: "Second real message.",
+    });
+    acknowledgeInbox(root, "pm", [first.id]);
+    expect(loadState(root).inbox_counts.pm).toBe(1);
+    expect(listInbox(root, "pm").map((message) => message.id)).toEqual([second.id]);
+  });
+
+  it("requires delivered events to be authored by the inbox owner", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "delivery-owner-demo" });
+    const message = sendCompanyMessage(root, {
+      from: "lead",
+      to: "pm",
+      type: "assignment",
+      text: "Real message.",
+    });
+
+    recordEvent(root, makeEvent("message.delivered", "lead", {
+      to: "pm",
+      message_id: message.id,
+    }));
+    expect(loadState(root).inbox_counts.pm).toBe(1);
+    expect(listInbox(root, "pm").map((item) => item.id)).toEqual([message.id]);
+
+    acknowledgeInbox(root, "pm", [message.id]);
+    expect(loadState(root).inbox_counts.pm).toBe(0);
+    expect(listInbox(root, "pm")).toHaveLength(0);
+  });
+
+  it("ignores duplicate or unidentifiable message sent events during replay", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "sent-replay-guard-demo" });
+    const message = sendCompanyMessage(root, {
+      from: "lead",
+      to: "pm",
+      type: "assignment",
+      text: "Real message.",
+    });
+
+    recordEvent(root, makeEvent("message.sent", "lead", {
+      ...message,
+    }));
+    recordEvent(root, makeEvent("message.sent", "lead", {
+      to: "pm",
+      type: "assignment",
+      text: "Missing id.",
+    }));
+    recordEvent(root, makeEvent("message.sent", "lead", {
+      ...message,
+      to: "tester",
+    }));
+
+    expect(loadState(root).inbox_counts.pm).toBe(1);
+    expect(loadState(root).inbox_counts.tester).toBeUndefined();
+    expect(listInbox(root, "pm", true).map((item) => item.id)).toEqual([message.id]);
+  });
+
+  it("reconstructs inbox messages from valid sent events when mailbox files are missing", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "event-inbox-demo" });
+    recordEvent(root, makeEvent("message.sent", "lead", {
+      id: "msg_event_only",
+      ts: new Date().toISOString(),
+      from: "lead",
+      to: "pm",
+      type: "assignment",
+      text: "Event-only message.",
+    }));
+    recordEvent(root, makeEvent("message.sent", "lead", {
+      id: "msg_bad_from",
+      ts: new Date().toISOString(),
+      from: "coder-typo",
+      to: "pm",
+      type: "assignment",
+      text: "Bad sender identity.",
+    }));
+
+    expect(loadState(root).inbox_counts.pm).toBe(1);
+    expect(listInbox(root, "pm").map((message) => message.id)).toEqual(["msg_event_only"]);
+
+    acknowledgeInbox(root, "pm", ["msg_event_only"]);
+    expect(loadState(root).inbox_counts.pm).toBe(0);
+    expect(listInbox(root, "pm")).toHaveLength(0);
+  });
+
+  it("ignores invalid message types in replayed sent events", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "message-type-replay-guard-demo" });
+
+    recordEvent(root, makeEvent("message.sent", "lead", {
+      id: "msg_bad_type",
+      ts: new Date().toISOString(),
+      from: "lead",
+      to: "pm",
+      type: "not-a-message-type",
+      text: "Bad message.",
+    }));
+
+    expect(loadState(root).inbox_counts.pm).toBeUndefined();
+    expect(listInbox(root, "pm")).toHaveLength(0);
+  });
+
+  it("rejects inbox reads and acknowledgements for unknown agents", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "unknown-inbox-demo" });
+
+    expect(() => listInbox(root, "codre-typo")).toThrow(/Unknown agent codre-typo/);
+    expect(() => acknowledgeInbox(root, "codre-typo", ["msg_missing"])).toThrow(/Unknown agent codre-typo/);
+  });
+
+  it("rejects messages and human steering for unknown agents", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "message-auth-demo" });
+
+    expect(() => sendCompanyMessage(root, {
+      from: "lead",
+      to: "codre-typo",
+      type: "assignment",
+      text: "This should not disappear.",
+    })).toThrow(/Unknown message recipient codre-typo/);
+    expect(() => sendCompanyMessage(root, {
+      from: "coder-typo",
+      to: "lead",
+      type: "report",
+      text: "This should not impersonate a worker.",
+    })).toThrow(/Unknown message sender coder-typo/);
+    expect(() => recordHumanSteering(root, "coder-typo", "Steering typo.", "steer")).toThrow(
+      /Unknown human steering target coder-typo/,
+    );
+    expect(loadState(root).inbox_counts["codre-typo"]).toBeUndefined();
+    expect(() => listInbox(root, "codre-typo")).toThrow(/Unknown agent codre-typo/);
+  });
+
+  it("rejects invalid message types before writing mailbox state", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "message-type-runtime-guard-demo" });
+
+    expect(() => sendCompanyMessage(root, {
+      from: "lead",
+      to: "pm",
+      type: "not-a-message-type" as any,
+      text: "Bad message.",
+    })).toThrow(/Invalid message type not-a-message-type/);
+    expect(() => sendCompanyMessage(root, {
+      from: "lead",
+      to: "pm",
+      type: "assignment",
+      priority: "medium" as any,
+      text: "Bad priority.",
+    })).toThrow(/Invalid message priority medium/);
+    expect(loadState(root).inbox_counts.pm).toBeUndefined();
+    expect(listInbox(root, "pm")).toHaveLength(0);
+  });
+
+  it("opens issues and assigns ownership", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "issue-demo" });
+
+    const issue = createIssue(root, "lead", "Build the local PR flow", "Acceptance criteria here.");
+    assignIssue(root, "lead", issue.id, "tester");
+
+    const state = loadState(root);
+    expect(state.issues[issue.id].status).toBe("assigned");
+    expect(state.issues[issue.id].owner).toBe("tester");
+    const messages = listInbox(root, "tester");
+    expect(messages).toHaveLength(1);
+    expect(messages[0].type).toBe("assignment");
+    expect(messages[0].task).toBe(issue.id);
+    expect(messages[0].text).toContain("Build the local PR flow");
+  });
+
+  it("does not duplicate assignment notifications for the same owner", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "assignment-notification-demo" });
+
+    const issue = createIssue(root, "lead", "Research deployment", "Check static hosting.");
+    assignIssue(root, "lead", issue.id, "researcher");
+    assignIssue(root, "lead", issue.id, "researcher");
+
+    expect(loadState(root).issues[issue.id].owner).toBe("researcher");
+    expect(listInbox(root, "researcher")).toHaveLength(1);
+  });
+
+  it("allows only lead to create and assign issues", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "issue-auth-demo" });
+
+    expect(() => createIssue(root, "coder", "Worker-created issue", "Should be routed through lead.")).toThrow(
+      /Only lead can create issues/,
+    );
+    expect(Object.keys(loadState(root).issues)).toHaveLength(0);
+
+    const issue = createIssue(root, "lead", "Lead-created issue", "Acceptance criteria.");
+    expect(() => assignIssue(root, "coder", issue.id, "tester")).toThrow(/Only lead can assign issues/);
+    expect(loadState(root).issues[issue.id].owner).toBeNull();
+
+    assignIssue(root, "lead", issue.id, "tester");
+    expect(loadState(root).issues[issue.id].owner).toBe("tester");
+  });
+
+  it("blocks assignment to unknown issues or agents", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "assign-target-demo" });
+    const issue = createIssue(root, "lead", "Validate target", "Acceptance criteria.");
+
+    expect(() => assignIssue(root, "lead", "ISSUE-999", "tester")).toThrow(/Unknown issue ISSUE-999/);
+    expect(() => assignIssue(root, "lead", issue.id, "codre-typo")).toThrow(/Unknown agent codre-typo/);
+    expect(loadState(root).issues[issue.id].owner).toBeNull();
+  });
+
+  it("includes environment identity in launch commands", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "launch-demo" });
+
+    const command = launchCommand(root, "tester", "/tmp/company.js");
+
+    expect(command).toContain("PI_COMPANY_AGENT='tester'");
+    expect(command).toContain("PI_COMPANY_ROLE='tester'");
+    expect(command).toContain("PI_COMPANY_ROOT=");
+    expect(command).toContain("--company-agent 'tester'");
+  });
+
+  it("adds role model policy to launch commands", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "launch-model-demo" });
+
+    setModelPolicy(root, "lead", "role", "tester", {
+      provider: "openai-codex",
+      model: "gpt-5.4-mini",
+      thinking: "low",
+    });
+
+    const command = launchCommand(root, "tester", "/tmp/company.js");
+
+    expect(command).toContain("--provider 'openai-codex'");
+    expect(command).toContain("--model 'gpt-5.4-mini'");
+    expect(command).toContain("--thinking 'low'");
+  });
+
+  it("uses default model policy for dynamically added roles", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "launch-default-model-demo" });
+    setModelPolicy(root, "lead", "defaults", null, {
+      provider: "xiaomi-token-plan-cn",
+      model: "mimo-v2.5-pro",
+    });
+    const plan = requestAgentSpawn(root, "lead", "ops", "ops", "Handle rollout coordination.");
+    registerAgent(root, { ...plan, status: "planned" });
+
+    const command = launchCommand(root, "ops", "/tmp/company.js");
+
+    expect(command).toContain("--provider 'xiaomi-token-plan-cn'");
+    expect(command).toContain("--model 'mimo-v2.5-pro'");
+  });
+
+  it("requires self-test, automated tests, review, tester pass, and product acceptance before merge", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "pr-demo" });
+    registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Add mailbox polling",
+      issue_id: null,
+      summary: "Adds local inbox polling.",
+      branch: "pi-company/coder",
+      worktree: path.join(root, ".pi-company/worktrees/coder"),
+      base: "main",
+    });
+
+    expect(getPrGateStatus(root, pr.id).ready).toBe(false);
+    expect(getPrGateStatus(root, pr.id).blockers).toContain("PR is still draft");
+
+    markPrReady(root, "coder", pr.id, "npm test passed", "Validate mailbox delivery and no duplicate injection.");
+    recordAutomatedTests(root, "coder", pr.id, "passed", "npm test passed", "npm test");
+    submitReview(root, "reviewer", pr.id, "approve", "Diff and tests look correct.");
+    submitTest(root, "tester", pr.id, "pass", "Acceptance workflow passed.");
+
+    expect(getPrGateStatus(root, pr.id).ready).toBe(false);
+    expect(getPrGateStatus(root, pr.id).blockers).toContain("Missing PM/lead product acceptance");
+
+    submitAcceptance(root, "pm", pr.id, "accept", "Product behavior matches the request and acceptance criteria.");
+
+    expect(getPrGateStatus(root, pr.id)).toEqual({ ready: true, blockers: [] });
+    expect(loadState(root).prs[pr.id].status).toBe("ready_to_merge");
+  });
+
+  it("notifies lead when a coder marks a PR ready", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "ready-notify-demo" });
+    const plan = registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Ready notification",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate feature behavior.");
+
+    const messages = listInbox(root, "lead");
+    expect(messages).toHaveLength(1);
+    expect(messages[0].from).toBe("coder");
+    expect(messages[0].task).toBe(pr.id);
+    expect(messages[0].priority).toBe("high");
+    expect(messages[0].wake?.mode).toBe("immediate");
+    expect(messages[0].text).toContain("Assign reviewer/tester");
+  });
+
+  it("blocks positive PR evidence when the PR worktree has uncommitted changes", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "dirty-pr-evidence-demo" });
+    const plan = registerCoder(root);
+    ensureCoderWorktree(root, plan, true);
+    commitFile(plan.worktree ?? root, "feature.txt", "committed\n", "feature");
+    const pr = createPr(root, "coder", {
+      title: "Dirty worktree guard",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    fs.writeFileSync(path.join(plan.worktree ?? root, "feature.txt"), "uncommitted\n", "utf8");
+
+    expect(() => markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate behavior.")).toThrow(
+      /uncommitted changes/,
+    );
+
+    commitFile(plan.worktree ?? root, "feature.txt", "fixed\n", "feature fix");
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate behavior.");
+    fs.writeFileSync(path.join(plan.worktree ?? root, "feature.txt"), "new dirty change\n", "utf8");
+
+    expect(() => submitReview(root, "reviewer", pr.id, "approve", "Approved.")).toThrow(/uncommitted changes/);
+    expect(() => submitTest(root, "tester", pr.id, "pass", "Passed.")).toThrow(/uncommitted changes/);
+    expect(() => submitAcceptance(root, "pm", pr.id, "accept", "Accepted.")).toThrow(/uncommitted changes/);
+    expect(() => recordAutomatedTests(root, "tester", pr.id, "passed", "Automated checks passed.", "npm test")).toThrow(
+      /uncommitted changes/,
+    );
+    submitReview(root, "reviewer", pr.id, "request_changes", "Dirty worktree must be committed.");
+    submitTest(root, "tester", pr.id, "blocked", "Dirty worktree blocks validation.");
+    submitAcceptance(root, "pm", pr.id, "request_changes", "Dirty worktree blocks product acceptance.");
+  });
+
+  it("keeps lead brief authoritative when worker prose claims completion", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "lead-brief-truth-demo" });
+    const plan = registerCoder(root);
+    ensureCoderWorktree(root, plan, true);
+    const issue = createIssue(root, "lead", "Build chat API", "Deliver the API through local PR gates.");
+    assignIssue(root, "lead", issue.id, "coder");
+    commitFile(plan.worktree ?? root, "api.txt", "api work\n", "api work");
+    const pr = createPr(root, "coder", {
+      title: "Chat API",
+      issue_id: issue.id,
+      summary: "Chat API implementation.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    sendCompanyMessage(root, {
+      from: "coder",
+      to: "lead",
+      type: "report",
+      task: pr.id,
+      text: "PR 已合并，项目完成。",
+    });
+
+    const brief = buildLeadBrief(root);
+    const rendered = renderLeadBrief(brief);
+
+    expect(brief.can_claim_complete).toBe(false);
+    expect(brief.delivery_state).toBe("blocked");
+    expect(brief.incomplete_issues.map((item) => item.id)).toContain(issue.id);
+    expect(brief.prs.find((item) => item.id === pr.id)?.status).toBe("draft");
+    expect(rendered).toContain("do not say the project or feature is complete");
+    expect(rendered).toContain(`${pr.id} draft blocked`);
+    expect(rendered).toContain("PR is still draft");
+  });
+
+  it("surfaces PR evidence caveats in lead brief and PR messages", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "lead-evidence-ledger-demo" });
+    const plan = registerCoder(root);
+    ensureCoderWorktree(root, plan, true);
+    commitFile(plan.worktree ?? root, "ui.txt", "ui work\n", "ui work");
+    const pr = createPr(root, "coder", {
+      title: "Retro docs UI",
+      issue_id: null,
+      summary: "Implements the docs UI.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate docs UI.");
+    recordAutomatedTests(root, "coder", pr.id, "passed", "58 tests passed, 0 failed.", "npm test && npm run build");
+    submitTest(root, "tester", pr.id, "pass", "PASS. Full UI flow validated.");
+    submitAcceptance(root, "pm", pr.id, "accept", "Product behavior accepted.");
+    submitReview(root, "reviewer", pr.id, "approve", "Approve. Non-blocking follow-up: clean up interval lifecycle later.");
+
+    const brief = buildLeadBrief(root);
+    const rendered = renderLeadBrief(brief);
+    const message = sendCompanyMessage(root, {
+      from: "lead",
+      to: "reviewer",
+      type: "review",
+      task: pr.id,
+      text: "Please approve; all blockers are fixed.",
+    });
+
+    expect(getPrGateStatus(root, pr.id).blockers).toContain("Reviewer approval contains caveat");
+    expect(rendered).toContain("PR Evidence:");
+    expect(rendered).toContain("review: approve by reviewer caveat=true");
+    expect(rendered).toContain("recent risks:");
+    expect(rendered).toContain("Non-blocking follow-up");
+    expect(message.text).toContain("[pi-company PR gate snapshot]");
+    expect(message.text).toContain("gate: blocked: Reviewer approval contains caveat");
+    expect(message.text).toContain("review: approve by reviewer caveat=true");
+  });
+
+  it("blocks final completion when project root has untracked artifacts", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "root-untracked-brief-demo" });
+    runGit(root, ["add", ".gitignore"]);
+    runGit(root, ["commit", "-m", "track company gitignore"]);
+
+    expect(buildLeadBrief(root).can_claim_complete).toBe(true);
+
+    fs.writeFileSync(path.join(root, "PRODUCT.md"), "# Product notes\n", "utf8");
+    const brief = buildLeadBrief(root);
+    const rendered = renderLeadBrief(brief);
+
+    expect(brief.can_claim_complete).toBe(false);
+    expect(brief.delivery_state).toBe("blocked");
+    expect(brief.reasons_not_complete).toContain("project root has tracked, staged, or untracked changes");
+    expect(brief.root_worktree_changes).toContain("?? PRODUCT.md");
+    expect(rendered).toContain("Root Worktree Changes:");
+    expect(rendered).toContain("Resolve tracked, staged, or untracked project-root changes before final delivery");
+  });
+
+  it("does not count author self-review or self-test as independent gates", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "independent-gates-demo" });
+    registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Add feature",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: "pi-company/coder",
+      worktree: path.join(root, ".pi-company/worktrees/coder"),
+      base: "main",
+    });
+
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate feature behavior.");
+    recordAutomatedTests(root, "coder", pr.id, "passed", "Automated checks passed.", "npm test");
+    expect(() => submitReview(root, "coder", pr.id, "approve", "Self-approved.")).toThrow(/Only reviewer agents can submit reviews/);
+    expect(() => submitTest(root, "coder", pr.id, "pass", "Self-tested.")).toThrow(/Only tester agents can submit tests/);
+    expect(() => submitAcceptance(root, "coder", pr.id, "accept", "Self-accepted.")).toThrow(/Only lead or pm agents can accept product behavior/);
+
+    const selfGates = getPrGateStatus(root, pr.id);
+    expect(selfGates.ready).toBe(false);
+    expect(selfGates.blockers).toContain("Needs 1 reviewer approval(s)");
+    expect(selfGates.blockers).toContain("Missing tester validation");
+    expect(selfGates.blockers).toContain("Missing PM/lead product acceptance");
+
+    submitReview(root, "reviewer", pr.id, "approve", "Approved.");
+    submitTest(root, "tester", pr.id, "pass", "Passed.");
+    expect(getPrGateStatus(root, pr.id).blockers).toContain("Missing PM/lead product acceptance");
+    submitAcceptance(root, "pm", pr.id, "accept", "Product behavior accepted.");
+    expect(getPrGateStatus(root, pr.id)).toEqual({ ready: true, blockers: [] });
+  });
+
+  it("rejects PR evidence from unknown or wrong-role actors", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "pr-evidence-actor-demo" });
+    registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Evidence actors",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: "pi-company/coder",
+      worktree: path.join(root, ".pi-company/worktrees/coder"),
+      base: "main",
+    });
+
+    expect(() => markPrReady(root, "tester", pr.id, "Ready by tester.", "Validate feature.")).toThrow(
+      /Only coder can mark PR-001 ready/,
+    );
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate feature behavior.");
+    expect(() => submitReview(root, "reviewer-typo", pr.id, "approve", "Ghost approved.")).toThrow(
+      /Unknown submit reviews actor reviewer-typo/,
+    );
+    expect(() => submitTest(root, "tester-typo", pr.id, "pass", "Ghost passed.")).toThrow(
+      /Unknown submit tests actor tester-typo/,
+    );
+    expect(() => submitAcceptance(root, "pm-typo", pr.id, "accept", "Ghost accepted.")).toThrow(
+      /Unknown acceptance actor pm-typo/,
+    );
+    expect(() => submitAcceptance(root, "tester", pr.id, "accept", "Wrong role accepted.")).toThrow(
+      /Only lead or pm agents can accept product behavior/,
+    );
+    expect(() => recordAutomatedTests(root, "coder-typo", pr.id, "passed", "Ghost tests.", "npm test")).toThrow(
+      /Unknown automated test actor coder-typo/,
+    );
+    expect(() => recordAutomatedTests(root, "reviewer", pr.id, "passed", "Wrong role tests.", "npm test")).toThrow(
+      /Only coder, tester agents, or system can record automated tests/,
+    );
+  });
+
+  it("blocks PR creation by unknown or non-coder authors", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "pr-author-demo" });
+
+    expect(() => createPr(root, "coder-typo", {
+      title: "Ghost PR",
+      issue_id: null,
+      summary: "Ghost summary.",
+      branch: "feature",
+      worktree: root,
+      base: "main",
+    })).toThrow(/Unknown PR author coder-typo/);
+
+    expect(() => createPr(root, "reviewer", {
+      title: "Reviewer PR",
+      issue_id: null,
+      summary: "Reviewer summary.",
+      branch: "feature",
+      worktree: root,
+      base: "main",
+    })).toThrow(/Only coder agents can create PRs/);
+
+    expect(Object.keys(loadState(root).prs)).toHaveLength(0);
+  });
+
+  it("requires issue-bound PRs to be created by the assigned issue owner", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "pr-issue-owner-demo" });
+    const planA = registerCoder(root, "coder-a");
+    const planB = registerCoder(root, "coder-b");
+    const issue = createIssue(root, "lead", "Owned feature", "Acceptance criteria.");
+    const unassigned = createIssue(root, "lead", "Unassigned feature", "Acceptance criteria.");
+    assignIssue(root, "lead", issue.id, "coder-a");
+
+    expect(() => createPr(root, "coder-a", {
+      title: "Unknown issue PR",
+      issue_id: "ISSUE-999",
+      summary: "Should not be allowed.",
+      branch: planA.branch ?? "pi-company/coder-a",
+      worktree: planA.worktree ?? root,
+      base: "main",
+    })).toThrow(/Unknown PR issue ISSUE-999/);
+    expect(() => createPr(root, "coder-a", {
+      title: "Unassigned issue PR",
+      issue_id: unassigned.id,
+      summary: "Should not be allowed.",
+      branch: planA.branch ?? "pi-company/coder-a",
+      worktree: planA.worktree ?? root,
+      base: "main",
+    })).toThrow(/Issue ISSUE-002 is unassigned/);
+    expect(() => createPr(root, "coder-b", {
+      title: "Wrong owner PR",
+      issue_id: issue.id,
+      summary: "Should not be allowed.",
+      branch: planB.branch ?? "pi-company/coder-b",
+      worktree: planB.worktree ?? root,
+      base: "main",
+    })).toThrow(/Only coder-a can create PRs for ISSUE-001/);
+
+    const pr = createPr(root, "coder-a", {
+      title: "Owned PR",
+      issue_id: issue.id,
+      summary: "Allowed.",
+      branch: planA.branch ?? "pi-company/coder-a",
+      worktree: planA.worktree ?? root,
+      base: "main",
+    });
+    expect(pr.issue_id).toBe(issue.id);
+
+    expect(() => completeTask(root, "coder-a", issue.id, "Done.")).toThrow(/unmerged PR/);
+    const doneIssue = createIssue(root, "lead", "Already done feature", "Acceptance criteria.");
+    assignIssue(root, "lead", doneIssue.id, "coder-a");
+    completeTask(root, "coder-a", doneIssue.id, "Done.");
+    expect(() => createPr(root, "coder-a", {
+      title: "Done issue PR",
+      issue_id: doneIssue.id,
+      summary: "Should not be allowed.",
+      branch: planA.branch ?? "pi-company/coder-a",
+      worktree: planA.worktree ?? root,
+      base: "main",
+    })).toThrow(new RegExp(`Issue ${doneIssue.id} is already done`));
+
+    recordEvent(root, makeEvent("pr.created", "coder-b", {
+      pr: {
+        ...pr,
+        id: "PR-999",
+        author: "coder-b",
+        branch: planB.branch ?? "pi-company/coder-b",
+        worktree: planB.worktree ?? root,
+      },
+    }));
+    expect(loadState(root).prs["PR-999"]).toBeUndefined();
+  });
+
+  it("does not grant coder privileges from coder-prefixed agent names", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "coder-name-demo" });
+    const plan = requestAgentSpawn(root, "lead", "reviewer", "coder-reviewer", "Reviewer with misleading name.");
+
+    expect(plan.branch).toBeNull();
+    expect(plan.worktree).toBeNull();
+    registerAgent(root, {
+      ...plan,
+      status: "online",
+    });
+
+    expect(() => createPr(root, "coder-reviewer", {
+      title: "Misleading PR",
+      issue_id: null,
+      summary: "Should not be allowed.",
+      branch: "pi-company/coder-reviewer",
+      worktree: root,
+      base: "main",
+    })).toThrow(/Only coder agents can create PRs/);
+  });
+
+  it("normalizes coder PR short branch names to the registered git branch", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "branch-demo" });
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder-site", "Branch demo coder.");
+    registerAgent(root, {
+      ...plan,
+      status: "online",
+    });
+    runGit(root, ["checkout", "-b", "pi-company/coder-site"]);
+
+    const pr = createPr(root, "coder-site", {
+      title: "Demo",
+      issue_id: null,
+      summary: "Demo summary",
+      branch: "coder-site",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+
+    expect(pr.branch).toBe("pi-company/coder-site");
+  });
+
+  it("blocks PRs that do not match the author's registered branch or worktree", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "pr-ownership-demo" });
+    const ownedWorktree = path.join(root, ".pi-company/worktrees/coder-owned");
+    requestAgentSpawn(root, "lead", "coder", "coder-owned", "Owned PR coder.");
+    registerAgent(root, {
+      name: "coder-owned",
+      role: "coder",
+      cwd: ownedWorktree,
+      branch: "pi-company/coder-owned",
+      worktree: ownedWorktree,
+      status: "online",
+    });
+    runGit(root, ["checkout", "-b", "pi-company/coder-owned"]);
+    commitFile(root, "owned.txt", "owned\n", "owned branch");
+    runGit(root, ["checkout", "main"]);
+    runGit(root, ["checkout", "-b", "other-branch"]);
+    commitFile(root, "other.txt", "other\n", "other branch");
+    runGit(root, ["checkout", "main"]);
+
+    expect(() => createPr(root, "coder-owned", {
+      title: "Wrong branch",
+      issue_id: null,
+      summary: "Wrong branch.",
+      branch: "other-branch",
+      worktree: ownedWorktree,
+      base: "main",
+    })).toThrow(/does not match coder-owned's registered branch/);
+
+    expect(() => createPr(root, "coder-owned", {
+      title: "Wrong worktree",
+      issue_id: null,
+      summary: "Wrong worktree.",
+      branch: "pi-company/coder-owned",
+      worktree: root,
+      base: "main",
+    })).toThrow(/does not match coder-owned's registered worktree/);
+
+    const pr = createPr(root, "coder-owned", {
+      title: "Owned PR",
+      issue_id: null,
+      summary: "Owned branch and worktree.",
+      branch: "pi-company/coder-owned",
+      worktree: ownedWorktree,
+      base: "main",
+    });
+    expect(pr.branch).toBe("pi-company/coder-owned");
+  });
+
+  it("does not re-merge a PR already marked merged", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "merged-demo" });
+    const plan = registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Already merged",
+      issue_id: null,
+      summary: "Done",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    passPrGates(root, pr.id);
+    recordEvent(root, makeEvent("merge.completed", "lead", { pr_id: pr.id }));
+
+    const state = mergePr(root, "lead", pr.id, true);
+
+    expect(state.prs[pr.id].status).toBe("merged");
+  });
+
+  it("keeps merged PRs terminal across API calls and replay", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "merged-terminal-demo" });
+    const plan = registerCoder(root);
+    registerAgent(root, {
+      name: "reviewer",
+      role: "reviewer",
+      cwd: root,
+      status: "online",
+    });
+    registerAgent(root, {
+      name: "tester",
+      role: "tester",
+      cwd: root,
+      status: "online",
+    });
+    const pr = createPr(root, "coder", {
+      title: "Terminal PR",
+      issue_id: null,
+      summary: "Done",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    passPrGates(root, pr.id);
+    recordEvent(root, makeEvent("merge.completed", "lead", { pr_id: pr.id }));
+
+    expect(() => markPrReady(root, "coder", pr.id, "Late self-test.", "Late brief.")).toThrow(/already merged/);
+    expect(() => submitReview(root, "reviewer", pr.id, "request_changes", "Late review.")).toThrow(/already merged/);
+    expect(() => submitTest(root, "tester", pr.id, "fail", "Late test.")).toThrow(/already merged/);
+    expect(() => recordAutomatedTests(root, "tester", pr.id, "failed", "Late automated test.")).toThrow(/already merged/);
+
+    recordEvent(root, makeEvent("pr.ready", "coder", {
+      pr_id: pr.id,
+      self_test: "Bad replay self-test.",
+      test_brief: "Bad replay brief.",
+      head: null,
+    }));
+    recordEvent(root, makeEvent("review.submitted", "reviewer", {
+      pr_id: pr.id,
+      decision: "request_changes",
+      summary: "Bad replay review.",
+      head: null,
+    }));
+    recordEvent(root, makeEvent("test.submitted", "tester", {
+      pr_id: pr.id,
+      status: "fail",
+      summary: "Bad replay test.",
+      head: null,
+    }));
+    recordEvent(root, makeEvent("pr.automated_tests", "tester", {
+      pr_id: pr.id,
+      status: "failed",
+      summary: "Bad replay automated test.",
+      head: null,
+    }));
+
+    const state = loadState(root);
+    expect(state.prs[pr.id].status).toBe("merged");
+    expect(state.prs[pr.id].self_test).toBe("Self-test passed.");
+    expect(state.prs[pr.id].test_brief).toBe("Validate feature behavior.");
+    expect(state.prs[pr.id].reviews).toHaveLength(1);
+    expect(state.prs[pr.id].reviews[0].decision).toBe("approve");
+    expect(state.prs[pr.id].tests).toHaveLength(1);
+    expect(state.prs[pr.id].tests[0].status).toBe("pass");
+    expect(state.prs[pr.id].automated_tests?.status).toBe("passed");
+  });
+
+  it("downgrades repeated non-human wakes for the same agent to digest", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "wake-demo" });
+
+    const first = sendCompanyMessage(root, {
+      from: "lead",
+      to: "tester",
+      type: "assignment",
+      text: "Validate PR-001.",
+    });
+    const second = sendCompanyMessage(root, {
+      from: "lead",
+      to: "tester",
+      type: "assignment",
+      text: "Also validate PR-002.",
+    });
+    const human = recordHumanSteering(root, "tester", "This steering must still reach lead.", "steer");
+
+    expect(first.wake?.mode).toBe("immediate");
+    expect(second.wake?.mode).toBe("digest");
+    expect(second.wake?.reason).toContain("cooling down");
+    expect(second.wake?.next_wake_after).toBeTruthy();
+    expect(human?.wake?.mode).toBe("immediate");
+  });
+
+  it("uses short wake defaults because provider requests are gated separately", () => {
+    expect(DEFAULT_MESSAGE_POLICY.agent_cooldown_ms).toBe(10_000);
+    expect(DEFAULT_MESSAGE_POLICY.agent_max_immediate_per_minute).toBe(6);
+    expect(DEFAULT_MESSAGE_POLICY.org_max_immediate_per_minute).toBe(12);
+  });
+
+  it("rate-limits repeated urgent wakes for the same target", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "urgent-rate-demo" });
+
+    const first = sendCompanyMessage(root, {
+      from: "lead",
+      to: "tester",
+      type: "system",
+      priority: "urgent",
+      text: "First urgent check.",
+    });
+    const second = sendCompanyMessage(root, {
+      from: "lead",
+      to: "tester",
+      type: "system",
+      priority: "urgent",
+      text: "Second urgent check.",
+    });
+
+    expect(first.wake?.mode).toBe("immediate");
+    expect(first.wake?.reason).toContain("urgent priority");
+    expect(second.wake?.mode).toBe("digest");
+    expect(second.wake?.reason).toContain("cooling down");
+    expect(second.wake?.next_wake_after).toBeTruthy();
+  });
+
+  it("auto-delivers delayed wake messages only after next_wake_after", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "auto-delivery-demo" });
+
+    const first = sendCompanyMessage(root, {
+      from: "lead",
+      to: "tester",
+      type: "assignment",
+      text: "First assignment.",
+    });
+    const second = sendCompanyMessage(root, {
+      from: "lead",
+      to: "tester",
+      type: "assignment",
+      text: "Second assignment.",
+    });
+    const ordinaryDigest = sendCompanyMessage(root, {
+      from: "tester",
+      to: "lead",
+      type: "question",
+      text: "Non-urgent question.",
+    });
+
+    expect(shouldAutoDeliverMessage(first)).toBe(true);
+    expect(shouldAutoDeliverMessage(second)).toBe(false);
+    expect(second.wake?.next_wake_after).toBeTruthy();
+    expect(shouldAutoDeliverMessage(second, undefined, "tester", second.wake?.next_wake_after ?? "")).toBe(true);
+    expect(ordinaryDigest.wake?.mode).toBe("digest");
+    expect(ordinaryDigest.wake?.next_wake_after).toBeTruthy();
+    expect(shouldAutoDeliverMessage(ordinaryDigest, undefined, "lead", ordinaryDigest.ts)).toBe(false);
+    expect(shouldAutoDeliverMessage(ordinaryDigest, undefined, "lead", ordinaryDigest.wake?.next_wake_after ?? "")).toBe(true);
+
+    const legacyDigest = {
+      ...ordinaryDigest,
+      wake: { mode: "digest" as const, reason: "legacy digest without next_wake_after" },
+    };
+    expect(shouldAutoDeliverMessage(legacyDigest, loadState(root), "lead", legacyDigest.ts)).toBe(false);
+    expect(shouldAutoDeliverMessage(
+      legacyDigest,
+      loadState(root),
+      "lead",
+      new Date(Date.parse(legacyDigest.ts) + 60_000).toISOString(),
+    )).toBe(true);
+  });
+
+  it("records provider 429 incidents with exponential backoff and lead notification", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "rate-limit-provider-demo" });
+
+    const first = reportRateLimit(root, "tester", "429 Too many requests", "provider_429", "2099-01-01T00:00:00.000Z");
+
+    expect(first.rate_limit?.kind).toBe("provider_429");
+    expect(first.rate_limit?.retry_after_ms).toBe(DEFAULT_RATE_LIMIT_POLICY.initial_backoff_ms);
+    expect(first.rate_limit?.paused_until).toBe("2099-01-01T00:01:00.000Z");
+    expect(first.rate_limit?.incidents).toBe(1);
+    expect(rateLimitIsActive(first, "2099-01-01T00:00:30.000Z")).toBe(true);
+
+    const leadMessage = listInbox(root, "lead").at(-1);
+    expect(leadMessage?.type).toBe("system");
+    expect(leadMessage?.wake?.mode).toBe("digest");
+    expect(leadMessage?.wake?.next_wake_after).toBe("2099-01-01T00:01:00.000Z");
+
+    const second = reportRateLimit(root, "tester", "Retry failed after 3 attempts", "provider_429", "2099-01-01T00:00:30.000Z");
+
+    expect(second.rate_limit?.retry_after_ms).toBe(120_000);
+    expect(second.rate_limit?.paused_until).toBe("2099-01-01T00:02:30.000Z");
+    expect(second.rate_limit?.incidents).toBe(2);
+  });
+
+  it("queues a recovery wake for lead when lead reports a rate limit", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "lead-rate-limit-recovery-demo" });
+
+    const state = reportRateLimit(root, "lead", "Lead hit 429 Too many requests", "provider_429", "2099-01-01T00:00:00.000Z");
+    const leadMessage = listInbox(root, "lead").at(-1);
+
+    expect(state.rate_limit?.paused_until).toBe("2099-01-01T00:01:00.000Z");
+    expect(leadMessage?.from).toBe("system");
+    expect(leadMessage?.wake?.mode).toBe("digest");
+    expect(leadMessage?.wake?.next_wake_after).toBe("2099-01-01T00:01:00.000Z");
+    expect(shouldAutoDeliverMessage(leadMessage!, state, "lead", "2099-01-01T00:01:00.000Z")).toBe(true);
+  });
+
+  it("marks agents offline when their last heartbeat is stale", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "stale-agent-demo" });
+    recordEvent(root, {
+      ...makeEvent("agent.heartbeat", "pm", { name: "pm", status: "online" }),
+      ts: "2000-01-01T00:00:00.000Z",
+    });
+
+    const state = loadState(root);
+
+    expect(state.agents.pm.status).toBe("offline");
+    expect(state.agents.researcher.status).toBe("planned");
+  });
+
+  it("uses quota cooldown for exhausted-account incidents", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "quota-rate-limit-demo" });
+
+    const state = reportRateLimit(root, "system", "Quota exhausted", "quota_exhausted", "2099-01-01T00:00:00.000Z");
+
+    expect(state.rate_limit?.kind).toBe("quota_exhausted");
+    expect(state.rate_limit?.retry_after_ms).toBe(DEFAULT_RATE_LIMIT_POLICY.quota_backoff_ms);
+    expect(state.rate_limit?.paused_until).toBe("2099-01-01T00:10:00.000Z");
+  });
+
+  it("allows lead or system to clear a verified false-positive rate-limit backoff", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "clear-rate-limit-demo" });
+    reportRateLimit(root, "system", "False screen-scan quota hit", "quota_exhausted", "2099-01-01T00:00:00.000Z");
+    const delayed = sendCompanyMessage(root, {
+      from: "tester",
+      to: "lead",
+      type: "system",
+      priority: "high",
+      text: "Important test result queued during false backoff.",
+    });
+
+    expect(() => clearRateLimit(root, "tester", "Worker should not clear global protection.")).toThrow(
+      /Only lead can clear rate-limit backoff/,
+    );
+    expect(delayed.wake?.reason).toContain("organization rate-limit backoff");
+    expect(shouldAutoDeliverMessage(delayed, loadState(root), "lead", "2099-01-01T00:00:30.000Z")).toBe(false);
+    const state = clearRateLimit(root, "lead", "Verified false positive from API docs.", "2099-01-01T00:00:30.000Z");
+    const leadMessages = listInbox(root, "lead");
+
+    expect(state.rate_limit).toBeNull();
+    expect(rateLimitIsActive(state, "2099-01-01T00:00:31.000Z")).toBe(false);
+    expect(shouldAutoDeliverMessage(delayed, state, "lead", "2099-01-01T00:00:31.000Z")).toBe(true);
+    expect(leadMessages.at(-1)?.text).toContain("Rate-limit backoff cleared by lead");
+    expect(leadMessages.at(-1)?.wake?.mode).toBe("immediate");
+  });
+
+  it("pauses automatic wakes and staggers recovery by agent", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "rate-limit-stagger-demo" });
+    const state = reportRateLimit(root, "system", "429 storm", "provider_429", "2099-01-01T00:00:00.000Z");
+
+    expect(agentRateLimitResumeAt(state, "lead")).toBe("2099-01-01T00:01:00.000Z");
+    expect(agentRateLimitResumeAt(state, "pm")).toBe("2099-01-01T00:01:30.000Z");
+    expect(agentRateLimitResumeAt(state, "tester")).toBe("2099-01-01T00:03:00.000Z");
+
+    const leadMessage = sendCompanyMessage(root, {
+      from: "tester",
+      to: "lead",
+      type: "system",
+      priority: "high",
+      text: "Recover when safe.",
+    });
+    const testerMessage = sendCompanyMessage(root, {
+      from: "lead",
+      to: "tester",
+      type: "assignment",
+      text: "Resume validation after cooldown.",
+    });
+    const latestState = loadState(root);
+
+    expect(leadMessage.wake?.mode).toBe("digest");
+    expect(leadMessage.wake?.next_wake_after).toBe("2099-01-01T00:01:00.000Z");
+    expect(testerMessage.wake?.mode).toBe("digest");
+    expect(testerMessage.wake?.next_wake_after).toBe("2099-01-01T00:03:00.000Z");
+    expect(shouldAutoDeliverMessage(leadMessage, latestState, "lead", "2099-01-01T00:00:30.000Z")).toBe(false);
+    expect(shouldAutoDeliverMessage(leadMessage, latestState, "lead", "2099-01-01T00:01:00.000Z")).toBe(true);
+    expect(shouldAutoDeliverMessage(testerMessage, latestState, "tester", "2099-01-01T00:02:59.000Z")).toBe(false);
+    expect(shouldAutoDeliverMessage(testerMessage, latestState, "tester", "2099-01-01T00:03:00.000Z")).toBe(true);
+  });
+
+  it("keeps human steering immediate during organization rate-limit backoff", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "rate-limit-steering-demo" });
+    reportRateLimit(root, "system", "429 storm", "provider_429", "2099-01-01T00:00:00.000Z");
+
+    const mirrored = recordHumanSteering(root, "tester", "Pause this path and tell lead the new constraint.", "steer");
+    const state = loadState(root);
+
+    expect(mirrored?.type).toBe("human_steering");
+    expect(mirrored?.wake?.mode).toBe("immediate");
+    expect(shouldAutoDeliverMessage(mirrored!, state, "lead", "2099-01-01T00:00:30.000Z")).toBe(true);
+  });
+
+  it("queues provider requests by provider before 429s happen", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "provider-queue-demo" });
+    const policy = {
+      max_concurrent_per_provider: 1,
+      min_start_interval_ms: 0,
+      lease_timeout_ms: 1000,
+      poll_interval_ms: 5,
+    };
+
+    const first = await acquireProviderRequestLease(root, "same-provider", "coder-a", policy);
+    let secondResolved = false;
+    const secondPromise = acquireProviderRequestLease(root, "same-provider", "coder-b", policy)
+      .then((lease) => {
+        secondResolved = true;
+        return lease;
+      });
+
+    await sleep(20);
+    expect(secondResolved).toBe(false);
+    expect(providerQueueSnapshot(root, "same-provider").leases).toHaveLength(1);
+
+    await releaseProviderRequestLease(root, first);
+    const second = await secondPromise;
+
+    expect(second.waited_ms).toBeGreaterThan(0);
+    expect(providerQueueSnapshot(root, "same-provider").leases.map((lease) => lease.agent)).toEqual(["coder-b"]);
+    await releaseProviderRequestLease(root, second);
+    expect(providerQueueSnapshot(root, "same-provider").leases).toHaveLength(0);
+  });
+
+  it("spaces starts for the same provider even when concurrency is available", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "provider-start-spacing-demo" });
+    const policy = {
+      max_concurrent_per_provider: 3,
+      min_start_interval_ms: 25,
+      lease_timeout_ms: 1000,
+      poll_interval_ms: 5,
+    };
+
+    const first = await acquireProviderRequestLease(root, "same-provider", "coder-a", policy);
+    await releaseProviderRequestLease(root, first);
+    const second = await acquireProviderRequestLease(root, "same-provider", "coder-b", policy);
+
+    expect(Date.parse(second.started_at) - Date.parse(first.started_at)).toBeGreaterThanOrEqual(20);
+    await releaseProviderRequestLease(root, second);
+  });
+
+  it("normalizes invalid message policy values to safe defaults", () => {
+    const normalized = normalizeMessagePolicy({
+      immediate_types: ["assignment", "not-a-message-type"] as any,
+      always_wake_human_steering: "yes" as any,
+      agent_cooldown_ms: Number.NaN,
+      agent_max_immediate_per_minute: Infinity,
+      org_max_immediate_per_minute: -1,
+    });
+
+    expect(normalized.immediate_types).toEqual(["assignment"]);
+    expect(normalized.always_wake_human_steering).toBe(DEFAULT_MESSAGE_POLICY.always_wake_human_steering);
+    expect(normalized.agent_cooldown_ms).toBe(DEFAULT_MESSAGE_POLICY.agent_cooldown_ms);
+    expect(normalized.agent_max_immediate_per_minute).toBe(DEFAULT_MESSAGE_POLICY.agent_max_immediate_per_minute);
+    expect(normalized.org_max_immediate_per_minute).toBe(DEFAULT_MESSAGE_POLICY.org_max_immediate_per_minute);
+  });
+
+  it("blocks tester passes that contain caveats", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "caveat-demo" });
+    registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Fix UI",
+      issue_id: null,
+      summary: "Fixes UI.",
+      branch: "pi-company/coder",
+      worktree: path.join(root, ".pi-company/worktrees/coder"),
+      base: "main",
+    });
+
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate UI rendering.");
+    recordAutomatedTests(root, "tester", pr.id, "passed", "Static checks passed.", "npm test");
+    submitReview(root, "reviewer", pr.id, "approve", "Looks correct.");
+    submitTest(root, "tester", pr.id, "pass", "Passed. 注意事项：section 依赖 JS 才可见。");
+
+    const gates = getPrGateStatus(root, pr.id);
+    expect(gates.ready).toBe(false);
+    expect(gates.blockers).toContain("Tester pass contains caveat");
+  });
+
+  it("allows a latest clean reviewer approval to supersede that reviewer's caveated approval", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "reviewer-clean-reapproval-demo" });
+    registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Fix UI",
+      issue_id: null,
+      summary: "Fixes UI.",
+      branch: "pi-company/coder",
+      worktree: path.join(root, ".pi-company/worktrees/coder"),
+      base: "main",
+    });
+
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate UI rendering.");
+    submitTest(root, "tester", pr.id, "pass", "PASS. UI behavior validated.");
+    recordAutomatedTests(root, "tester", pr.id, "passed", "PASS. Site checks passed.", "npm test");
+    submitReview(root, "reviewer", pr.id, "approve", "Approve. Minor non-blocking cleanup remains.");
+    expect(getPrGateStatus(root, pr.id).blockers).toContain("Reviewer approval contains caveat");
+
+    submitReview(root, "reviewer", pr.id, "approve", "Approve. Rechecked current head; no merge blockers remain.");
+    submitAcceptance(root, "pm", pr.id, "accept", "Product behavior accepted.");
+
+    expect(getPrGateStatus(root, pr.id)).toEqual({ ready: true, blockers: [] });
+  });
+
+  it("allows latest clean tester and automated evidence to supersede caveated retries", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "caveat-rewrite-demo" });
+    registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Fix UI",
+      issue_id: null,
+      summary: "Fixes UI.",
+      branch: "pi-company/coder",
+      worktree: path.join(root, ".pi-company/worktrees/coder"),
+      base: "main",
+    });
+
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate UI rendering.");
+    submitReview(root, "reviewer", pr.id, "approve", "Looks correct.");
+    submitTest(root, "tester", pr.id, "pass", "PASS, but npm test has 2 pre-existing failures unrelated to this PR.");
+    recordAutomatedTests(root, "tester", pr.id, "passed", "npm test 63/65 passed; 2 pre-existing failures.", "npm test");
+
+    submitTest(root, "tester", pr.id, "pass", "PASS. UI behavior validated.");
+    recordAutomatedTests(root, "tester", pr.id, "passed", "PASS. Site checks passed.", "npm test");
+    submitAcceptance(root, "pm", pr.id, "accept", "Product behavior accepted.");
+
+    expect(getPrGateStatus(root, pr.id)).toEqual({ ready: true, blockers: [] });
+  });
+
+  it("allows resolved caveated evidence to be superseded by an explicit clean rerun", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "resolved-caveat-demo" });
+    registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Fix UI",
+      issue_id: null,
+      summary: "Fixes UI.",
+      branch: "pi-company/coder",
+      worktree: path.join(root, ".pi-company/worktrees/coder"),
+      base: "main",
+    });
+
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate UI rendering.");
+    submitReview(root, "reviewer", pr.id, "approve", "Looks correct.");
+    submitTest(root, "tester", pr.id, "pass", "PASS, but npm test has 2 pre-existing failures unrelated to this PR.");
+    recordAutomatedTests(root, "tester", pr.id, "passed", "npm test 63/65 passed; 2 pre-existing failures.", "npm test");
+
+    submitTest(root, "tester", pr.id, "pass", "Previous caveat resolved; npm test 85/85 passed, 0 failed.");
+    recordAutomatedTests(root, "tester", pr.id, "passed", "Environment fix resolved the 2 pre-existing failures. vitest run: 85 tests passed, 0 failed.", "npm test");
+    submitAcceptance(root, "pm", pr.id, "accept", "Product behavior accepted.");
+
+    expect(getPrGateStatus(root, pr.id)).toEqual({ ready: true, blockers: [] });
+  });
+
+  it("blocks product acceptance that contains unverified behavior caveats", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "acceptance-caveat-demo" });
+    registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Add analysis button",
+      issue_id: null,
+      summary: "Adds LLM analysis.",
+      branch: "pi-company/coder",
+      worktree: path.join(root, ".pi-company/worktrees/coder"),
+      base: "main",
+    });
+
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate analysis request and result rendering.");
+    recordAutomatedTests(root, "tester", pr.id, "passed", "Automated checks passed.", "npm test");
+    submitReview(root, "reviewer", pr.id, "approve", "Approved.");
+    submitTest(root, "tester", pr.id, "pass", "Analysis button workflow passed.");
+    submitAcceptance(root, "pm", pr.id, "accept", "Accept, but did not see the API request or rendered result.");
+
+    const gates = getPrGateStatus(root, pr.id);
+    expect(gates.ready).toBe(false);
+    expect(gates.blockers).toContain("Product acceptance contains caveat");
+
+    submitAcceptance(root, "pm", pr.id, "accept", "接受 MVP 状态，剩余交互教程和移动端导航作为后续 issue。");
+    expect(getPrGateStatus(root, pr.id).blockers).toContain("Product acceptance contains caveat");
+
+    submitAcceptance(root, "pm", pr.id, "accept", "Observed the analysis button trigger an API request and render the final result.");
+    expect(getPrGateStatus(root, pr.id)).toEqual({ ready: true, blockers: [] });
+  });
+
+  it("treats partial pass counts and Chinese failure language as caveats", () => {
+    expect(hasGateCaveat("PASS。npm test 63/65 通过，2 个 extension.test.ts 预存失败与本 PR 无关。")).toBe(true);
+    expect(hasGateCaveat("PASS。65/65 通过。")).toBe(false);
+    expect(hasGateCaveat("接受 MVP 状态，剩余 7 个占位符教程和移动端菜单作为后续 issue。")).toBe(true);
+    expect(hasGateCaveat("Approved, deferred mobile menu and placeholder tutorials to a future iteration.")).toBe(true);
+  });
+
+  it("does not treat explicit zero-risk approval wording as a caveat", () => {
+    expect(hasGateCaveat("回归风险为零，代码质量良好，可以合并。")).toBe(false);
+    expect(hasGateCaveat("风险：无。JS syntax valid.")).toBe(false);
+    expect(hasGateCaveat("构建成功，无错误，无警告。")).toBe(false);
+    expect(hasGateCaveat("Build passed with no warnings and no errors.")).toBe(false);
+    expect(hasGateCaveat("Build successful. Warning: chunk size >500kB is expected for Three.js library.")).toBe(false);
+    expect(hasGateCaveat("构建成功。警告：chunk 超过 500KB 属正常现象，不影响功能。")).toBe(false);
+    expect(hasGateCaveat("No regression risk. Approved.")).toBe(false);
+    expect(hasGateCaveat("Zero known risks. Approved.")).toBe(false);
+    expect(hasGateCaveat("Risk remains around browser validation.")).toBe(true);
+    expect(hasGateCaveat("Build passed but warnings remain around chunk size.")).toBe(true);
+    expect(hasGateCaveat("回归风险为零，但 npm test 79/83 passed.")).toBe(true);
+  });
+
+  it("allows resolved historical caveats while still blocking current failures", () => {
+    expect(hasGateCaveat("vitest run: 85 tests passed, 0 failed.")).toBe(false);
+    expect(hasGateCaveat("Previous caveat resolved; 85 tests passed, 0 failed.")).toBe(false);
+    expect(hasGateCaveat("前一版测试中的 4 个 extension 失败已解决，不再构成 caveat。")).toBe(false);
+    expect(hasGateCaveat("79 passed, 4 failed pre-existing failures unrelated to this PR.")).toBe(true);
+    expect(hasGateCaveat("Previous failures remain in browser validation.")).toBe(true);
+  });
+
+  it("clears agent current task when an issue is completed", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "done-task-demo" });
+    const issue = createIssue(root, "lead", "Ship feature", "Acceptance criteria.");
+    registerAgent(root, {
+      name: "pm",
+      role: "pm",
+      cwd: root,
+      status: "online",
+    });
+
+    assignIssue(root, "lead", issue.id, "pm");
+    reportTask(root, "pm", issue.id, "Scoped acceptance criteria.");
+    completeTask(root, "pm", issue.id, "Feature shipped.");
+
+    const state = loadState(root);
+    expect(state.issues[issue.id].status).toBe("done");
+    expect(state.agents.pm.status).toBe("idle");
+    expect(state.agents.pm.current_task).toBeNull();
+  });
+
+  it("keeps issue markdown snapshots synced with issue state changes", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "issue-snapshot-demo" });
+    registerAgent(root, {
+      name: "pm",
+      role: "pm",
+      cwd: root,
+      status: "online",
+    });
+    const issue = createIssue(root, "lead", "Scope feature", "Acceptance criteria.");
+    const issueFile = path.join(companyPaths(root).issuesDir, `${issue.id}.md`);
+
+    assignIssue(root, "lead", issue.id, "pm");
+    startTask(root, "pm", issue.id, "Scoping.");
+    reportTask(root, "pm", issue.id, "Acceptance criteria drafted.");
+
+    const activeSnapshot = fs.readFileSync(issueFile, "utf8");
+    expect(activeSnapshot).toContain("Status: in_progress");
+    expect(activeSnapshot).toContain("Owner: pm");
+
+    completeTask(root, "pm", issue.id, "Ready for implementation.");
+
+    const doneSnapshot = fs.readFileSync(issueFile, "utf8");
+    expect(doneSnapshot).toContain("Status: done");
+    expect(doneSnapshot).toContain("Owner: pm");
+
+    fs.writeFileSync(issueFile, "stale\n", "utf8");
+    syncRenderedRecords(root, loadState(root));
+    expect(fs.readFileSync(issueFile, "utf8")).toContain("Status: done");
+  });
+
+  it("keeps PR markdown snapshots synced with ready evidence", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "pr-snapshot-demo" });
+    const plan = registerCoder(root, "coder");
+    const issue = createIssue(root, "lead", "Implement feature", "Acceptance criteria.");
+    assignIssue(root, "lead", issue.id, "coder");
+    startTask(root, "coder", issue.id, "Starting implementation.");
+    const pr = createPr(root, "coder", {
+      title: "Feature",
+      issue_id: issue.id,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    const prFile = path.join(companyPaths(root).prsDir, `${pr.id}.md`);
+
+    expect(fs.readFileSync(prFile, "utf8")).toContain("## Self Test\n\npending");
+
+    markPrReady(root, "coder", pr.id, "Manual build passed.", "Validate the feature workflow.");
+
+    const readySnapshot = fs.readFileSync(prFile, "utf8");
+    expect(readySnapshot).toContain("Manual build passed.");
+    expect(readySnapshot).toContain("Validate the feature workflow.");
+    expect(readySnapshot).not.toContain("## Self Test\n\npending");
+
+    fs.writeFileSync(prFile, "stale\n", "utf8");
+    syncRenderedRecords(root, loadState(root));
+    expect(fs.readFileSync(prFile, "utf8")).toContain("Manual build passed.");
+  });
+
+  it("keeps completed issues terminal across API calls and replay", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "done-terminal-demo" });
+    const issue = createIssue(root, "lead", "Terminal issue", "Acceptance criteria.");
+    assignIssue(root, "lead", issue.id, "tester");
+    completeTask(root, "tester", issue.id, "Done.");
+
+    expect(() => assignIssue(root, "lead", issue.id, "pm")).toThrow(/Issue ISSUE-001 is already done/);
+    expect(() => startTask(root, "tester", issue.id, "Restarting.")).toThrow(/Issue ISSUE-001 is already done/);
+    expect(() => reportTask(root, "tester", issue.id, "Late report.")).toThrow(/Issue ISSUE-001 is already done/);
+    expect(() => blockTask(root, "tester", issue.id, "Late block.")).toThrow(/Issue ISSUE-001 is already done/);
+    completeTask(root, "tester", issue.id, "Duplicate complete.");
+
+    recordEvent(root, makeEvent("issue.assigned", "lead", { issue_id: issue.id, owner: "pm" }));
+    recordEvent(root, makeEvent("task.started", "tester", { issue_id: issue.id, note: "Bad replay start." }));
+    recordEvent(root, makeEvent("task.blocked", "tester", { issue_id: issue.id, reason: "Bad replay block." }));
+    recordEvent(root, makeEvent("task.reported", "tester", { issue_id: issue.id, note: "Bad replay report." }));
+
+    const state = loadState(root);
+    expect(state.issues[issue.id].status).toBe("done");
+    expect(state.issues[issue.id].owner).toBe("tester");
+    expect(state.agents.tester.current_task).toBeNull();
+  });
+
+  it("ignores invalid historical events during state replay", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "replay-guard-demo" });
+    registerCoder(root);
+    const issue = createIssue(root, "lead", "Replay guarded issue", "Acceptance criteria.");
+
+    recordEvent(root, makeEvent("issue.assigned", "lead", { issue_id: issue.id, owner: "codre-typo" }));
+    recordEvent(root, makeEvent("issue.assigned", "coder", { issue_id: issue.id, owner: "tester" }));
+    recordEvent(root, makeEvent("human_steering.received", "coder-typo", { target_agent: "coder-typo", text: "Bad steering." }));
+    recordEvent(root, makeEvent("message.sent", "lead", { to: "codre-typo", type: "assignment", text: "Bad message." }));
+    let state = loadState(root);
+    expect(state.issues[issue.id].status).toBe("open");
+    expect(state.issues[issue.id].owner).toBeNull();
+    expect(state.human_steering).toHaveLength(0);
+    expect(state.inbox_counts["codre-typo"]).toBeUndefined();
+
+    assignIssue(root, "lead", issue.id, "tester");
+    recordEvent(root, makeEvent("task.completed", "coder", { issue_id: issue.id, summary: "Wrong owner completed." }));
+    state = loadState(root);
+    expect(state.issues[issue.id].status).toBe("assigned");
+
+    const plan = loadState(root).agents.coder;
+    const pr = createPr(root, "coder", {
+      title: "Replay guarded PR",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    recordEvent(root, makeEvent("pr.created", "coder-typo", {
+      pr: {
+        ...pr,
+        id: "PR-999",
+        author: "coder-typo",
+        branch: "pi-company/coder-typo",
+      },
+    }));
+    recordEvent(root, makeEvent("pr.ready", "lead", {
+      pr_id: pr.id,
+      self_test: "Ready by wrong actor.",
+      test_brief: "Validate feature.",
+      head: null,
+    }));
+    recordEvent(root, makeEvent("pr.automated_tests", "reviewer", {
+      pr_id: pr.id,
+      status: "passed",
+      summary: "Wrong role tests.",
+      command: "npm test",
+      head: null,
+    }));
+    recordEvent(root, makeEvent("review.submitted", "reviewer-typo", {
+      pr_id: pr.id,
+      decision: "approve",
+      summary: "Ghost approved.",
+      head: null,
+    }));
+    recordEvent(root, makeEvent("test.submitted", "tester-typo", {
+      pr_id: pr.id,
+      status: "pass",
+      summary: "Ghost passed.",
+      head: null,
+    }));
+    recordEvent(root, makeEvent("merge.completed", "coder", { pr_id: pr.id }));
+
+    state = loadState(root);
+    expect(state.prs["PR-999"]).toBeUndefined();
+    expect(state.prs[pr.id].status).toBe("draft");
+    expect(state.prs[pr.id].self_test).toBeNull();
+    expect(state.prs[pr.id].automated_tests).toBeNull();
+    expect(state.prs[pr.id].reviews).toHaveLength(0);
+    expect(state.prs[pr.id].tests).toHaveLength(0);
+    expect(getPrGateStatus(root, pr.id).ready).toBe(false);
+  });
+
+  it("ignores invalid issue creation replay events", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "issue-replay-guard-demo" });
+    const issue = createIssue(root, "lead", "Real issue", "Acceptance criteria.");
+    assignIssue(root, "lead", issue.id, "tester");
+    completeTask(root, "tester", issue.id, "Done.");
+
+    recordEvent(root, makeEvent("issue.created", "coder-rogue", {
+      issue: {
+        ...issue,
+        id: "ISSUE-999",
+        title: "Rogue issue",
+        status: "open",
+        owner: "coder-rogue",
+        created_by: "coder-rogue",
+      },
+    }));
+    recordEvent(root, makeEvent("issue.created", "lead", {
+      issue: {
+        ...issue,
+        title: "Overwrite real issue",
+        status: "open",
+        owner: null,
+      },
+    }));
+    recordEvent(root, makeEvent("issue.created", "lead", {
+      issue: {
+        ...issue,
+        id: "ISSUE-998",
+        title: "Pre-owned issue",
+        status: "assigned",
+        owner: "tester",
+      },
+    }));
+    recordEvent(root, makeEvent("issue.created", "lead", {
+      issue: {
+        ...issue,
+        id: "ISSUE-997",
+        title: "Wrong creator issue",
+        status: "open",
+        owner: null,
+        created_by: "coder-rogue",
+      },
+    }));
+
+    const state = loadState(root);
+    expect(state.issues["ISSUE-999"]).toBeUndefined();
+    expect(state.issues["ISSUE-998"]).toBeUndefined();
+    expect(state.issues["ISSUE-997"]).toBeUndefined();
+    expect(state.issues[issue.id].title).toBe("Real issue");
+    expect(state.issues[issue.id].status).toBe("done");
+    expect(state.issues[issue.id].owner).toBe("tester");
+  });
+
+  it("ignores invalid PR creation replay events", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "pr-replay-guard-demo" });
+    const plan = registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Real PR",
+      issue_id: null,
+      summary: "Real summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    passPrGates(root, pr.id);
+    recordEvent(root, makeEvent("merge.completed", "lead", { pr_id: pr.id }));
+
+    recordEvent(root, makeEvent("pr.created", "lead", {
+      pr: {
+        ...pr,
+        id: "PR-999",
+        title: "Forged PR",
+        status: "draft",
+      },
+    }));
+    recordEvent(root, makeEvent("pr.created", "coder", {
+      pr: {
+        ...pr,
+        title: "Overwrite PR",
+        status: "draft",
+      },
+    }));
+    recordEvent(root, makeEvent("pr.created", "coder", {
+      pr: {
+        ...pr,
+        id: "PR-998",
+        title: "Ready at creation",
+        status: "ready_to_merge",
+      },
+    }));
+
+    const state = loadState(root);
+    expect(state.prs["PR-999"]).toBeUndefined();
+    expect(state.prs["PR-998"]).toBeUndefined();
+    expect(state.prs[pr.id].title).toBe("Real PR");
+    expect(state.prs[pr.id].status).toBe("merged");
+  });
+
+  it("ignores invalid PR gate evidence values during replay", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "gate-evidence-replay-guard-demo" });
+    const plan = registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Real PR",
+      issue_id: null,
+      summary: "Real summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate behavior.");
+
+    recordEvent(root, makeEvent("pr.automated_tests", "tester", {
+      pr_id: pr.id,
+      status: "passed-ish",
+      summary: "Invalid automated status.",
+      command: "npm test",
+      head: null,
+    }));
+    recordEvent(root, makeEvent("review.submitted", "reviewer", {
+      pr_id: pr.id,
+      decision: "approve-ish",
+      summary: "Invalid review decision.",
+      head: null,
+    }));
+    recordEvent(root, makeEvent("test.submitted", "tester", {
+      pr_id: pr.id,
+      status: "pass-ish",
+      summary: "Invalid test status.",
+      head: null,
+    }));
+
+    const state = loadState(root);
+    expect(state.prs[pr.id].automated_tests).toBeNull();
+    expect(state.prs[pr.id].reviews).toHaveLength(0);
+    expect(state.prs[pr.id].tests).toHaveLength(0);
+    expect(getPrGateStatus(root, pr.id).ready).toBe(false);
+  });
+
+  it("ignores empty PR ready evidence during replay", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "pr-ready-replay-guard-demo" });
+    const plan = registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Real PR",
+      issue_id: null,
+      summary: "Real summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+
+    recordEvent(root, makeEvent("pr.ready", "coder", {
+      pr_id: pr.id,
+      self_test: "   ",
+      test_brief: "",
+      head: null,
+    }));
+
+    const state = loadState(root);
+    expect(state.prs[pr.id].status).toBe("draft");
+    expect(state.prs[pr.id].self_test).toBeNull();
+    expect(state.prs[pr.id].test_brief).toBeNull();
+  });
+
+  it("rejects invalid PR gate evidence values before writing events", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "gate-evidence-runtime-guard-demo" });
+    const plan = registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Real PR",
+      issue_id: null,
+      summary: "Real summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+
+    expect(() => submitReview(root, "reviewer", pr.id, "approve-ish" as any, "Invalid review.")).toThrow(
+      /Invalid review decision approve-ish/,
+    );
+    expect(() => submitTest(root, "tester", pr.id, "pass-ish" as any, "Invalid test.")).toThrow(
+      /Invalid test status pass-ish/,
+    );
+    expect(() => recordAutomatedTests(root, "tester", pr.id, "passed-ish" as any, "Invalid automated test.")).toThrow(
+      /Invalid automated test status passed-ish/,
+    );
+    expect(() => submitAcceptance(root, "pm", pr.id, "accept-ish" as any, "Invalid acceptance.")).toThrow(
+      /Invalid acceptance decision accept-ish/,
+    );
+
+    const state = loadState(root);
+    expect(state.prs[pr.id].reviews).toHaveLength(0);
+    expect(state.prs[pr.id].tests).toHaveLength(0);
+    expect(state.prs[pr.id].acceptances ?? []).toHaveLength(0);
+    expect(state.prs[pr.id].automated_tests).toBeNull();
+  });
+
+  it("rejects empty PR ready evidence before writing events", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "pr-ready-runtime-guard-demo" });
+    const plan = registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Real PR",
+      issue_id: null,
+      summary: "Real summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+
+    expect(() => markPrReady(root, "coder", pr.id, "   ", "Validate behavior.")).toThrow(/self-test evidence/);
+    expect(() => markPrReady(root, "coder", pr.id, "Self-test passed.", "")).toThrow(/test brief/);
+
+    const state = loadState(root);
+    expect(state.prs[pr.id].status).toBe("draft");
+    expect(state.prs[pr.id].self_test).toBeNull();
+    expect(state.prs[pr.id].test_brief).toBeNull();
+  });
+
+  it("ignores merge completion replay when PR gates are not ready", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "merge-complete-replay-demo" });
+    const plan = registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Draft PR",
+      issue_id: null,
+      summary: "Draft summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+
+    recordEvent(root, makeEvent("merge.completed", "lead", { pr_id: pr.id }));
+
+    const state = loadState(root);
+    expect(state.prs[pr.id].status).toBe("draft");
+    expect(state.prs[pr.id].merged_at).toBeUndefined();
+  });
+
+  it("keeps head-anchored merge completion terminal with complete gate evidence", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "merge-complete-head-demo" });
+    const plan = registerCoder(root);
+    runGit(root, ["checkout", "-b", plan.branch ?? "pi-company/coder"]);
+    commitFile(root, "feature.txt", "done\n", "feature");
+    runGit(root, ["checkout", "main"]);
+    const pr = createPr(root, "coder", {
+      title: "Merged under old gate rules",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate behavior.");
+    recordAutomatedTests(root, "tester", pr.id, "passed", "Automated checks passed.", "npm test");
+    submitReview(root, "reviewer", pr.id, "approve", "Approved.");
+    submitTest(root, "tester", pr.id, "pass", "Passed.");
+    submitAcceptance(root, "pm", pr.id, "accept", "Product behavior accepted.");
+
+    recordEvent(root, makeEvent("merge.completed", "lead", {
+      pr_id: pr.id,
+      head: pr.head,
+    }));
+
+    const state = loadState(root);
+    expect(state.prs[pr.id].status).toBe("merged");
+  });
+
+  it("replays lead-requested merge after a PR branch advances and coder marks the new head ready", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "merge-complete-advanced-head-demo" });
+    const plan = registerCoder(root);
+    const branch = plan.branch ?? "pi-company/coder";
+    runGit(root, ["checkout", "-b", branch]);
+    commitFile(root, "feature.txt", "first\n", "feature v1");
+    runGit(root, ["checkout", "main"]);
+    const issue = createIssue(root, "lead", "Implement feature", "Acceptance criteria.");
+    assignIssue(root, "lead", issue.id, "coder");
+    startTask(root, "coder", issue.id, "Starting feature.");
+    const pr = createPr(root, "coder", {
+      title: "Advanced branch PR",
+      issue_id: issue.id,
+      summary: "Feature summary.",
+      branch,
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    const originalHead = pr.head;
+
+    runGit(root, ["checkout", branch]);
+    commitFile(root, "feature.txt", "second\n", "feature v2");
+    const advancedHead = gitOutput(root, ["rev-parse", branch]).trim();
+    expect(advancedHead).not.toBe(originalHead);
+
+    markPrReady(root, "coder", pr.id, "Self-test passed on the advanced head.", "Validate feature behavior.");
+    recordAutomatedTests(root, "tester", pr.id, "passed", "Automated checks passed.", "npm test");
+    submitReview(root, "reviewer", pr.id, "approve", "Approved.");
+    submitTest(root, "tester", pr.id, "pass", "Passed.");
+    submitAcceptance(root, "pm", pr.id, "accept", "Product behavior accepted.");
+    recordEvent(root, makeEvent("merge.requested", "lead", { pr_id: pr.id }));
+    recordEvent(root, makeEvent("merge.completed", "lead", {
+      pr_id: pr.id,
+      head: advancedHead,
+    }));
+
+    const state = loadState(root);
+    expect(state.prs[pr.id].head).toBe(advancedHead);
+    expect(state.prs[pr.id].status).toBe("merged");
+    expect(state.issues[issue.id].status).toBe("done");
+  });
+
+  it("keeps lead merge completion terminal when an old mergeability conflict is resolved by a later head", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "resolved-conflict-merge-complete-demo" });
+    const plan = registerCoder(root);
+    const branch = plan.branch ?? "pi-company/coder";
+    runGit(root, ["checkout", "-b", branch]);
+    commitFile(root, "PRODUCT.md", "branch version\n", "branch product");
+    runGit(root, ["checkout", "main"]);
+    commitFile(root, "PRODUCT.md", "main version\n", "main product");
+    const pr = createPr(root, "coder", {
+      title: "Resolved conflict PR",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch,
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    expect(loadState(root).prs[pr.id].mergeable?.status).toBe("conflict");
+
+    runGit(root, ["checkout", branch]);
+    const merge = spawnSync("git", ["-C", root, "merge", "main"], { encoding: "utf8" });
+    expect(merge.status).not.toBe(0);
+    fs.writeFileSync(path.join(root, "PRODUCT.md"), "resolved version\n", "utf8");
+    runGit(root, ["add", "PRODUCT.md"]);
+    runGit(root, ["commit", "-m", "resolve product conflict"]);
+    runGit(root, ["checkout", "main"]);
+    const resolvedHead = gitOutput(root, ["rev-parse", branch]).trim();
+
+    markPrReady(root, "coder", pr.id, "Self-test passed after conflict resolution.", "Validate resolved product content.");
+    recordAutomatedTests(root, "tester", pr.id, "passed", "Automated checks passed.", "npm test");
+    submitReview(root, "reviewer", pr.id, "approve", "Approved.");
+    submitTest(root, "tester", pr.id, "pass", "Passed.");
+    submitAcceptance(root, "pm", pr.id, "accept", "Product behavior accepted.");
+    recordEvent(root, makeEvent("merge.requested", "lead", { pr_id: pr.id }));
+    recordEvent(root, makeEvent("merge.completed", "lead", {
+      pr_id: pr.id,
+      head: resolvedHead,
+    }));
+
+    const state = loadState(root);
+    expect(state.prs[pr.id].head).toBe(resolvedHead);
+    expect(state.prs[pr.id].status).toBe("merged");
+  });
+
+  it("keeps lead-requested merge completion terminal with complete gate evidence", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "legacy-merge-complete-demo" });
+    const plan = registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Legacy merged PR",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate behavior.");
+    recordAutomatedTests(root, "tester", pr.id, "passed", "Automated checks passed.", "npm test");
+    submitReview(root, "reviewer", pr.id, "approve", "Approved.");
+    submitTest(root, "tester", pr.id, "pass", "Passed.");
+    submitAcceptance(root, "pm", pr.id, "accept", "Product behavior accepted.");
+
+    recordEvent(root, makeEvent("merge.requested", "lead", { pr_id: pr.id }));
+    recordEvent(root, makeEvent("merge.completed", "lead", { pr_id: pr.id }));
+
+    const state = loadState(root);
+    expect(state.prs[pr.id].status).toBe("merged");
+  });
+
+  it("keeps manual merge note terminal with complete gate evidence", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "legacy-manual-merge-demo" });
+    const plan = registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Legacy manual merge",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate behavior.");
+    recordAutomatedTests(root, "tester", pr.id, "passed", "Static smoke passed.", "npm test");
+    submitReview(root, "reviewer", pr.id, "approve", "Approved.");
+    submitTest(root, "tester", pr.id, "pass", "Passed.");
+    submitAcceptance(root, "pm", pr.id, "accept", "Product behavior accepted.");
+
+    recordEvent(root, makeEvent("merge.completed", "lead", {
+      pr_id: pr.id,
+      note: "Manual git merge completed after gates passed.",
+    }));
+
+    const state = loadState(root);
+    expect(state.prs[pr.id].status).toBe("merged");
+  });
+
+  it("ignores head-anchored merge completion when the head does not match the PR", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "merge-complete-head-mismatch-demo" });
+    const plan = registerCoder(root);
+    runGit(root, ["checkout", "-b", plan.branch ?? "pi-company/coder"]);
+    commitFile(root, "feature.txt", "done\n", "feature");
+    runGit(root, ["checkout", "main"]);
+    const pr = createPr(root, "coder", {
+      title: "Forged head merge",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+
+    recordEvent(root, makeEvent("merge.completed", "lead", {
+      pr_id: pr.id,
+      head: "0000000000000000000000000000000000000000",
+    }));
+
+    const state = loadState(root);
+    expect(state.prs[pr.id].status).toBe("draft");
+    expect(state.prs[pr.id].merged_at).toBeUndefined();
+  });
+
+  it("ignores merge request replay when PR gates are not ready", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "merge-request-replay-demo" });
+    const plan = registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Draft PR",
+      issue_id: null,
+      summary: "Draft summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+
+    recordEvent(root, makeEvent("merge.requested", "coder", { pr_id: pr.id }));
+
+    const state = loadState(root);
+    expect(state.prs[pr.id].status).toBe("draft");
+    expect(state.prs[pr.id].merge_requested_at).toBeUndefined();
+  });
+
+  it("keeps valid legacy replay events compatible with newer invariants", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "legacy-replay-demo" });
+    const worktree = path.join(root, ".pi-company/worktrees/coder-site");
+    requestAgentSpawn(root, "lead", "coder", "coder-site", "Legacy coder.");
+    registerAgent(root, {
+      name: "coder-site",
+      role: "coder",
+      cwd: worktree,
+      branch: "pi-company/coder-site",
+      worktree,
+      status: "online",
+    });
+    const issue = createIssue(root, "lead", "Legacy unassigned task", "Acceptance criteria.");
+
+    recordEvent(root, makeEvent("task.completed", "coder-site", {
+      issue_id: issue.id,
+      summary: "Legacy task completed before owner-only enforcement.",
+    }));
+    recordEvent(root, makeEvent("pr.created", "coder-site", {
+      pr: {
+        id: "PR-777",
+        title: "Legacy short branch PR",
+        issue_id: issue.id,
+        author: "coder-site",
+        branch: "coder-site",
+        worktree,
+        base: "main",
+        status: "draft",
+        summary: "Legacy branch used short author name.",
+        self_test: null,
+        test_brief: null,
+        reviews: [],
+        tests: [],
+        automated_tests: null,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    }));
+
+    const state = loadState(root);
+    expect(state.issues[issue.id].status).toBe("done");
+    expect(state.issues[issue.id].owner).toBe("coder-site");
+    expect(state.prs["PR-777"].branch).toBe("pi-company/coder-site");
+  });
+
+  it("allows only the issue owner to update task progress", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "task-owner-demo" });
+    const issue = createIssue(root, "lead", "Validate behavior", "Acceptance criteria.");
+    assignIssue(root, "lead", issue.id, "tester");
+
+    expect(() => startTask(root, "coder", issue.id, "Taking over.")).toThrow(/Only tester can start/);
+    expect(() => reportTask(root, "coder", issue.id, "Reporting on another task.")).toThrow(/Only tester can report on/);
+    expect(() => blockTask(root, "coder", issue.id, "Blocking another task.")).toThrow(/Only tester can block/);
+    expect(() => completeTask(root, "coder", issue.id, "Done by wrong owner.")).toThrow(/Only tester can complete/);
+    expect(loadState(root).issues[issue.id].status).toBe("assigned");
+
+    startTask(root, "tester", issue.id, "Starting validation.");
+    reportTask(root, "tester", issue.id, "Validation in progress.");
+    completeTask(root, "tester", issue.id, "Validation complete.");
+    expect(loadState(root).issues[issue.id].status).toBe("done");
+  });
+
+  it("keeps linked issues open until their PR is merged", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "issue-pr-completion-demo" });
+    registerCoder(root);
+    const issue = createIssue(root, "lead", "Implement feature", "Acceptance criteria.");
+    assignIssue(root, "lead", issue.id, "coder");
+    startTask(root, "coder", issue.id, "Starting feature.");
+    const pr = createPr(root, "coder", {
+      title: "Feature",
+      issue_id: issue.id,
+      summary: "Feature summary.",
+      branch: "pi-company/coder",
+      worktree: path.join(root, ".pi-company/worktrees/coder"),
+      base: "main",
+    });
+
+    expect(() => completeTask(root, "coder", issue.id, "Implementation complete.")).toThrow(/unmerged PR/);
+    recordEvent(root, makeEvent("task.completed", "coder", {
+      issue_id: issue.id,
+      summary: "Legacy completion before merge.",
+    }));
+    expect(loadState(root).issues[issue.id].status).toBe("in_progress");
+
+    passPrGates(root, pr.id);
+    recordEvent(root, makeEvent("merge.completed", "lead", { pr_id: pr.id }));
+
+    const state = loadState(root);
+    expect(state.prs[pr.id].status).toBe("merged");
+    expect(state.issues[issue.id].status).toBe("done");
+  });
+
+  it("blocks merge readiness when branch head changes after review and test evidence", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "stale-head-demo" });
+    const plan = registerCoder(root);
+    runGit(root, ["checkout", "-b", plan.branch ?? "pi-company/coder"]);
+    commitFile(root, "feature.txt", "first\n", "feature first");
+    runGit(root, ["checkout", "main"]);
+
+    const pr = createPr(root, "coder", {
+      title: "Feature",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate feature.");
+    recordAutomatedTests(root, "tester", pr.id, "passed", "Automated checks passed.", "npm test");
+    submitReview(root, "reviewer", pr.id, "approve", "Approved.");
+    submitTest(root, "tester", pr.id, "pass", "Passed.");
+    submitAcceptance(root, "pm", pr.id, "accept", "Product behavior accepted.");
+
+    expect(getPrGateStatus(root, pr.id).ready).toBe(true);
+
+    runGit(root, ["checkout", plan.branch ?? "pi-company/coder"]);
+    commitFile(root, "feature.txt", "second\n", "feature second");
+    runGit(root, ["checkout", "main"]);
+
+    const gates = getPrGateStatus(root, pr.id);
+    expect(gates.ready).toBe(false);
+    expect(gates.blockers).toContain("Coder self-test/test brief are stale for current head");
+    expect(gates.blockers).toContain("Needs 1 reviewer approval(s)");
+    expect(gates.blockers).toContain("Missing tester validation");
+    expect(gates.blockers).toContain("Automated tests are stale for current head");
+    expect(gates.blockers).toContain("Missing PM/lead product acceptance");
+    expect(loadState(root).prs[pr.id].status).toBe("blocked");
+  });
+
+  it("blocks PRs whose branch does not resolve in a git project", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "missing-branch-demo" });
+    const plan = registerCoder(root);
+
+    const pr = createPr(root, "coder", {
+      title: "Missing branch",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    passPrGates(root, pr.id);
+
+    const gates = getPrGateStatus(root, pr.id);
+    expect(gates.ready).toBe(false);
+    expect(gates.blockers).toContain(`Branch ${plan.branch ?? "pi-company/coder"} does not resolve to a git commit`);
+    expect(() => mergePr(root, "lead", pr.id, true)).toThrow(/does not resolve/);
+  });
+
+  it("rejects PRs that use a branch outside the author's registered branch", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "same-branch-demo" });
+    const plan = registerCoder(root);
+
+    expect(() => createPr(root, "coder", {
+      title: "Same branch",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: "main",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    })).toThrow(/does not match coder's registered branch/);
+  });
+
+  it("allows merge with unrelated untracked files in the project root", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "untracked-merge-demo" });
+    const plan = registerCoder(root);
+    runGit(root, ["checkout", "-b", plan.branch ?? "pi-company/coder"]);
+    commitFile(root, "feature.txt", "feature\n", "feature");
+    runGit(root, ["checkout", "main"]);
+    fs.writeFileSync(path.join(root, "scratch.tmp"), "untracked\n", "utf8");
+
+    const pr = createPr(root, "coder", {
+      title: "Feature",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate feature.");
+    recordAutomatedTests(root, "tester", pr.id, "passed", "Automated checks passed.", "npm test");
+    submitReview(root, "reviewer", pr.id, "approve", "Approved.");
+    submitTest(root, "tester", pr.id, "pass", "Passed.");
+    submitAcceptance(root, "pm", pr.id, "accept", "Product behavior accepted.");
+
+    const state = mergePr(root, "lead", pr.id, true);
+
+    expect(state.prs[pr.id].status).toBe("merged");
+    expect(fs.existsSync(path.join(root, "feature.txt"))).toBe(true);
+    expect(fs.existsSync(path.join(root, "scratch.tmp"))).toBe(true);
+  });
+
+  it("allows workers to request merges but only lead can execute them", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "lead-merge-demo" });
+    const plan = registerCoder(root);
+    runGit(root, ["checkout", "-b", plan.branch ?? "pi-company/coder"]);
+    commitFile(root, "feature.txt", "feature\n", "feature");
+    runGit(root, ["checkout", "main"]);
+
+    const pr = createPr(root, "coder", {
+      title: "Feature",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    passPrGates(root, pr.id);
+
+    expect(() => requestMerge(root, "coder-typo", pr.id)).toThrow(/Unknown merge requester coder-typo/);
+    expect(() => mergePr(root, "coder-typo", pr.id, true)).toThrow(/Unknown merge actor coder-typo/);
+    const requested = requestMerge(root, "coder", pr.id);
+    expect(requested.prs[pr.id].merge_requested_at).toBeTruthy();
+    expect(() => mergePr(root, "coder", pr.id, true)).toThrow(/Only lead can execute merges/);
+    expect(loadState(root).prs[pr.id].status).toBe("ready_to_merge");
+    expect(gitOutput(root, ["status", "--porcelain", "--untracked-files=no"]).trim()).toBe("");
+
+    const merged = mergePr(root, "lead", pr.id, true);
+    expect(merged.prs[pr.id].status).toBe("merged");
+    expect(fs.existsSync(path.join(root, "feature.txt"))).toBe(true);
+  });
+
+  it("surfaces lead-requested merges that still need execution", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "pending-lead-merge-demo" });
+    const plan = registerCoder(root);
+    runGit(root, ["checkout", "-b", plan.branch ?? "pi-company/coder"]);
+    commitFile(root, "feature.txt", "feature\n", "feature");
+    runGit(root, ["checkout", "main"]);
+    const pr = createPr(root, "coder", {
+      title: "Feature",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    passPrGates(root, pr.id);
+
+    requestMerge(root, "lead", pr.id);
+
+    expect(pendingMergeRequests(loadState(root)).map((item) => item.id)).toEqual([pr.id]);
+    const reminders = ensurePendingMergeReminder(root, "lead");
+    expect(reminders).toHaveLength(1);
+    expect(reminders[0].to).toBe("lead");
+    expect(reminders[0].task).toBe(pr.id);
+    expect(reminders[0].text).toContain("[pi-company pending merge]");
+    expect(ensurePendingMergeReminder(root, "lead")).toHaveLength(0);
+  });
+
+  it("notifies lead when a worker requests a ready PR merge", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "worker-merge-reminder-demo" });
+    const plan = registerCoder(root);
+    runGit(root, ["checkout", "-b", plan.branch ?? "pi-company/coder"]);
+    commitFile(root, "feature.txt", "feature\n", "feature");
+    runGit(root, ["checkout", "main"]);
+    const pr = createPr(root, "coder", {
+      title: "Feature",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    passPrGates(root, pr.id);
+    acknowledgeInbox(root, "lead", listInbox(root, "lead").map((message) => message.id));
+
+    requestMerge(root, "coder", pr.id);
+
+    const messages = listInbox(root, "lead");
+    expect(messages).toHaveLength(1);
+    expect(messages[0].task).toBe(pr.id);
+    expect(messages[0].text).toContain("[pi-company pending merge]");
+    const afterCooldown = new Date(Date.parse(messages[0].ts) + DEFAULT_MESSAGE_POLICY.agent_cooldown_ms + 1).toISOString();
+    expect(shouldAutoDeliverMessage(messages[0], loadState(root), "lead", afterCooldown)).toBe(true);
+  });
+
+  it("reconciles a requested PR that was already integrated into its base", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "manual-integration-reconcile-demo" });
+    const issue = createIssue(root, "lead", "Feature", "Build the feature.");
+    const plan = registerCoder(root);
+    assignIssue(root, "lead", issue.id, "coder");
+    startTask(root, "coder", issue.id, "Starting.");
+    runGit(root, ["checkout", "-b", plan.branch ?? "pi-company/coder"]);
+    commitFile(root, "feature.txt", "feature\n", "feature");
+    runGit(root, ["checkout", "main"]);
+    const pr = createPr(root, "coder", {
+      title: "Feature",
+      issue_id: issue.id,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    passPrGates(root, pr.id);
+    requestMerge(root, "lead", pr.id);
+
+    runGit(root, ["merge", "--no-ff", plan.branch ?? "pi-company/coder", "-m", "manual integration"]);
+
+    const state = loadState(root);
+    expect(state.prs[pr.id].status).toBe("merged");
+    expect(state.issues[issue.id].status).toBe("done");
+    expect(state.agents.coder.current_task).toBeNull();
+  });
+
+  it("lets lead abandon a stale PR so it no longer blocks delivery", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "abandon-stale-pr-demo" });
+    runGit(root, ["add", ".gitignore"]);
+    runGit(root, ["commit", "-m", "track company gitignore"]);
+    const issue = createIssue(root, "lead", "Feature", "Build the feature.");
+    const plan = registerCoder(root);
+    assignIssue(root, "lead", issue.id, "coder");
+    runGit(root, ["checkout", "-b", plan.branch ?? "pi-company/coder"]);
+    commitFile(root, "feature.txt", "feature\n", "feature");
+    runGit(root, ["checkout", "main"]);
+    const pr = createPr(root, "coder", {
+      title: "Feature",
+      issue_id: issue.id,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+
+    abandonPr(root, "lead", pr.id, "Superseded by recovery PR.", "PR-999");
+    completeTask(root, "coder", issue.id, "No active PRs remain.");
+
+    const state = loadState(root);
+    expect(state.prs[pr.id].status).toBe("abandoned");
+    expect(state.prs[pr.id].superseded_by).toBe("PR-999");
+    expect(state.issues[issue.id].status).toBe("done");
+    expect(buildLeadBrief(root).can_claim_complete).toBe(true);
+    expect(() => markPrReady(root, "coder", pr.id, "Self-test.", "Brief.")).toThrow(/abandoned/);
+  });
+
+  it("adopts a commit already present on base into a gated recovery PR", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "adopt-integrated-pr-demo" });
+    const issue = createIssue(root, "lead", "Feature", "Build the feature.");
+    registerCoder(root);
+    assignIssue(root, "lead", issue.id, "coder");
+    startTask(root, "coder", issue.id, "Starting.");
+    commitFile(root, "feature.txt", "feature\n", "direct main commit");
+
+    const pr = adoptIntegratedPr(root, "lead", {
+      title: "Feature recovery",
+      author: "coder",
+      issue_id: issue.id,
+      summary: "Recover a direct base-branch commit into the PR gate.",
+      branch: "pi-company/adopt-issue-001",
+      base: "main",
+    });
+
+    expect(pr.adopted_from_base).toBe(true);
+    expect(pr.head).toBe(gitOutput(root, ["rev-parse", "main"]).trim());
+    passPrGates(root, pr.id);
+    requestMerge(root, "lead", pr.id);
+
+    const state = loadState(root);
+    expect(state.prs[pr.id].status).toBe("merged");
+    expect(state.issues[issue.id].status).toBe("done");
+    expect(state.agents.coder.current_task).toBeNull();
+  });
+
+  it("does not keep gate merge blockers after missing evidence is supplied", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "merge-gate-block-demo" });
+    const plan = registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Feature",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+
+    const blocked = requestMerge(root, "coder", pr.id);
+    expect(blocked.prs[pr.id].status).toBe("blocked");
+    expect(blocked.prs[pr.id].merge_blockers ?? null).toBeNull();
+
+    passPrGates(root, pr.id);
+    const state = loadState(root);
+    expect(state.prs[pr.id].status).toBe("ready_to_merge");
+    expect(state.prs[pr.id].merge_blockers ?? null).toBeNull();
+  });
+
+  it("records merge execution blockers and clears them on retry", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    commitFile(root, "app.txt", "base\n", "base app");
+    initCompany({ root, id: "merge-execution-block-demo" });
+    const plan = registerCoder(root);
+    runGit(root, ["checkout", "-b", plan.branch ?? "pi-company/coder"]);
+    commitFile(root, "feature.txt", "feature\n", "feature");
+    runGit(root, ["checkout", "main"]);
+    const pr = createPr(root, "coder", {
+      title: "Feature",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    passPrGates(root, pr.id);
+
+    fs.writeFileSync(path.join(root, "app.txt"), "dirty\n", "utf8");
+    expect(() => mergePr(root, "lead", pr.id, true)).toThrow(/tracked or staged changes/);
+    let state = loadState(root);
+    expect(state.prs[pr.id].status).toBe("blocked");
+    expect(state.prs[pr.id].merge_blockers).toContain("Refusing to merge with tracked or staged changes in the project root.");
+
+    runGit(root, ["checkout", "--", "app.txt"]);
+    state = mergePr(root, "lead", pr.id, true);
+    expect(state.prs[pr.id].status).toBe("merged");
+    expect(state.prs[pr.id].merge_blockers).toBeNull();
+    expect(fs.existsSync(path.join(root, "feature.txt"))).toBe(true);
+  });
+
+  it("allows only lead to spawn persistent agents", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "lead-spawn-demo" });
+
+    expect(() => requestAgentSpawn(root, "coder", "coder", "coder-extra", "Extra implementation context.")).toThrow(
+      /Only lead can spawn agents/,
+    );
+
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder-extra", "Extra implementation context.");
+    const state = loadState(root);
+    expect(plan.name).toBe("coder-extra");
+    expect(state.agents["coder-extra"].status).toBe("planned");
+  });
+
+  it("does not let repeated spawn requests rewrite existing agent identity", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "spawn-identity-demo" });
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder-existing", "Existing coder.");
+    registerAgent(root, {
+      ...plan,
+      status: "online",
+    });
+
+    expect(() => requestAgentSpawn(root, "lead", "reviewer", "coder-existing", "Wrong role.")).toThrow(/already exists/);
+    recordEvent(root, makeEvent("agent.spawn_requested", "lead", {
+      name: "coder-existing",
+      role: "reviewer",
+      cwd: root,
+      worktree: null,
+      branch: null,
+      mission: "Wrong role.",
+    }));
+    recordEvent(root, makeEvent("agent.spawn_requested", "lead", {
+      ...plan,
+      mission: "Repeated plan.",
+    }));
+
+    const state = loadState(root);
+    expect(state.agents["coder-existing"].role).toBe("coder");
+    expect(state.agents["coder-existing"].branch).toBe("pi-company/coder-existing");
+    expect(state.agents["coder-existing"].worktree).toBe(path.join(root, ".pi-company/worktrees/coder-existing"));
+    expect(state.agents["coder-existing"].status).toBe("online");
+  });
+
+  it("rejects repeated CLI spawn before creating worktree side effects", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "cli-spawn-side-effect-demo" });
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder-repeat", "Planned coder.");
+    expect(fs.existsSync(plan.worktree ?? "")).toBe(false);
+
+    const result = spawnSync(process.execPath, [
+      "--import",
+      "tsx",
+      path.join(process.cwd(), "src/cli.ts"),
+      "--root",
+      root,
+      "spawn",
+      "coder",
+      "--name",
+      "coder-repeat",
+      "--yes",
+      "--manual",
+    ], { encoding: "utf8" });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Agent coder-repeat already exists");
+    expect(fs.existsSync(plan.worktree ?? "")).toBe(false);
+  });
+
+  it("rejects unplanned agent registration and ignores rogue spawn events", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "agent-registration-demo" });
+
+    expect(() => registerAgent(root, {
+      name: "coder-rogue",
+      role: "coder",
+      cwd: root,
+      status: "online",
+    })).toThrow(/Lead must spawn the agent before it can register/);
+    expect(() => heartbeatAgent(root, {
+      name: "coder-rogue",
+      status: "online",
+    })).toThrow(/Lead must spawn the agent before heartbeat/);
+
+    recordEvent(root, makeEvent("agent.spawn_requested", "coder-rogue", {
+      name: "coder-rogue",
+      role: "coder",
+      cwd: root,
+      worktree: null,
+      branch: null,
+      mission: "Rogue.",
+    }));
+    recordEvent(root, makeEvent("agent.spawned", "coder-rogue", {
+      name: "coder-rogue",
+      role: "coder",
+      cwd: root,
+      status: "online",
+    }));
+    expect(loadState(root).agents["coder-rogue"]).toBeUndefined();
+
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder-planned", "Planned coder.");
+    registerAgent(root, {
+      ...plan,
+      status: "online",
+    });
+    expect(loadState(root).agents["coder-planned"].status).toBe("online");
+  });
+
+  it("rejects planned agent identity changes during registration and replay", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "agent-identity-demo" });
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder-planned", "Planned coder.");
+
+    expect(() => registerAgent(root, {
+      ...plan,
+      role: "reviewer",
+      status: "online",
+    })).toThrow(/registered role reviewer, expected coder/);
+    expect(() => registerAgent(root, {
+      ...plan,
+      branch: "pi-company/other",
+      status: "online",
+    })).toThrow(/registered branch pi-company\/other, expected pi-company\/coder-planned/);
+    expect(() => registerAgent(root, {
+      ...plan,
+      worktree: path.join(root, ".pi-company/worktrees/other"),
+      status: "online",
+    })).toThrow(/registered worktree/);
+
+    recordEvent(root, makeEvent("agent.spawned", "coder-planned", {
+      ...plan,
+      role: "reviewer",
+      status: "online",
+    }));
+    let state = loadState(root);
+    expect(state.agents["coder-planned"].role).toBe("coder");
+    expect(state.agents["coder-planned"].status).toBe("planned");
+
+    recordEvent(root, makeEvent("agent.heartbeat", "coder-planned", {
+      name: "coder-planned",
+      branch: "pi-company/other",
+      current_task: "ISSUE-999",
+      status: "running",
+    }));
+    state = loadState(root);
+    expect(state.agents["coder-planned"].branch).toBe("pi-company/coder-planned");
+    expect(state.agents["coder-planned"].current_task).toBeUndefined();
+
+    registerAgent(root, {
+      ...plan,
+      status: "online",
+    });
+    state = loadState(root);
+    expect(state.agents["coder-planned"].status).toBe("online");
+    expect(state.agents["coder-planned"].role).toBe("coder");
+  });
+
+  it("rejects heartbeat current tasks outside the agent's assigned work", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "heartbeat-task-demo" });
+    registerAgent(root, {
+      name: "pm",
+      role: "pm",
+      cwd: root,
+      status: "online",
+    });
+    registerAgent(root, {
+      name: "tester",
+      role: "tester",
+      cwd: root,
+      status: "online",
+    });
+    const issue = createIssue(root, "lead", "Tester task", "Acceptance criteria.");
+    assignIssue(root, "lead", issue.id, "tester");
+
+    expect(() => heartbeatAgent(root, {
+      name: "pm",
+      current_task: "ISSUE-999",
+      status: "running",
+    })).toThrow(/Unknown current task ISSUE-999/);
+    expect(() => heartbeatAgent(root, {
+      name: "pm",
+      current_task: issue.id,
+      status: "running",
+    })).toThrow(/Only tester can work on ISSUE-001/);
+
+    heartbeatAgent(root, {
+      name: "tester",
+      current_task: issue.id,
+      status: "running",
+    });
+    expect(loadState(root).agents.tester.current_task).toBe(issue.id);
+
+    completeTask(root, "tester", issue.id, "Done.");
+    expect(() => heartbeatAgent(root, {
+      name: "tester",
+      current_task: issue.id,
+      status: "running",
+    })).toThrow(/already done/);
+
+    recordEvent(root, makeEvent("agent.heartbeat", "pm", {
+      name: "pm",
+      current_task: issue.id,
+      status: "running",
+    }));
+    const state = loadState(root);
+    expect(state.agents.pm.status).toBe("online");
+    expect(state.agents.pm.current_task).toBeNull();
+  });
+
+  it("creates new coder worktrees from main instead of the current checkout branch", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    runGit(root, ["checkout", "-b", "unrelated-feature"]);
+    commitFile(root, "unrelated.txt", "should not be in new coder base\n", "unrelated feature");
+    initCompany({ root, id: "worktree-base-demo" });
+
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder-new", "New implementation context.");
+    ensureCoderWorktree(root, plan, true);
+
+    expect(fs.existsSync(path.join(plan.worktree ?? "", "unrelated.txt"))).toBe(false);
+    expect(gitOutput(root, ["rev-parse", "pi-company/coder-new"]).trim()).toBe(gitOutput(root, ["rev-parse", "main"]).trim());
+  });
+
+  it("reuses an existing correct coder worktree without requiring creation confirmation", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "worktree-reuse-demo" });
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder-reuse", "Reuse implementation context.");
+    ensureCoderWorktree(root, plan, true);
+
+    expect(() => ensureCoderWorktree(root, plan, false)).not.toThrow();
+  });
+
+  it("blocks an approved parallel branch when the base has advanced into a merge conflict", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    commitFile(root, "app.txt", "base\n", "base app");
+    initCompany({ root, id: "parallel-conflict-demo" });
+
+    const planA = registerCoder(root, "coder-a");
+    const planB = registerCoder(root, "coder-b");
+    runGit(root, ["checkout", "-b", planA.branch ?? "pi-company/coder-a"]);
+    commitFile(root, "app.txt", "from feature a\n", "feature a");
+    runGit(root, ["checkout", "main"]);
+    runGit(root, ["checkout", "-b", planB.branch ?? "pi-company/coder-b"]);
+    commitFile(root, "app.txt", "from feature b\n", "feature b");
+    runGit(root, ["checkout", "main"]);
+
+    const prA = createPr(root, "coder-a", {
+      title: "Feature A",
+      issue_id: null,
+      summary: "Feature A summary.",
+      branch: planA.branch ?? "pi-company/coder-a",
+      worktree: planA.worktree ?? root,
+      base: "main",
+    });
+    const prB = createPr(root, "coder-b", {
+      title: "Feature B",
+      issue_id: null,
+      summary: "Feature B summary.",
+      branch: planB.branch ?? "pi-company/coder-b",
+      worktree: planB.worktree ?? root,
+      base: "main",
+    });
+
+    passPrGates(root, prA.id, "coder-a");
+    passPrGates(root, prB.id, "coder-b");
+    expect(getPrGateStatus(root, prB.id)).toEqual({ ready: true, blockers: [] });
+
+    mergePr(root, "lead", prA.id, true);
+
+    const gates = getPrGateStatus(root, prB.id);
+    expect(gates.ready).toBe(false);
+    expect(gates.blockers).toContain("Branch has merge conflicts with main");
+    expect(loadState(root).prs[prB.id].status).toBe("blocked");
+    expect(loadState(root).prs[prB.id].mergeable?.status).toBe("conflict");
+    expect(() => mergePr(root, "lead", prB.id, true)).toThrow(/merge conflicts/);
+    expect(gitOutput(root, ["status", "--porcelain", "--untracked-files=no"]).trim()).toBe("");
+    expect(fs.readFileSync(path.join(root, "app.txt"), "utf8")).toBe("from feature a\n");
+  }, 10_000);
+});
+
+function tempRoot(): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "pi-company-"));
+}
+
+function registerCoder(root: string, name = "coder"): ReturnType<typeof requestAgentSpawn> {
+  const plan = requestAgentSpawn(root, "lead", "coder", name, "Test coder.");
+  registerAgent(root, {
+    ...plan,
+    status: "online",
+  });
+  return plan;
+}
+
+function initGitRepo(root: string): void {
+  runGit(root, ["init", "-b", "main"]);
+  runGit(root, ["config", "user.email", "pi-company-test@example.local"]);
+  runGit(root, ["config", "user.name", "pi-company test"]);
+  fs.writeFileSync(path.join(root, "README.md"), "# demo\n", "utf8");
+  runGit(root, ["add", "README.md"]);
+  runGit(root, ["commit", "-m", "initial"]);
+}
+
+function commitFile(root: string, relativePath: string, content: string, message: string): void {
+  const target = path.join(root, relativePath);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, content, "utf8");
+  runGit(root, ["add", relativePath]);
+  runGit(root, ["commit", "-m", message]);
+}
+
+function passPrGates(root: string, prId: string, author = "coder"): void {
+  markPrReady(root, author, prId, "Self-test passed.", "Validate feature behavior.");
+  recordAutomatedTests(root, "tester", prId, "passed", "Automated checks passed.", "npm test");
+  submitReview(root, "reviewer", prId, "approve", "Approved.");
+  submitTest(root, "tester", prId, "pass", "Passed.");
+  submitAcceptance(root, "pm", prId, "accept", "Product behavior accepted.");
+}
+
+function runGit(root: string, args: string[]): void {
+  const result = spawnSync("git", ["-C", root, ...args], {
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    throw new Error(result.stderr || result.stdout || `git ${args.join(" ")} failed`);
+  }
+}
+
+function gitOutput(root: string, args: string[]): string {
+  const result = spawnSync("git", ["-C", root, ...args], {
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    throw new Error(result.stderr || result.stdout || `git ${args.join(" ")} failed`);
+  }
+  return result.stdout;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

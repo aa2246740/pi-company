@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.pi-company/
+.DS_Store
+*.log
+.env
+.env.*
+coverage/
+*.tgz
+*.tar.gz

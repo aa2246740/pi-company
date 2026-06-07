@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+*.local
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Testing
+coverage/
+
+# pi-company
+.pi-company/
+
+# Misc
+*.tgz
+*.tar.gz
+
+# Internal planning docs (not for open source distribution)
+docs/pm-architecture-plan.md
+docs/interactive-tutorial-requirements.md
+docs/project-brief.md
+docs/quality-and-acceptance.md
+docs/research-retro-tui-design.md

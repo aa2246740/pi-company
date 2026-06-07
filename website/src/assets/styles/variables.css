@@ -1,0 +1,114 @@
+/* ============================================================
+ * pi-company TUI Design System — CSS Variables
+ * 复古未来终端风格，优先可读性和视觉层次
+ * ============================================================ */
+
+:root {
+  /* ── 品牌色 — 高饱和度，用于强调 ── */
+  --green:           #00ff41;
+  --green-soft:      #00cc33;
+  --green-glow:      rgba(0, 255, 65, 0.15);
+  --green-bg:        rgba(0, 255, 65, 0.05);
+  --amber:           #ffaa00;
+  --amber-soft:      #cc8800;
+  --amber-glow:      rgba(255, 170, 0, 0.15);
+  --cyan:            #00ccff;
+  --cyan-soft:       #0099cc;
+  --cyan-glow:       rgba(0, 204, 255, 0.15);
+  --cyan-bg:         rgba(0, 204, 255, 0.05);
+  --magenta:         #ff66ff;
+  --magenta-soft:    #cc44cc;
+  --red:             #ff4444;
+  --red-soft:        #cc3333;
+
+  /* ── 背景层次 — 更明显的区分 ── */
+  --bg-0:            #080808;   /* 最深背景 */
+  --bg-1:            #0e0e0e;   /* 主背景 */
+  --bg-2:            #161616;   /* 抬升背景 */
+  --bg-3:            #1e1e1e;   /* 卡片背景 */
+  --bg-4:            #262626;   /* 悬停/高亮 */
+  --bg-5:            #2e2e2e;   /* 最亮背景 */
+
+  /* ── 边框 — 清晰的层次 ── */
+  --border-1:        #1a1a1a;   /* 最弱边框 */
+  --border-2:        #2a2a2a;   /* 默认边框 */
+  --border-3:        #3a3a3a;   /* 强调边框 */
+  --border-4:        #4a4a4a;   /* 最强边框 */
+
+  /* ── 文本 — 高对比度 ── */
+  --text-1:          #ffffff;   /* 主要文本 — 最亮 */
+  --text-2:          #e0e0e0;   /* 次要文本 */
+  --text-3:          #a0a0a0;   /* 辅助文本 */
+  --text-4:          #707070;   /* 最弱文本 */
+
+  /* ── 语义色 ── */
+  --success:         var(--green);
+  --warning:         var(--amber);
+  --error:           var(--red);
+  --info:            var(--cyan);
+
+  /* ── 间距系统 — 8px 基础单位 ── */
+  --space-1:   4px;
+  --space-2:   8px;
+  --space-3:   12px;
+  --space-4:   16px;
+  --space-5:   20px;
+  --space-6:   24px;
+  --space-8:   32px;
+  --space-10:  40px;
+  --space-12:  48px;
+  --space-16:  64px;
+  --space-20:  80px;
+  --space-24:  96px;
+  --space-32:  128px;
+
+  /* ── 字体 ── */
+  --font-sans:   'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono:   'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', monospace;
+  --font-pixel:  'VT323', monospace;
+
+  /* ── 字号 — 清晰的层次 ── */
+  --text-xs:     0.75rem;     /* 12px */
+  --text-sm:     0.875rem;    /* 14px */
+  --text-base:   1rem;        /* 16px */
+  --text-lg:     1.125rem;    /* 18px */
+  --text-xl:     1.25rem;     /* 20px */
+  --text-2xl:    1.5rem;      /* 24px */
+  --text-3xl:    2rem;        /* 32px */
+  --text-4xl:    2.5rem;      /* 40px */
+  --text-5xl:    3.5rem;      /* 56px */
+
+  /* ── 行高 ── */
+  --leading-tight:   1.2;
+  --leading-snug:    1.35;
+  --leading-normal:  1.6;
+  --leading-relaxed: 1.8;
+
+  /* ── 圆角 ── */
+  --radius-sm:   4px;
+  --radius-md:   6px;
+  --radius-lg:   8px;
+  --radius-xl:   12px;
+  --radius-2xl:  16px;
+
+  /* ── 阴影 — 营造深度 ── */
+  --shadow-sm:   0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md:   0 4px 8px rgba(0, 0, 0, 0.4);
+  --shadow-lg:   0 8px 16px rgba(0, 0, 0, 0.5);
+  --shadow-xl:   0 12px 24px rgba(0, 0, 0, 0.6);
+  --glow-green:  0 0 20px rgba(0, 255, 65, 0.3);
+  --glow-cyan:   0 0 20px rgba(0, 204, 255, 0.3);
+
+  /* ── 过渡 ── */
+  --ease-out:    cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --duration-fast:   150ms;
+  --duration-normal: 250ms;
+  --duration-slow:   400ms;
+
+  /* ── 布局 ── */
+  --header-h:        56px;
+  --sidebar-w:       260px;
+  --content-max:     720px;
+  --page-max:        1200px;
+}

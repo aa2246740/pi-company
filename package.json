@@ -1,0 +1,64 @@
+{
+  "name": "pi-company",
+  "version": "0.1.0",
+  "description": "Pi-native agent company runtime for local multi-agent project work.",
+  "license": "MIT",
+  "homepage": "https://aa2246740.github.io/pi-company/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aa2246740/pi-company.git"
+  },
+  "bugs": {
+    "url": "https://github.com/aa2246740/pi-company/issues"
+  },
+  "type": "module",
+  "bin": {
+    "pi-company": "./dist/src/cli.js"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "agents",
+    "multi-agent",
+    "cmux"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "PRD.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "prepare": "npm run build",
+    "prepack": "npm run privacy:scan",
+    "postpack": "npm run privacy:scan",
+    "privacy:scan": "node scripts/privacy-scan.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "check": "npm run privacy:scan && npm run typecheck && npm test && npm run build && npm run privacy:scan"
+  },
+  "dependencies": {
+    "commander": "^14.0.2",
+    "yaml": "^2.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.14"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/extensions"
+    ]
+  }
+}
