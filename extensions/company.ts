@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -49,6 +51,8 @@ import {
   type ProviderRequestLease,
 } from "../src/core/provider-queue.js";
 import { classifyRateLimitText } from "../src/core/rate-limit.js";
+import { DEFAULT_ROLES } from "../src/core/defaults.js";
+import { companyPaths } from "../src/core/paths.js";
 import type { AgentRecord, CompanyState, IssueRecord, MailboxMessage, PiModelConfig } from "../src/core/types.js";
 
 const currentExtensionPath = fileURLToPath(import.meta.url);
@@ -368,6 +372,28 @@ export default function companyExtension(pi: ExtensionAPI): void {
     },
   });
 
+  async function resumeCompany(ctx: ExtensionContext): Promise<void> {
+    ensureInitialized();
+    recordLiveHeartbeat();
+    await refreshUi(ctx);
+    await pi.sendUserMessage(renderResumePrompt(root, agentName, role, lead), { deliverAs: "followUp" });
+    if (ctx.hasUI) ctx.ui.notify(`pi-company resumed as ${agentName}`, "info");
+  }
+
+  pi.registerCommand("company-resume", {
+    description: "Resume pi-company context in a plain Pi session",
+    handler: async (_args, ctx) => {
+      await resumeCompany(ctx);
+    },
+  });
+
+  pi.registerCommand("company-start", {
+    description: "Alias for /company-resume",
+    handler: async (_args, ctx) => {
+      await resumeCompany(ctx);
+    },
+  });
+
   pi.registerCommand("company-brief", {
     description: "Inject the authoritative lead/global delivery brief",
     handler: async (_args, ctx) => {
@@ -430,6 +456,49 @@ export default function companyExtension(pi: ExtensionAPI): void {
     lead,
     refreshUi,
   });
+}
+
+function renderResumePrompt(root: string, agentName: string, fallbackRole: string, lead: string): string {
+  const state = loadState(root);
+  const agent = state.agents[agentName];
+  const role = agent?.role ?? fallbackRole;
+  const rolePrompt = readRolePrompt(root, role);
+  const brief = renderLeadBrief(buildLeadBrief(root));
+  const currentTask = agent?.current_task ? `Current task: ${agent.current_task}` : "Current task: idle";
+  const inboxCount = state.inbox_counts[agentName] ?? 0;
+  const roleSpecific =
+    agentName === lead
+      ? "You are the lead. Use the lead brief as authoritative project truth before declaring completion, routing gates, or merging."
+      : `You are ${agentName}. Read your inbox before continuing. Coordinate with ${lead} for scope, sequencing, blockers, and completion claims.`;
+
+  return `[pi-company resume]
+
+You are resuming a pi-company session in this project.
+
+Agent: ${agentName}
+Role: ${role}
+${currentTask}
+Unread inbox messages: ${inboxCount}
+
+${roleSpecific}
+
+Role instructions:
+${rolePrompt}
+
+Authoritative project brief:
+${brief}
+
+Next step:
+Summarize the current state briefly, name blockers and owners, then continue through pi-company tools. Do not rely on stale chat memory or say the project is complete unless the authoritative brief allows it.`;
+}
+
+function readRolePrompt(root: string, role: string): string {
+  const customPath = path.join(companyPaths(root).rolesDir, `${role}.md`);
+  try {
+    return fs.readFileSync(customPath, "utf8").trim() || DEFAULT_ROLES[role] || `# ${role}`;
+  } catch {
+    return DEFAULT_ROLES[role] || `# ${role}`;
+  }
 }
 
 function registerTools(pi: ExtensionAPI, runtime: {

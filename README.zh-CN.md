@@ -54,14 +54,23 @@ npm run build
 
 ## 日常用法
 
+如果你习惯先启动 Pi，先把 pi-company 装成 Pi package：
+
 ```bash
-npm install -g pi-company
+pi install npm:pi-company
 cd ~/Documents/cmux/tarot-draw
-pi-company init --id tarot-draw
-eval "$(pi-company launch-command lead)"
+pi
 ```
 
-进入 lead Pi 后，你主要用自然语言对 lead 说需求，例如：
+进入 Pi 后运行：
+
+```text
+/company-resume
+```
+
+`/company-resume` 会在当前目录初始化或恢复 `.pi-company`，注入当前 agent 的角色职责和权威 brief。默认 agent 是 `lead`，所以这是最接近普通 Pi 用户习惯的入口。
+
+然后你主要用自然语言对 lead 说需求，例如：
 
 ```text
 我们要继续做塔罗抽卡网站。请检查当前状态，告诉我还需要哪些角色，然后分发任务。
@@ -70,6 +79,7 @@ eval "$(pi-company launch-command lead)"
 Lead 会通过 pi-company 工具创建 issue、分配角色、让 coder/reviewer/tester/PM 协作。需要新窗口时，lead 可以调用 spawn 工具；你也可以在项目目录里手动运行：
 
 ```bash
+npm install -g pi-company # 可选：安装辅助 CLI
 pi-company spawn tester --manual
 pi-company spawn coder --name coder-ui --yes --manual
 ```
@@ -88,6 +98,12 @@ pi-company --root ~/Documents/cmux/tarot-draw status
 ```
 
 人在项目目录里时，直接省略 `--root`。
+
+如果你不想先进普通 Pi，也可以从 shell 直接启动 lead：
+
+```bash
+eval "$(pi-company launch-command lead)"
+```
 
 在已有 company 中再次运行 `init` 是幂等的。它会加载已有事件日志，不会重置 roster、issues、PRs 或 agent 状态。`init` 也会把 `.pi-company/` 加入 `.gitignore`，避免本地 company 状态和托管 worktrees 被 `git add .` 提交。
 
@@ -151,7 +167,7 @@ pi -e ./extensions/company.ts --company-root "$PWD" --company-agent lead --compa
 - UI：当前 agent 的状态行和 desk panel
 - input hook：把交互式 human steering 镜像到 lead
 - mailbox poller：读取本地消息
-- 命令：`/company-status`、`/company-brief`、`/company-inbox`、`/company-ack`、`/company-send`
+- 命令：`/company-resume`、`/company-start`、`/company-status`、`/company-brief`、`/company-inbox`、`/company-ack`、`/company-send`
 - 工具：状态、lead/global brief、inbox、message、issues、task updates、spawn agent、本地 PR gates、review、test、acceptance、merge request、rate-limit report
 
 `company_lead_brief` 是 lead 的权威全局交付视图。Lead 在告诉人类“完成”“可以合并”之前必须使用它。worker 的 “done”“merged”“tested” 之类散文报告不是交付真相。

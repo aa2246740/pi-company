@@ -41,28 +41,36 @@ const steps = [
         <p><code>pi-company</code> 不是 Node 服务。Node 只是运行 CLI 和 Pi extension 的环境；日常入口是在项目目录里启动带扩展的 Pi。</p>
 
         <CodeBlock
+          code="pi install npm:pi-company"
+          prompt="$ "
+        />
+
+        <p>如果你还想在 shell 里使用辅助 CLI，再安装 npm 全局命令：</p>
+
+        <CodeBlock
           code="npm install -g pi-company"
           prompt="$ "
         />
 
         <h2>2. 初始化公司</h2>
-        <p>进入你的项目目录，然后初始化 pi-company：</p>
+        <p>进入你的项目目录，按普通习惯启动 Pi：</p>
 
         <CodeBlock
           code="cd ~/Documents/cmux/tarot-draw
-pi-company init --id tarot-draw"
+pi"
           prompt="$ "
         />
 
-        <p>查看初始化结果：</p>
+        <p>在 Pi 里运行恢复命令：</p>
+
         <CodeBlock
-          code="pi-company status"
-          prompt="$ "
+          code="/company-resume"
+          prompt="pi> "
         />
 
         <div class="alert alert--info">
           <span class="alert__icon">ℹ</span>
-          <span>人在项目目录里时不需要 <code>--root</code>。只有从别的目录管理这个项目时才写 <code>--root ~/Documents/cmux/tarot-draw</code>。</span>
+          <span><code>/company-resume</code> 会初始化或恢复当前目录的 <code>.pi-company</code>，并把 lead 角色职责和权威 brief 注入 Pi 对话。</span>
         </div>
 
         <!-- 磁盘变化抽屉 -->
@@ -96,12 +104,12 @@ pi-company init --id tarot-draw"
 
         <div class="alert alert--info">
           <span class="alert__icon">ℹ</span>
-          <span>Lead 是人类的本地代理，负责协调所有其他 agent 的工作。</span>
+          <span>如果你想从 shell 直接启动 lead，也可以运行 <code>eval "$(pi-company launch-command lead)"</code>。裸 <code>pi</code> + <code>/company-resume</code> 更适合已经习惯 Pi 的用户。</span>
         </div>
 
         <CodeBlock
-          code='eval "$(pi-company launch-command lead)"'
-          prompt="$ "
+          code="我刚恢复这个项目。请先读取 company_lead_brief 和 company_status，告诉我当前项目状态、阻塞点、下一步该做什么。"
+          prompt="lead> "
         />
 
         <TerminalPane title="lead output" :show-dots="true">

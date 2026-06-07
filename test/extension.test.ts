@@ -61,6 +61,32 @@ describe("pi-company extension", () => {
     expect(ui.setStatus).toHaveBeenCalledWith("pi-company", "pm/pm inbox:0");
   });
 
+  it("resumes pi-company context from a plain Pi session through a slash command", async () => {
+    const root = tempRoot();
+    const { handlers, pi, commands } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx, ui } = fakeContext(root);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const resume = commands.find((command) => command.name === "company-resume");
+    if (!resume) throw new Error("company-resume command was not registered");
+    await resume.handler("", ctx);
+    await handlers.session_shutdown?.({}, ctx);
+
+    const sendUserMessage = pi.sendUserMessage as unknown as ReturnType<typeof vi.fn>;
+    const injected = sendUserMessage.mock.calls.at(-1)?.[0] as string;
+    expect(injected).toContain("[pi-company resume]");
+    expect(injected).toContain("Agent: lead");
+    expect(injected).toContain("You protect project direction");
+    expect(injected).toContain("Authoritative project brief:");
+    expect(injected).toContain("Delivery State:");
+    expect(ui.notify).toHaveBeenCalledWith("pi-company resumed as lead", "info");
+  });
+
   it("marks the agent offline when the Pi session shuts down", async () => {
     const root = tempRoot();
     initCompany({ root, id: "extension-shutdown-offline" });
@@ -493,22 +519,26 @@ function fakePi(flags: Record<string, string | boolean> = {}): {
   handlers: Record<string, Handler>;
   pi: ExtensionAPI;
   tools: Array<{ name: string; execute: (...args: unknown[]) => unknown }>;
+  commands: Array<{ name: string; handler: (args: string, ctx: ExtensionContext) => unknown }>;
 } {
   const handlers: Record<string, Handler> = {};
   const tools: Array<{ name: string; execute: (...args: unknown[]) => unknown }> = [];
+  const commands: Array<{ name: string; handler: (args: string, ctx: ExtensionContext) => unknown }> = [];
   const pi = {
     registerFlag: vi.fn(),
     getFlag: vi.fn((name: string) => flags[name]),
     on: vi.fn((event: string, handler: Handler) => {
       handlers[event] = handler;
     }),
-    registerCommand: vi.fn(),
+    registerCommand: vi.fn((name: string, command: { handler: (args: string, ctx: ExtensionContext) => unknown }) => {
+      commands.push({ name, handler: command.handler });
+    }),
     registerTool: vi.fn((tool: { name: string; execute: (...args: unknown[]) => unknown }) => {
       tools.push(tool);
     }),
     sendUserMessage: vi.fn(),
   } as unknown as ExtensionAPI;
-  return { handlers, pi, tools };
+  return { handlers, pi, tools, commands };
 }
 
 function fakeContext(cwd: string): {

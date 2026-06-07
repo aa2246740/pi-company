@@ -61,14 +61,23 @@ npm run build
 
 ## Daily Use
 
+If you are used to starting Pi first, install pi-company as a Pi package:
+
 ```bash
-npm install -g pi-company
+pi install npm:pi-company
 cd ~/Documents/cmux/tarot-draw
-pi-company init --id tarot-draw
-eval "$(pi-company launch-command lead)"
+pi
 ```
 
-Inside the lead Pi session, talk to lead in natural language:
+Then run inside Pi:
+
+```text
+/company-resume
+```
+
+`/company-resume` initializes or resumes `.pi-company` in the current directory, injects the current agent's role instructions, and injects the authoritative lead brief. The default agent is `lead`, so this is the most natural path for existing Pi users.
+
+Then talk to lead in natural language:
 
 ```text
 Continue the tarot draw website. Check current state, decide which roles are needed, and distribute the work.
@@ -77,6 +86,7 @@ Continue the tarot draw website. Check current state, decide which roles are nee
 Lead uses pi-company tools to create issues, assign work, coordinate coder/reviewer/tester/PM, and track gates. If you need another visible agent pane, lead can spawn it through tools, or you can run:
 
 ```bash
+npm install -g pi-company # optional helper CLI
 pi-company spawn tester --manual
 pi-company spawn coder --name coder-ui --yes --manual
 ```
@@ -95,6 +105,12 @@ pi-company --root ~/Documents/cmux/tarot-draw status
 ```
 
 When you are already inside the project directory, omit `--root`.
+
+If you prefer to launch lead directly from the shell:
+
+```bash
+eval "$(pi-company launch-command lead)"
+```
 
 Running `init` again in an existing company is idempotent. It loads the existing
 event log instead of resetting roster, issues, PRs, or agent status.
@@ -221,7 +237,7 @@ The extension registers:
 - UI: status line and desk panel for the current agent
 - input hook: mirrors interactive human steering to lead
 - mailbox poller: reads local messages; wake metadata tells future launchers whether a message should wake immediately or wait for digest
-- commands: `/company-status`, `/company-brief`, `/company-inbox`, `/company-ack`, `/company-send`
+- commands: `/company-resume`, `/company-start`, `/company-status`, `/company-brief`, `/company-inbox`, `/company-ack`, `/company-send`
 - tools: status, lead/global brief, inbox, send message, issues, task updates, spawn agent, local PR gates, review, test, product acceptance, merge request, rate-limit report
 
 `company_lead_brief` is the lead's authoritative global delivery view. Lead

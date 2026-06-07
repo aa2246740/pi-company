@@ -55,13 +55,14 @@ const packageRoot = __dirname.endsWith(`${path.sep}dist${path.sep}src`)
 const builtExtensionPath = path.join(packageRoot, "dist", "extensions", "company.js");
 const sourceExtensionPath = path.join(packageRoot, "extensions", "company.ts");
 const extensionPath = fs.existsSync(builtExtensionPath) ? builtExtensionPath : sourceExtensionPath;
+const packageVersion = readPackageVersion(packageRoot);
 
 const program = new Command();
 
 program
   .name("pi-company")
   .description("Pi-native agent company runtime")
-  .version("0.1.0");
+  .version(packageVersion);
 
 program.option("--root <path>", "Project root", process.cwd());
 
@@ -533,6 +534,15 @@ program.parse(process.argv);
 
 function rootOpt(): string {
   return path.resolve(program.opts().root ?? process.cwd());
+}
+
+function readPackageVersion(root: string): string {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")) as { version?: unknown };
+    return typeof parsed.version === "string" && parsed.version.trim() ? parsed.version : "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
 }
 
 function defaultNameForRole(role: string): string {
