@@ -6,8 +6,10 @@
 import { ref } from 'vue'
 import { mainNav } from '@/data/navigation'
 import { productSummary } from '@/data/facts'
+import { useLocale } from '@/i18n/runtime'
 
 const mobileMenuOpen = ref(false)
+const { locale, toggleLocale } = useLocale()
 
 function toggleMobileMenu() {
   mobileMenuOpen.value = !mobileMenuOpen.value
@@ -45,6 +47,15 @@ function closeMobileMenu() {
         </span>
 
         <button
+          class="header__lang"
+          type="button"
+          :aria-label="locale === 'en' ? '切换到中文' : 'Switch to English'"
+          @click="toggleLocale"
+        >
+          {{ locale === 'en' ? '中文' : 'EN' }}
+        </button>
+
+        <button
           class="header__menu-btn"
           @click="toggleMobileMenu"
           :aria-label="mobileMenuOpen ? '关闭菜单' : '打开菜单'"
@@ -63,6 +74,10 @@ function closeMobileMenu() {
     <Transition name="menu">
       <div v-if="mobileMenuOpen" class="mobile-menu">
         <nav class="mobile-menu__nav">
+          <button class="mobile-menu__lang" type="button" @click="toggleLocale">
+            {{ locale === 'en' ? '切换到中文' : 'Switch to English' }}
+          </button>
+
           <router-link
             v-for="item in mainNav"
             :key="item.id"
@@ -178,6 +193,23 @@ function closeMobileMenu() {
   display: none;
 }
 
+.header__lang {
+  min-width: 52px;
+  height: 34px;
+  padding: 0 var(--space-3);
+  background: var(--bg-3);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-sm);
+  color: var(--green);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.header__lang:hover {
+  border-color: var(--green);
+}
+
 @media (min-width: 768px) {
   .header__status-text {
     display: inline;
@@ -243,6 +275,17 @@ function closeMobileMenu() {
   flex-direction: column;
   padding: var(--space-4);
   gap: var(--space-2);
+}
+
+.mobile-menu__lang {
+  align-self: flex-start;
+  padding: var(--space-2) var(--space-4);
+  margin-bottom: var(--space-2);
+  background: var(--bg-3);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-sm);
+  color: var(--green);
+  font-family: var(--font-mono);
 }
 
 .mobile-menu__link {

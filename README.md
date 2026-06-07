@@ -1,5 +1,7 @@
 # pi-company
 
+[English](README.md) | [中文](README.zh-CN.md)
+
 `pi-company` is a Pi-native runtime for running a local agent company inside one project.
 
 It is built for visible, steerable Pi agents. cmux can launch panes automatically, but cmux is optional.
@@ -315,3 +317,8 @@ serving, DOM/content assertions, console/error checks, and targeted browser
 verification. Avoid repeated cmux browser viewport or screenshot loops in the
 user's main workspace; use them sparingly because they exercise cmux's WebView
 surface management, not just the website under test.
+
+## License
+
+Apache-2.0. Contributions are accepted under the same Apache-2.0 license unless
+explicitly stated otherwise.

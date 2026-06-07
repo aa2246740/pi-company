@@ -1,8 +1,10 @@
 # pi-company 官方网站
 
+[English](README.md) | [中文](README.zh-CN.md)
+
 > Pi 原生的本地多智能体协作运行时 — 官方文档和教程网站
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License: Apache--2.0](https://img.shields.io/badge/License-Apache--2.0-green.svg)](LICENSE)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883.svg)](https://vuejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6.svg)](https://www.typescriptlang.org/)
 [![Vite](https://img.shields.io/badge/Vite-8-646cff.svg)](https://vitejs.dev/)
@@ -119,7 +121,7 @@ pi-company-site/
 
 ## 许可证
 
-本项目基于 MIT 许可证开源 — 查看 [LICENSE](LICENSE) 文件了解详情。
+本项目基于 Apache-2.0 许可证开源 — 查看 [LICENSE](LICENSE) 文件了解详情。
 
 ## 相关链接
 
