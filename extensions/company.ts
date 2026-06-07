@@ -18,6 +18,7 @@ import {
   ensurePendingMergeReminder,
   getPrGateStatus,
   heartbeatAgent,
+  initCompany,
   launchCommand,
   listInbox,
   loadConfig,
@@ -146,6 +147,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
   let manuallyRefreshedThisSession = false;
   let lastAutomaticRateLimitReportAt = 0;
   const activeProviderLeases: ProviderRequestLease[] = [];
+  let toolsRegistered = false;
 
   function isCompanyActive(): boolean {
     return loadConfig(root) !== null;
@@ -156,7 +158,32 @@ export default function companyExtension(pi: ExtensionAPI): void {
   }
 
   function notifyNoCompany(ctx: ExtensionContext): void {
-    if (ctx.hasUI) ctx.ui.notify(noCompanyMessage(root), "error");
+    if (ctx.hasUI) ctx.ui.notify(noCompanyMessage(root), "info");
+  }
+
+  function ensureCompanyToolsRegistered(): void {
+    if (!isCompanyActive() || toolsRegistered) return;
+    registerTools(pi, {
+      root,
+      agentName,
+      lead,
+      refreshUi,
+    });
+    toolsRegistered = true;
+  }
+
+  function registerCurrentAgent(ctx: ExtensionContext): void {
+    const state = loadState(root);
+    const existing = state.agents[agentName];
+    registerAgent(root, {
+      name: agentName,
+      role: existing?.role ?? role,
+      cwd: existing?.cwd ?? ctx.cwd ?? root,
+      worktree: existing?.worktree ?? null,
+      branch: existing?.branch ?? null,
+      mission: existing?.mission ?? null,
+      status: "online",
+    });
   }
 
   function recordLiveHeartbeat(): void {
@@ -270,17 +297,8 @@ export default function companyExtension(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     try {
       if (!isCompanyActive()) return;
-      const state = loadState(root);
-      const existing = state.agents[agentName];
-      registerAgent(root, {
-        name: agentName,
-        role: existing?.role ?? role,
-        cwd: existing?.cwd ?? ctx.cwd ?? root,
-        worktree: existing?.worktree ?? null,
-        branch: existing?.branch ?? null,
-        mission: existing?.mission ?? null,
-        status: "online",
-      });
+      registerCurrentAgent(ctx);
+      ensureCompanyToolsRegistered();
       await refreshUi(ctx);
       startPolling(ctx);
       startHeartbeat();
@@ -401,6 +419,27 @@ ${renderCompanySystemPrompt(root, agentName, role, lead)}`,
     },
   });
 
+  pi.registerCommand("company-init", {
+    description: "Initialize pi-company in the current project and attach this Pi session",
+    handler: async (args, ctx) => {
+      if (isCompanyActive()) {
+        await refreshUi(ctx);
+        if (ctx.hasUI) ctx.ui.notify(`pi-company is already active at ${root}`, "info");
+        return;
+      }
+      const requestedId = args.trim();
+      initCompany({ root, id: requestedId || path.basename(root) });
+      registerCurrentAgent(ctx);
+      ensureCompanyToolsRegistered();
+      startPolling(ctx);
+      startHeartbeat();
+      await refreshUi(ctx);
+      if (ctx.hasUI) {
+        ctx.ui.notify(`Initialized pi-company at ${root}. Tell lead what you want to build next.`, "info");
+      }
+    },
+  });
+
   async function startCompanyContext(ctx: ExtensionContext): Promise<void> {
     if (!isCompanyActive()) {
       notifyNoCompany(ctx);
@@ -503,14 +542,7 @@ ${renderCompanySystemPrompt(root, agentName, role, lead)}`,
     },
   });
 
-  if (isCompanyActive()) {
-    registerTools(pi, {
-      root,
-      agentName,
-      lead,
-      refreshUi,
-    });
-  }
+  ensureCompanyToolsRegistered();
 }
 
 function findCompanyRoot(start: string): string | null {
@@ -524,7 +556,7 @@ function findCompanyRoot(start: string): string | null {
 }
 
 function noCompanyMessage(root: string): string {
-  return `No pi-company project found at ${root}. Run pi-company init first, or start Pi from a directory that already contains .pi-company.`;
+  return `This is an ordinary Pi session. To create a pi-company project here, run /company-init. You can also exit Pi and run: pi-company init. Checked: ${root}`;
 }
 
 function renderCompanySystemPrompt(root: string, agentName: string, fallbackRole: string, lead: string): string {

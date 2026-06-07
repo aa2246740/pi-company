@@ -60,11 +60,18 @@ npm run build
 npm install -g pi-company
 pi install npm:pi-company
 cd ~/Documents/cmux/tarot-draw
-pi-company init
 pi
 ```
 
-`pi-company init` 会创建项目本地 `.pi-company/` 状态。之后在这个目录里直接启动 Pi 就够了：Pi 正常恢复对话，pi-company 自动接入已有 company，显示工作面板，注册 company tools，镜像人类 steering，控制 provider 请求，并在每一轮 agent 开始前刷新角色职责和 lead brief。默认 agent 是 `lead`，所以这是最接近普通 Pi 用户习惯的入口。
+进入 Pi 后运行：
+
+```text
+/company-init
+```
+
+`/company-init` 会创建项目本地 `.pi-company/` 状态，并把当前 Pi session 接成 `lead`。之后在这个目录里直接启动 Pi 就够了：Pi 正常恢复对话，pi-company 自动接入已有 company，显示工作面板，注册 company tools，镜像人类 steering，控制 provider 请求，并在每一轮 agent 开始前刷新角色职责和 lead brief。
+
+如果你更喜欢 shell-first，也可以先在终端运行 `pi-company init`，再启动 Pi。
 
 如果你想把当前角色职责和 lead brief 手动推送到可见聊天里，可以在 Pi 里运行 `/company-start`。它现在是刷新命令，不是必需的恢复步骤。
 
@@ -167,7 +174,7 @@ pi -e ./extensions/company.ts --company-root "$PWD" --company-agent lead --compa
 - UI：当前 agent 的状态行和 desk panel
 - input hook：把交互式 human steering 镜像到 lead
 - mailbox poller：读取本地消息
-- 命令：`/company-start`（手动刷新 brief）、`/company-resume`（兼容别名）、`/company-status`、`/company-brief`、`/company-inbox`、`/company-ack`、`/company-send`
+- 命令：`/company-init`、`/company-start`（手动刷新 brief）、`/company-resume`（兼容别名）、`/company-status`、`/company-brief`、`/company-inbox`、`/company-ack`、`/company-send`
 - 工具：状态、lead/global brief、inbox、message、issues、task updates、spawn agent、本地 PR gates、review、test、acceptance、merge request、rate-limit report
 
 `company_lead_brief` 是 lead 的权威全局交付视图。Lead 在告诉人类“完成”“可以合并”之前必须使用它。worker 的 “done”“merged”“tested” 之类散文报告不是交付真相。

@@ -53,18 +53,24 @@ const steps = [
         />
 
         <h2>2. 初始化公司</h2>
-        <p>进入你的项目目录，初始化一次 company，然后按普通习惯启动 Pi：</p>
+        <p>进入你的项目目录，按普通习惯启动 Pi：</p>
 
         <CodeBlock
           code="cd ~/Documents/cmux/tarot-draw
-pi-company init
 pi"
           prompt="$ "
         />
 
+        <p>在 Pi 里初始化一次 company：</p>
+
+        <CodeBlock
+          code="/company-init"
+          prompt="pi> "
+        />
+
         <div class="alert alert--info">
           <span class="alert__icon">ℹ</span>
-          <span>进入已有 <code>.pi-company</code> 的项目后，直接启动 <code>pi</code> 即可。Pi 负责恢复对话，pi-company 自动接入 company，并在每轮 agent 开始前刷新角色职责和权威 brief。</span>
+          <span><code>/company-init</code> 会创建当前目录的 <code>.pi-company</code>，并把当前 Pi session 接成 lead。以后进入这个目录直接启动 <code>pi</code> 即可。</span>
         </div>
 
         <!-- 磁盘变化抽屉 -->

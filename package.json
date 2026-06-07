@@ -31,7 +31,7 @@
   ],
   "scripts": {
     "clean": "rm -rf dist",
-    "build": "npm run clean && tsc -p tsconfig.json",
+    "build": "npm run clean && tsc -p tsconfig.json && chmod +x dist/src/cli.js",
     "prepare": "npm run build",
     "prepack": "npm run privacy:scan",
     "postpack": "npm run privacy:scan",

@@ -23,10 +23,10 @@ import { providerQueueSnapshot } from "../src/core/provider-queue.js";
 describe("pi-company extension", () => {
   it("stays inactive in ordinary Pi sessions outside a company project", async () => {
     const root = tempRoot();
-    const { handlers, pi, tools, commands } = withWorkingDirectory(root, () => fakePi({}));
+    const { handlers, pi, tools, commands } = fakePi({});
     const { ctx, ui } = fakeContext(root);
 
-    companyExtension(pi);
+    withWorkingDirectory(root, () => companyExtension(pi));
     await handlers.session_start?.({}, ctx);
     await handlers.before_provider_request?.({}, ctx);
     const inputResult = await handlers.input?.({ source: "interactive", text: "ordinary pi steering" }, ctx);
@@ -34,6 +34,7 @@ describe("pi-company extension", () => {
 
     expect(fs.existsSync(path.join(root, ".pi-company"))).toBe(false);
     expect(tools).toHaveLength(0);
+    expect(commands.some((command) => command.name === "company-init")).toBe(true);
     expect(commands.some((command) => command.name === "company-start")).toBe(true);
     expect(commands.some((command) => command.name === "company-resume")).toBe(true);
     expect(ui.setTitle).not.toHaveBeenCalled();
@@ -44,17 +45,45 @@ describe("pi-company extension", () => {
 
   it("does not initialize a company from /company-start in an ordinary Pi session", async () => {
     const root = tempRoot();
-    const { pi, commands } = withWorkingDirectory(root, () => fakePi({}));
+    const { pi, commands } = fakePi({});
     const { ctx, ui } = fakeContext(root);
 
-    companyExtension(pi);
+    withWorkingDirectory(root, () => companyExtension(pi));
     const start = commands.find((command) => command.name === "company-start");
     if (!start) throw new Error("company-start command was not registered");
     await start.handler("", ctx);
 
     expect(fs.existsSync(path.join(root, ".pi-company"))).toBe(false);
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
-    expect(ui.notify).toHaveBeenCalledWith(expect.stringContaining("No pi-company project found"), "error");
+    expect(ui.notify).toHaveBeenCalledWith(expect.stringContaining("run /company-init"), "info");
+  });
+
+  it("initializes and attaches a company from inside an ordinary Pi session", async () => {
+    const root = tempRoot();
+    const { pi, commands, tools } = fakePi({});
+    const { ctx, ui } = fakeContext(root);
+
+    let init: { handler: (args: string, ctx: ExtensionContext) => unknown } | undefined;
+    withWorkingDirectory(root, () => {
+      companyExtension(pi);
+      init = commands.find((command) => command.name === "company-init");
+    });
+    if (!init) throw new Error("company-init command was not registered");
+    await init.handler("friendly-company", ctx);
+
+    expect(loadConfig(root)?.id).toBe("friendly-company");
+    expect(tools.some((tool) => tool.name === "company_status")).toBe(true);
+    expect(ui.setWidget).toHaveBeenCalledWith(
+      "pi-company",
+      expect.arrayContaining([
+        expect.stringContaining("pi-company friendly-company"),
+        "context: active | Pi resumes chat; company context updates each turn",
+      ]),
+      { placement: "belowEditor" },
+    );
+    expect(ui.setStatus).toHaveBeenCalledWith("pi-company", "lead/lead inbox:0 · active");
+    expect(ui.notify).toHaveBeenCalledWith(expect.stringContaining("Initialized pi-company"), "info");
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
   });
 
   it("discovers a parent company project from a subdirectory", async () => {

@@ -242,6 +242,7 @@ export const cliCommands: CliCommand[] = [
 
 /** Pi 扩展命令 */
 export const extensionCommands = [
+  { command: '/company-init', description: '在当前 Pi session 里初始化 .pi-company 并接入 lead' },
   { command: '/company-start', description: '手动刷新角色职责和 lead brief 到当前 Pi 对话' },
   { command: '/company-resume', description: '/company-start 的兼容别名' },
   { command: '/company-status', description: '刷新并显示 pi-company 面板' },
