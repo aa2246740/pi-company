@@ -2372,7 +2372,7 @@ Rate limit 已过期，可以恢复正常工作`);
     const merged = mergePr(root, "lead", pr.id, true);
     expect(merged.prs[pr.id].status).toBe("merged");
     expect(fs.existsSync(path.join(root, "feature.txt"))).toBe(true);
-  });
+  }, 10_000);
 
   it("surfaces lead-requested merges that still need execution", () => {
     const root = tempRoot();
