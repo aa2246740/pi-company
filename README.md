@@ -74,10 +74,10 @@ pi
 Then run inside Pi:
 
 ```text
-/company-resume
+/company-start
 ```
 
-`pi-company init` creates the project-local `.pi-company/` state. `/company-resume` resumes that existing company, injects the current agent's role instructions, and injects the authoritative lead brief. The default agent is `lead`, so this is the most natural path for existing Pi users.
+`pi-company init` creates the project-local `.pi-company/` state. `/company-start` starts or reattaches the current Pi session to that company, injects the current agent's role instructions, and injects the authoritative lead brief. The default agent is `lead`, so this is the most natural path for existing Pi users.
 
 Installing the Pi package does not make every `pi` session a company session. In ordinary directories without `.pi-company/`, Pi stays ordinary: pi-company does not create files, register company tools, mirror human input, gate provider requests, or show the company desk panel.
 
@@ -241,7 +241,7 @@ The extension registers:
 - UI: status line and desk panel for the current agent
 - input hook: mirrors interactive human steering to lead
 - mailbox poller: reads local messages; wake metadata tells future launchers whether a message should wake immediately or wait for digest
-- commands: `/company-resume`, `/company-start`, `/company-status`, `/company-brief`, `/company-inbox`, `/company-ack`, `/company-send`
+- commands: `/company-start`, `/company-resume` (alias), `/company-status`, `/company-brief`, `/company-inbox`, `/company-ack`, `/company-send`
 - tools: status, lead/global brief, inbox, send message, issues, task updates, spawn agent, local PR gates, review, test, product acceptance, merge request, rate-limit report
 
 `company_lead_brief` is the lead's authoritative global delivery view. Lead

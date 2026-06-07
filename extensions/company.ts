@@ -143,7 +143,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
   let pollTimer: NodeJS.Timeout | null = null;
   let heartbeatTimer: NodeJS.Timeout | null = null;
   let delivering = false;
-  let resumedThisSession = false;
+  let startedThisSession = false;
   let lastAutomaticRateLimitReportAt = 0;
   const activeProviderLeases: ProviderRequestLease[] = [];
 
@@ -194,9 +194,9 @@ export default function companyExtension(pi: ExtensionAPI): void {
     const inbox = state.inbox_counts[agentName] ?? 0;
     const displayRole = current?.role ?? role;
     ctx.ui.setTitle(`pi-company ${agentName}`);
-    const resumeHint = resumedThisSession ? "resumed" : "run /company-resume";
-    ctx.ui.setStatus("pi-company", `${agentName}/${displayRole} inbox:${inbox} · ${resumeHint}`);
-    ctx.ui.setWidget("pi-company", renderDeskPanel(state, agentName, resumedThisSession), { placement: "belowEditor" });
+    const startHint = startedThisSession ? "context loaded" : "run /company-start";
+    ctx.ui.setStatus("pi-company", `${agentName}/${displayRole} inbox:${inbox} · ${startHint}`);
+    ctx.ui.setWidget("pi-company", renderDeskPanel(state, agentName, startedThisSession), { placement: "belowEditor" });
   }
 
   async function deliverInbox(ctx: ExtensionContext, mode: "auto" | "manual" = "auto"): Promise<void> {
@@ -391,29 +391,29 @@ export default function companyExtension(pi: ExtensionAPI): void {
     },
   });
 
-  async function resumeCompany(ctx: ExtensionContext): Promise<void> {
+  async function startCompanyContext(ctx: ExtensionContext): Promise<void> {
     if (!isCompanyActive()) {
       notifyNoCompany(ctx);
       return;
     }
-    resumedThisSession = true;
+    startedThisSession = true;
     recordLiveHeartbeat();
     await refreshUi(ctx);
-    await pi.sendUserMessage(renderResumePrompt(root, agentName, role, lead), { deliverAs: "followUp" });
-    if (ctx.hasUI) ctx.ui.notify(`pi-company resumed as ${agentName}`, "info");
+    await pi.sendUserMessage(renderStartPrompt(root, agentName, role, lead), { deliverAs: "followUp" });
+    if (ctx.hasUI) ctx.ui.notify(`pi-company context loaded for ${agentName}`, "info");
   }
 
-  pi.registerCommand("company-resume", {
-    description: "Resume pi-company context in a plain Pi session",
+  pi.registerCommand("company-start", {
+    description: "Start or reattach pi-company context in this Pi session",
     handler: async (_args, ctx) => {
-      await resumeCompany(ctx);
+      await startCompanyContext(ctx);
     },
   });
 
-  pi.registerCommand("company-start", {
-    description: "Alias for /company-resume",
+  pi.registerCommand("company-resume", {
+    description: "Alias for /company-start",
     handler: async (_args, ctx) => {
-      await resumeCompany(ctx);
+      await startCompanyContext(ctx);
     },
   });
 
@@ -517,7 +517,7 @@ function noCompanyMessage(root: string): string {
   return `No pi-company project found at ${root}. Run pi-company init first, or start Pi from a directory that already contains .pi-company.`;
 }
 
-function renderResumePrompt(root: string, agentName: string, fallbackRole: string, lead: string): string {
+function renderStartPrompt(root: string, agentName: string, fallbackRole: string, lead: string): string {
   const state = loadState(root);
   const agent = state.agents[agentName];
   const role = agent?.role ?? fallbackRole;
@@ -530,9 +530,9 @@ function renderResumePrompt(root: string, agentName: string, fallbackRole: strin
       ? "You are the lead. Use the lead brief as authoritative project truth before declaring completion, routing gates, or merging."
       : `You are ${agentName}. Read your inbox before continuing. Coordinate with ${lead} for scope, sequencing, blockers, and completion claims.`;
 
-  return `[pi-company resume]
+  return `[pi-company start]
 
-You are resuming a pi-company session in this project.
+You are starting or reattaching a pi-company session in this project.
 
 Agent: ${agentName}
 Role: ${role}
@@ -1270,7 +1270,7 @@ function classifyRateLimitError(error: unknown): { kind: "provider_429" | "quota
   return classifyRateLimitText(errorMessage(error));
 }
 
-function renderDeskPanel(state: ReturnType<typeof loadState>, agentName: string, resumedThisSession: boolean): string[] {
+function renderDeskPanel(state: ReturnType<typeof loadState>, agentName: string, startedThisSession: boolean): string[] {
   const agent = state.agents[agentName];
   const activeIssue = agent?.current_task ? state.issues[agent.current_task] : null;
   const ownedIssues = Object.values(state.issues)
@@ -1283,7 +1283,7 @@ function renderDeskPanel(state: ReturnType<typeof loadState>, agentName: string,
   const pendingMerges = pendingMergeRequests(state);
   const lines = [
     `pi-company ${state.config?.id ?? "uninitialized"} | ${agentName} (${agent?.role ?? "unknown"})`,
-    resumedThisSession ? "context: resumed" : "context: extension active | run /company-resume",
+    startedThisSession ? "context: company context loaded" : "context: extension active | run /company-start",
     activeIssue ? `focus: ${activeIssue.id} ${activeIssue.title}` : "focus: idle",
     `task: ${agent?.current_task ?? "idle"} | inbox: ${state.inbox_counts[agentName] ?? 0}`,
   ];

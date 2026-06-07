@@ -67,10 +67,10 @@ pi
 进入 Pi 后运行：
 
 ```text
-/company-resume
+/company-start
 ```
 
-`pi-company init` 会创建项目本地 `.pi-company/` 状态。`/company-resume` 只恢复已有 company，注入当前 agent 的角色职责和权威 brief。默认 agent 是 `lead`，所以这是最接近普通 Pi 用户习惯的入口。
+`pi-company init` 会创建项目本地 `.pi-company/` 状态。`/company-start` 会把当前 Pi session 启动或重新接入这个 company，注入当前 agent 的角色职责和权威 brief。默认 agent 是 `lead`，所以这是最接近普通 Pi 用户习惯的入口。
 
 安装 Pi package 不等于让每个 `pi` 都变成 company session。普通目录里没有 `.pi-company/` 时，Pi 仍然是普通 Pi：pi-company 不会创建文件、不会注册 company tools、不会镜像人类输入、不会拦 provider 请求，也不会显示 company 工作面板。
 
@@ -171,7 +171,7 @@ pi -e ./extensions/company.ts --company-root "$PWD" --company-agent lead --compa
 - UI：当前 agent 的状态行和 desk panel
 - input hook：把交互式 human steering 镜像到 lead
 - mailbox poller：读取本地消息
-- 命令：`/company-resume`、`/company-start`、`/company-status`、`/company-brief`、`/company-inbox`、`/company-ack`、`/company-send`
+- 命令：`/company-start`、`/company-resume`（兼容别名）、`/company-status`、`/company-brief`、`/company-inbox`、`/company-ack`、`/company-send`
 - 工具：状态、lead/global brief、inbox、message、issues、task updates、spawn agent、本地 PR gates、review、test、acceptance、merge request、rate-limit report
 
 `company_lead_brief` 是 lead 的权威全局交付视图。Lead 在告诉人类“完成”“可以合并”之前必须使用它。worker 的 “done”“merged”“tested” 之类散文报告不是交付真相。
