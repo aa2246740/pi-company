@@ -263,6 +263,20 @@ export function registerAgent(root: string, agent: {
   }));
 }
 
+export function recordAgentLaunch(root: string, actor: string, agentName: string, cmuxSurface: string): CompanyState {
+  const state = loadState(root);
+  if (actor !== "system" && actor !== (state.config?.lead ?? "lead")) {
+    throw new Error(`Only ${state.config?.lead ?? "lead"} can record agent launches.`);
+  }
+  if (!state.agents[agentName]) throw new Error(`Unknown agent ${agentName}.`);
+  const surface = cmuxSurface.trim();
+  if (!surface) throw new Error("cmux surface is required.");
+  return recordEvent(root, makeEvent("agent.launch_recorded", agentName, {
+    name: agentName,
+    cmux_surface: surface,
+  }));
+}
+
 function requireAgentRegistrationMatchesPlan(existing: AgentRecord, agent: {
   name: string;
   role: AgentRole;
@@ -1327,6 +1341,7 @@ function rootDeliverableFiles(root: string): string[] {
 
 function buildLeadBriefNextActions(
   incompleteIssues: IssueRecord[],
+  agents: Record<string, AgentRecord>,
   nonMergedPrs: LeadBriefPr[],
   blockedPrs: LeadBriefPr[],
   dirtyPrs: LeadBriefPr[],
@@ -1355,7 +1370,12 @@ function buildLeadBriefNextActions(
     actions.push(`${pr.id}: ask ${pr.author} to commit or revert PR worktree changes deliberately`);
   }
   for (const issue of incompleteIssues.filter((issue) => !nonMergedPrs.some((pr) => pr.issue_id === issue.id))) {
-    actions.push(`${issue.id}: continue assigned work with ${issue.owner ?? "an owner"}`);
+    const owner = issue.owner ?? null;
+    if (owner && agents[owner]?.status === "offline") {
+      actions.push(`${issue.id}: relaunch ${owner} before continuing; its last cmux surface is gone or heartbeat is stale`);
+    } else {
+      actions.push(`${issue.id}: continue assigned work with ${owner ?? "an owner"}`);
+    }
   }
   return actions;
 }
@@ -1391,9 +1411,15 @@ function markPrIntegrated(state: CompanyState, pr: PullRequestRecord, ts: string
 }
 
 function refreshAgentLiveness(state: CompanyState, now = nowIso()): void {
+  const liveCmuxSurfaces = currentCmuxSurfacesIfNeeded(state);
   const current = Date.parse(now);
   if (!Number.isFinite(current)) return;
   for (const agent of Object.values(state.agents)) {
+    if (agent.cmux_surface && liveCmuxSurfaces && !liveCmuxSurfaces.has(agent.cmux_surface)) {
+      agent.status = "offline";
+      agent.current_task = null;
+      continue;
+    }
     if (agent.status === "planned" || agent.status === "offline") continue;
     const lastSeen = agent.last_seen_at ? Date.parse(agent.last_seen_at) : Number.NaN;
     if (!Number.isFinite(lastSeen)) continue;
@@ -1402,6 +1428,35 @@ function refreshAgentLiveness(state: CompanyState, now = nowIso()): void {
       agent.current_task = null;
     }
   }
+}
+
+function currentCmuxSurfacesIfNeeded(state: CompanyState): Set<string> | null {
+  if (!Object.values(state.agents).some((agent) => agent.cmux_surface)) return null;
+  const result = spawnSync("cmux", ["tree", "--json"], { encoding: "utf8" });
+  if (result.status !== 0 || !result.stdout.trim()) return null;
+  try {
+    const parsed = JSON.parse(result.stdout) as unknown;
+    const surfaces = new Set<string>();
+    collectCmuxSurfaceRefs(parsed, surfaces);
+    return surfaces;
+  } catch {
+    return null;
+  }
+}
+
+function collectCmuxSurfaceRefs(value: unknown, surfaces: Set<string>): void {
+  if (Array.isArray(value)) {
+    for (const item of value) collectCmuxSurfaceRefs(item, surfaces);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  const record = value as Record<string, unknown>;
+  const ref = record.ref;
+  const type = record.type;
+  if (typeof ref === "string" && ref.startsWith("surface:") && (type === undefined || typeof type === "string")) {
+    surfaces.add(ref);
+  }
+  for (const item of Object.values(record)) collectCmuxSurfaceRefs(item, surfaces);
 }
 
 export function markPrReady(root: string, actor: string, prId: string, selfTest: string, testBrief: string): CompanyState {
@@ -1649,7 +1704,7 @@ export function buildLeadBrief(root: string): LeadBrief {
 
   const blockedPrs = nonMergedPrs.filter((pr) => pr.blockers.length > 0);
   const canClaimComplete = reasons.length === 0;
-  const nextActions = buildLeadBriefNextActions(incompleteIssues, nonMergedPrs, blockedPrs, dirtyPrs, rootWorktreeChanges, roleBoundaryFindings);
+  const nextActions = buildLeadBriefNextActions(incompleteIssues, state.agents, nonMergedPrs, blockedPrs, dirtyPrs, rootWorktreeChanges, roleBoundaryFindings);
 
   return {
     company: state.config?.id ?? "not initialized",

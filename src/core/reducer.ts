@@ -111,9 +111,23 @@ export function reduceEvents(events: CompanyEvent[]): CompanyState {
           worktree: existing.worktree ?? null,
           branch: existing.branch ?? null,
           mission: (event.data.mission as string | undefined) ?? existing.mission ?? null,
+          cmux_surface: existing.cmux_surface ?? null,
+          last_launch_at: existing.last_launch_at ?? null,
           status: String(event.data.status ?? "online") as AgentRecord["status"],
           current_task: (event.data.current_task as string | undefined) ?? existing.current_task ?? null,
           last_seen_at: event.ts,
+        };
+        break;
+      }
+      case "agent.launch_recorded": {
+        const name = String(event.data.name ?? event.actor);
+        const existing = state.agents[name];
+        const surface = typeof event.data.cmux_surface === "string" ? event.data.cmux_surface.trim() : "";
+        if (!existing || surface.length === 0) break;
+        state.agents[name] = {
+          ...existing,
+          cmux_surface: surface,
+          last_launch_at: event.ts,
         };
         break;
       }

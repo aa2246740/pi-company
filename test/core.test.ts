@@ -26,6 +26,7 @@ import {
   markPrReady,
   mergePr,
   pendingMergeRequests,
+  recordAgentLaunch,
   recordEvent,
   registerAgent,
   recordAutomatedTests,
@@ -1283,6 +1284,31 @@ Rate limit 已过期，可以恢复正常工作`);
 
     expect(state.agents.pm.status).toBe("offline");
     expect(state.agents.researcher.status).toBe("planned");
+  });
+
+  it("marks cmux-launched agents offline when their surface disappears", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "closed-cmux-surface-demo" });
+    registerAgent(root, {
+      name: "designer",
+      role: "designer",
+      cwd: root,
+      status: "online",
+    });
+    const issue = createIssue(root, "lead", "Design the landing page", "Design brief.", { work_type: "design" });
+    assignIssue(root, "lead", issue.id, "designer");
+    startTask(root, "designer", issue.id, "Starting design.");
+    recordAgentLaunch(root, "lead", "designer", "surface:closed");
+
+    withFakeCmuxTree({ liveSurfaces: ["surface:lead"] }, () => {
+      const state = loadState(root);
+      expect(state.agents.designer.status).toBe("offline");
+      expect(state.agents.designer.current_task).toBeNull();
+      expect(state.agents.designer.cmux_surface).toBe("surface:closed");
+      expect(buildLeadBrief(root).next_actions).toContain(
+        "ISSUE-001: relaunch designer before continuing; its last cmux surface is gone or heartbeat is stale",
+      );
+    });
   });
 
   it("uses quota cooldown for exhausted-account incidents", () => {
@@ -2993,6 +3019,23 @@ Rate limit 已过期，可以恢复正常工作`);
 
 function tempRoot(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "pi-company-"));
+}
+
+function withFakeCmuxTree<T>(options: { liveSurfaces: string[] }, fn: () => T): T {
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-company-cmux-bin-"));
+  const cmuxPath = path.join(binDir, "cmux");
+  const surfaces = options.liveSurfaces.map((ref) => ({ ref, type: "terminal", title: ref }));
+  const tree = JSON.stringify({ windows: [{ workspaces: [{ panes: [{ surfaces }] }] }] });
+  fs.writeFileSync(cmuxPath, `#!/bin/sh\nif [ "$1" = "tree" ]; then\n  cat <<'JSON'\n${tree}\nJSON\n  exit 0\nfi\nexit 1\n`, "utf8");
+  fs.chmodSync(cmuxPath, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${binDir}${path.delimiter}${previousPath ?? ""}`;
+  try {
+    return fn();
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+  }
 }
 
 function registerCoder(root: string, name = "coder"): ReturnType<typeof requestAgentSpawn> {

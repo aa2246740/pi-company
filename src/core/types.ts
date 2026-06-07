@@ -6,6 +6,7 @@ export type EventType =
   | "company.initialized"
   | "agent.spawn_requested"
   | "agent.spawned"
+  | "agent.launch_recorded"
   | "agent.heartbeat"
   | "role.proposed"
   | "role.approved"
@@ -147,6 +148,8 @@ export interface AgentRecord {
   status: "planned" | "online" | "idle" | "running" | "blocked" | "offline";
   current_task?: string | null;
   last_seen_at?: string | null;
+  last_launch_at?: string | null;
+  cmux_surface?: string | null;
 }
 
 export interface IssueRecord {

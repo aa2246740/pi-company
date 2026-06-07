@@ -29,6 +29,7 @@ import {
   pendingMergeRequests,
   planAgentSpawn,
   reportRateLimit,
+  recordAgentLaunch,
   recordAutomatedTests,
   recordHumanSteering,
   registerAgent,
@@ -1009,7 +1010,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
         const briefing = shouldLaunch || params.launch_in_cmux === false || params.mission || assignedIssue
           ? sendLaunchBriefingIfNeeded(root, agentName, loadState(root).agents[existing.name] ?? existing, params.mission ?? null)
           : null;
-        const cmux = shouldLaunch ? launchInCmux(command) : null;
+        const cmux = shouldLaunch ? launchInCmux(root, agentName, existing.name, command) : null;
         await refreshUi(ctx);
         if (cmux) return toolResult(`Launched existing ${existing.name} in ${cmux}`, { plan: existing, command, cmux, existing: true, briefing, assigned_issue: assignedIssue });
         if (existing.status === "online" || existing.status === "running") {
@@ -1036,7 +1037,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
       const briefing = sendLaunchBriefingIfNeeded(root, agentName, loadState(root).agents[plan.name] ?? registered, params.mission ?? plan.mission);
       const command = launchCommand(root, plan.name, currentExtensionPath);
       let cmux: string | null = null;
-      if (params.launch_in_cmux !== false) cmux = launchInCmux(command);
+      if (params.launch_in_cmux !== false) cmux = launchInCmux(root, agentName, plan.name, command);
       await refreshUi(ctx);
       return toolResult(cmux ? `Launched ${plan.name} in ${cmux}` : command, { plan, command, cmux, briefing, assigned_issue: assignedIssue });
     },
@@ -1609,7 +1610,7 @@ function assignAndLaunchIfNeeded(root: string, actor: string, owner: string, iss
   const command = launchCommand(root, owner, currentExtensionPath);
   const delaySeconds = autoLaunchDelaySeconds(state, owner);
   const delayedCommand = delaySeconds > 0 ? `sleep ${delaySeconds}; ${command}` : command;
-  const cmux = launchInCmux(delayedCommand);
+  const cmux = launchInCmux(root, actor, owner, delayedCommand);
   return { command, cmux, briefing };
 }
 
@@ -1682,13 +1683,14 @@ function formatIssueBrief(issue: IssueRecord): string {
   return `- ${issue.id} ${issue.status}${issue.work_type ? ` ${issue.work_type}` : ""}: ${issue.title}`;
 }
 
-function launchInCmux(command: string): string | null {
+function launchInCmux(root: string, actor: string, agentName: string, command: string): string | null {
   const pane = runCmux(["--json", "new-pane", "--type", "terminal", "--direction", "right", "--focus", "false"]);
   if (pane.status !== 0) return null;
   const surface = parseCmuxSurfaceRef(pane.stdout);
   if (!surface) return null;
   const send = runCmux(["send", "--surface", surface, `${command}\n`]);
   if (send.status !== 0) return null;
+  recordAgentLaunch(root, actor, agentName, surface);
   return surface;
 }
 
