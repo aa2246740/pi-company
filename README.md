@@ -9,6 +9,17 @@ It is built for visible, steerable Pi agents. cmux can launch panes automaticall
 - Source: https://github.com/aa2246740/pi-company
 - Website: https://aa2246740.github.io/pi-company/
 
+## What Is It?
+
+`pi-company` is not a Node backend service or a daemon you keep running.
+
+It has two pieces:
+
+- **Pi extension/package**: loaded into Pi agent sessions to add the desk panel, mailbox polling, tools, slash commands, and human-steering mirror.
+- **Helper CLI**: used to initialize a project, print launch commands, plan/start agents, inspect status, and handle occasional operations.
+
+Node is only the runtime for the CLI and extension code. In daily use, you enter a project directory and launch Pi with the pi-company extension.
+
 ## Current Scope
 
 - Pi required
@@ -48,36 +59,58 @@ npm run check
 npm run build
 ```
 
-## Try Locally
+## Daily Use
 
 ```bash
-npm run build
-node dist/src/cli.js init --id demo
-node dist/src/cli.js status
-node dist/src/cli.js launch-command lead
+npm install -g pi-company
+cd ~/Documents/cmux/tarot-draw
+pi-company init --id tarot-draw
+eval "$(pi-company launch-command lead)"
 ```
+
+Inside the lead Pi session, talk to lead in natural language:
+
+```text
+Continue the tarot draw website. Check current state, decide which roles are needed, and distribute the work.
+```
+
+Lead uses pi-company tools to create issues, assign work, coordinate coder/reviewer/tester/PM, and track gates. If you need another visible agent pane, lead can spawn it through tools, or you can run:
+
+```bash
+pi-company spawn tester --manual
+pi-company spawn coder --name coder-ui --yes --manual
+```
+
+If cmux is installed:
+
+```bash
+pi-company spawn tester --cmux
+pi-company spawn coder --name coder-ui --yes --cmux
+```
+
+`--root <project>` is only for operating on a project while your shell is somewhere else:
+
+```bash
+pi-company --root ~/Documents/cmux/tarot-draw status
+```
+
+When you are already inside the project directory, omit `--root`.
 
 Running `init` again in an existing company is idempotent. It loads the existing
 event log instead of resetting roster, issues, PRs, or agent status.
 `init` also keeps `.pi-company/` in `.gitignore` so local company state and
 managed worktrees do not get committed by `git add .`.
 
+For source development:
+
+```bash
+npm install
+npm run build
+node dist/src/cli.js status
+```
+
 Use `spawn` only for new agents. For an existing roster member or already planned
 agent, use `launch-command <agent>` to start another visible Pi session.
-
-Launch lead manually:
-
-```bash
-eval "$(node dist/src/cli.js launch-command lead)"
-```
-
-Or copy the printed command into a terminal.
-
-Launch a worker manually:
-
-```bash
-node dist/src/cli.js spawn tester --manual
-```
 
 ## Role Model Policy
 

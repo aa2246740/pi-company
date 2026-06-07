@@ -7,6 +7,17 @@
 - 源码：https://github.com/aa2246740/pi-company
 - 官网：https://aa2246740.github.io/pi-company/
 
+## 它到底是什么？
+
+`pi-company` 不是一个 Node 后端服务，也不是让你一直开着的 daemon。
+
+它由两部分组成：
+
+- **Pi extension/package**：启动 Pi agent 时加载，给 Pi 增加状态面板、mailbox、工具、斜杠命令和 human steering 镜像能力。
+- **辅助 CLI**：用来初始化项目、打印启动命令、规划/启动 agent、查看状态、做少量运维操作。
+
+Node 只是 CLI 和扩展代码的运行环境。日常工作不是“启动一个 Node 服务”，而是进入你的项目目录，启动带 pi-company extension 的 Pi。
+
 ## 当前范围
 
 - 需要 Pi
@@ -41,40 +52,51 @@ npm run build
 
 `npm run check` 会执行隐私扫描、类型检查、测试、构建，并在构建后再次扫描，避免把 key、本机路径、支付二维码等敏感内容放进发布候选。
 
-## 本地试用
+## 日常用法
 
 ```bash
-npm run build
-node dist/src/cli.js init --id demo
-node dist/src/cli.js status
-node dist/src/cli.js launch-command lead
+npm install -g pi-company
+cd ~/Documents/cmux/tarot-draw
+pi-company init --id tarot-draw
+eval "$(pi-company launch-command lead)"
 ```
+
+进入 lead Pi 后，你主要用自然语言对 lead 说需求，例如：
+
+```text
+我们要继续做塔罗抽卡网站。请检查当前状态，告诉我还需要哪些角色，然后分发任务。
+```
+
+Lead 会通过 pi-company 工具创建 issue、分配角色、让 coder/reviewer/tester/PM 协作。需要新窗口时，lead 可以调用 spawn 工具；你也可以在项目目录里手动运行：
+
+```bash
+pi-company spawn tester --manual
+pi-company spawn coder --name coder-ui --yes --manual
+```
+
+如果安装了 cmux，可以让它自动开窗：
+
+```bash
+pi-company spawn tester --cmux
+pi-company spawn coder --name coder-ui --yes --cmux
+```
+
+`--root <project>` 只是在你不在项目目录里操作时使用。例如：
+
+```bash
+pi-company --root ~/Documents/cmux/tarot-draw status
+```
+
+人在项目目录里时，直接省略 `--root`。
 
 在已有 company 中再次运行 `init` 是幂等的。它会加载已有事件日志，不会重置 roster、issues、PRs 或 agent 状态。`init` 也会把 `.pi-company/` 加入 `.gitignore`，避免本地 company 状态和托管 worktrees 被 `git add .` 提交。
 
-手动启动 lead：
+开发者也可以从源码运行：
 
 ```bash
-eval "$(node dist/src/cli.js launch-command lead)"
-```
-
-手动启动 worker：
-
-```bash
-node dist/src/cli.js spawn tester --manual
-```
-
-启动隔离 worktree 的 coder：
-
-```bash
-node dist/src/cli.js spawn coder --name coder-ui --yes --manual
-```
-
-如果安装了 cmux：
-
-```bash
-node dist/src/cli.js spawn tester --cmux
-node dist/src/cli.js spawn coder --name coder-api --yes --cmux
+npm install
+npm run build
+node dist/src/cli.js status
 ```
 
 ## 角色模型策略

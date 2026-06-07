@@ -18,7 +18,12 @@ const cliCategories = [...new Set(cliCommands.map(c => c.category))]
       <!-- CLI 命令 -->
       <section id="cli" class="ref-section">
         <h2>CLI 命令速查</h2>
-        <p>所有 <code>pi-company</code> CLI 命令，按类别分组。</p>
+        <p><code>pi-company</code> CLI 主要用于初始化、启动和运维。日常协作发生在加载了 pi-company extension 的 Pi 会话里。</p>
+        <div class="root-note">
+          <strong>默认姿势：</strong>
+          <code>cd your-project</code> 后直接运行这些命令。只有从别的目录管理项目时，才在命令前加
+          <code>--root /path/to/project</code>。
+        </div>
 
         <div v-for="cat in cliCategories" :key="cat" class="cli-category">
           <h3>{{ cat }}</h3>
@@ -92,6 +97,20 @@ const cliCategories = [...new Set(cliCommands.map(c => c.category))]
 }
 .ref-section {
   margin-top: var(--space-12);
+}
+.root-note {
+  margin-top: var(--space-4);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+.root-note strong {
+  color: var(--amber);
+}
+.root-note code {
+  color: var(--cyan);
 }
 
 /* ── CLI Category ── */

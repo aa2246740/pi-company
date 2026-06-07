@@ -34,23 +34,36 @@ const steps = [
         <h2>1. 前置条件</h2>
         <p>确保你已安装：</p>
         <ul>
-          <li><strong>Node.js</strong> — 运行时环境</li>
+          <li><strong>Node.js</strong> — 安装和运行 pi-company CLI/extension</li>
           <li><strong>Pi</strong> — AI 编码助手（必需）</li>
         </ul>
 
-        <h2>2. 初始化公司</h2>
-        <p>在你的项目目录中初始化 pi-company：</p>
+        <p><code>pi-company</code> 不是 Node 服务。Node 只是运行 CLI 和 Pi extension 的环境；日常入口是在项目目录里启动带扩展的 Pi。</p>
 
         <CodeBlock
-          code="pi-company --root ./my-project init --id demo"
+          code="npm install -g pi-company"
+          prompt="$ "
+        />
+
+        <h2>2. 初始化公司</h2>
+        <p>进入你的项目目录，然后初始化 pi-company：</p>
+
+        <CodeBlock
+          code="cd ~/Documents/cmux/tarot-draw
+pi-company init --id tarot-draw"
           prompt="$ "
         />
 
         <p>查看初始化结果：</p>
         <CodeBlock
-          code="pi-company --root ./my-project status"
+          code="pi-company status"
           prompt="$ "
         />
+
+        <div class="alert alert--info">
+          <span class="alert__icon">ℹ</span>
+          <span>人在项目目录里时不需要 <code>--root</code>。只有从别的目录管理这个项目时才写 <code>--root ~/Documents/cmux/tarot-draw</code>。</span>
+        </div>
 
         <!-- 磁盘变化抽屉 -->
         <details class="disk-drawer">
@@ -87,7 +100,7 @@ const steps = [
         </div>
 
         <CodeBlock
-          code='eval "$(pi-company --root ./my-project launch-command lead)"'
+          code='eval "$(pi-company launch-command lead)"'
           prompt="$ "
         />
 
@@ -103,7 +116,15 @@ const steps = [
       <!-- Step 3: 启动工作者 -->
       <section id="launch-workers" class="qs-section">
         <h2>4. 启动工作者</h2>
-        <p>根据需要启动其他 agent。支持两种模式：</p>
+        <p>进入 lead Pi 后，先用自然语言告诉 lead 你要做什么。Lead 会决定需要哪些角色，并通过工具分发任务。需要新窗口时，再启动其他 agent。</p>
+
+        <TerminalPane title="lead Pi" :show-dots="true">
+          <div class="terminal-output">
+            <span class="text-green">&gt;</span> 继续做塔罗抽卡网站。请检查当前状态，决定需要哪些角色，然后分发任务。
+          </div>
+        </TerminalPane>
+
+        <p>也可以手动启动其他 agent。支持两种模式：</p>
 
         <!-- 模式切换 -->
         <div class="mode-toggle">
@@ -129,12 +150,12 @@ const steps = [
           <p>在单独的终端窗口中启动每个 agent：</p>
 
           <CodeBlock
-            code="pi-company --root ./my-project spawn tester --manual"
+            code="pi-company spawn tester --manual"
             prompt="$ "
           />
 
           <CodeBlock
-            code="pi-company --root ./my-project spawn coder --name coder-ui --yes --manual"
+            code="pi-company spawn coder --name coder-ui --yes --manual"
             prompt="$ "
           />
 
@@ -166,12 +187,12 @@ const steps = [
           <p>cmux 自动创建和管理窗格：</p>
 
           <CodeBlock
-            code="pi-company --root ./my-project spawn tester --cmux"
+            code="pi-company spawn tester --cmux"
             prompt="$ "
           />
 
           <CodeBlock
-            code="pi-company --root ./my-project spawn coder --name coder-ui --yes --cmux"
+            code="pi-company spawn coder --name coder-ui --yes --cmux"
             prompt="$ "
           />
 
