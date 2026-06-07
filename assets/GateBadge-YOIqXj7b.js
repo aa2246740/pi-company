@@ -1,0 +1,2 @@
+import{C as e,D as t,I as n,O as r,R as i,b as a,n as o}from"./index-CDSETsZE.js";var s={class:`gate-badge__icon`},c={class:`gate-badge__label`},l=o(t({__name:`GateBadge`,props:{label:{},passed:{type:Boolean}},setup(t){return(o,l)=>(r(),e(`div`,{class:n([`gate-badge`,{"gate-badge--passed":t.passed,"gate-badge--blocked":!t.passed}])},[a(`span`,s,i(t.passed?`✓`:`✗`),1),a(`span`,c,i(t.label),1)],2))}}),[[`__scopeId`,`data-v-40931d3f`]]);export{l as t};
+//# sourceMappingURL=GateBadge-YOIqXj7b.js.map
