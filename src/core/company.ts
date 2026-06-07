@@ -10,6 +10,7 @@ import type {
   CompanyEvent,
   CompanyState,
   IssueRecord,
+  IssueWorkType,
   MailboxMessage,
   MailboxMessageType,
   MergeabilityRecord,
@@ -342,7 +343,11 @@ function requireAgentCurrentTask(state: CompanyState, agent: string, issueId: st
   if (issue.status === "done") throw new Error(`Issue ${issueId} is already done.`);
 }
 
-export function sendCompanyMessage(root: string, message: Omit<MailboxMessage, "id" | "ts">): MailboxMessage {
+export function sendCompanyMessage(
+  root: string,
+  message: Omit<MailboxMessage, "id" | "ts">,
+  options: { bypassTargetCooldown?: boolean } = {},
+): MailboxMessage {
   const paths = companyPaths(root);
   ensureCompanyDirs(paths);
   const events = readEvents(paths);
@@ -365,7 +370,7 @@ export function sendCompanyMessage(root: string, message: Omit<MailboxMessage, "
   const wake = rateLimitWake ?? decideMessageWake(events, normalizeMessagePolicy(state.config?.message_policy), {
     ...message,
     priority,
-  }, ts);
+  }, ts, options);
   const text = appendPrGateSnapshot(state, message);
   const full: MailboxMessage = {
     id: newId("msg"),
@@ -516,6 +521,7 @@ export function decideMessageWake(
   policy: MessagePolicy,
   message: Pick<MailboxMessage, "to" | "type" | "priority">,
   ts: string,
+  options: { bypassTargetCooldown?: boolean } = {},
 ): MessageWakeDecision {
   if (message.type === "human_steering" && policy.always_wake_human_steering) {
     return { mode: "immediate", reason: "human steering always wakes lead" };
@@ -555,19 +561,22 @@ export function decideMessageWake(
     };
   }
 
-  const latestAgentWake = agentImmediateEvents
-    .map((event) => Date.parse(event.ts))
-    .filter(Number.isFinite)
-    .sort((a, b) => b - a)[0];
-  if (latestAgentWake && latestAgentWake >= agentCooldownStart) {
-    return {
-      mode: "digest",
-      reason: `${message.to} is cooling down`,
-      next_wake_after: new Date(latestAgentWake + policy.agent_cooldown_ms).toISOString(),
-    };
+  if (!options.bypassTargetCooldown) {
+    const latestAgentWake = agentImmediateEvents
+      .map((event) => Date.parse(event.ts))
+      .filter(Number.isFinite)
+      .sort((a, b) => b - a)[0];
+    if (latestAgentWake && latestAgentWake >= agentCooldownStart) {
+      return {
+        mode: "digest",
+        reason: `${message.to} is cooling down`,
+        next_wake_after: new Date(latestAgentWake + policy.agent_cooldown_ms).toISOString(),
+      };
+    }
   }
 
   if (message.priority === "urgent") return { mode: "immediate", reason: "urgent priority within rate limits" };
+  if (options.bypassTargetCooldown) return { mode: "immediate", reason: "message bypasses target cooldown within rate limits" };
   return { mode: "immediate", reason: "message type and rate limits allow wake" };
 }
 
@@ -797,8 +806,15 @@ export function recordHumanSteering(root: string, targetAgent: string, text: str
   });
 }
 
-export function createIssue(root: string, actor: string, title: string, body = ""): IssueRecord {
+export function createIssue(
+  root: string,
+  actor: string,
+  title: string,
+  body = "",
+  options: { work_type?: IssueWorkType | null } = {},
+): IssueRecord {
   requireLead(root, actor, "create issues");
+  const workType = options.work_type ?? null;
   const paths = companyPaths(root);
   const id = `ISSUE-${String(Object.keys(loadState(root).issues).length + 1).padStart(3, "0")}`;
   const now = nowIso();
@@ -806,6 +822,7 @@ export function createIssue(root: string, actor: string, title: string, body = "
     id,
     title,
     body,
+    work_type: workType,
     status: "open",
     owner: null,
     created_by: actor,
@@ -824,6 +841,7 @@ export function assignIssue(root: string, actor: string, issueId: string, owner:
   if (!issue) throw new Error(`Unknown issue ${issueId}`);
   if (issue.status === "done") throw new Error(`Issue ${issueId} is already done.`);
   if (!state.agents[owner]) throw new Error(`Unknown agent ${owner}. Spawn or register the agent before assigning issues.`);
+  assertIssueOwnerRoleCompatible(state, issue, owner);
   const shouldNotifyOwner = issue.owner !== owner && owner !== actor;
   const next = recordEvent(root, makeEvent("issue.assigned", actor, { issue_id: issueId, owner }));
   if (!shouldNotifyOwner) return next;
@@ -842,11 +860,53 @@ function renderAssignmentMessage(issue: IssueRecord): string {
   return `[pi-company assignment]
 
 You are assigned ${issue.id}: ${issue.title}
+Work type: ${issue.work_type ?? "unspecified"}
 
 Start or continue the issue with company_task_update, inspect the local project files you need, and report blockers or PR readiness through the normal pi-company tools.
 
 Issue brief:
 ${issue.body || "(no issue body provided)"}`;
+}
+
+export function inferIssueWorkType(title: string, body = ""): IssueWorkType | null {
+  const text = `${title}\n${body}`.toLowerCase();
+  if (/(html|css|javascript|typescript|three\.?\s*js|threejs|frontend|backend|\bapi\b|website|web app|\bapp\b|game|build|implement|implementation|code|source|component|server|client|网页|网站|前端|后端|接口|游戏|代码|编码|实现|开发|构建|可运行|交付物)/i.test(text)) return "implementation";
+  if (/(impeccable|designer|\bui\b|\bux\b|visual|interaction|prototype|wireframe|layout|style guide|design system|设计师|视觉|交互|原型|线框|设计系统|界面设计)/i.test(text)) return "design";
+  if (/(acceptance|requirements?|product|scope|user value|验收|需求|产品|范围|用户价值)/i.test(text)) return "product";
+  if (/(test|qa|validation|verify|测试|验证|验收测试)/i.test(text)) return "test";
+  if (/(review|code review|审查|评审|代码审查)/i.test(text)) return "review";
+  if (/(research|investigate|compare|调研|研究|调查|对比)/i.test(text)) return "research";
+  return null;
+}
+
+function assertIssueOwnerRoleCompatible(state: CompanyState, issue: IssueRecord, owner: string): void {
+  const workType = issue.work_type ?? null;
+  if (!workType) return;
+  const agent = state.agents[owner];
+  const role = agent?.role ?? owner;
+  if (issueOwnerCanOwnWorkType(role, owner, workType)) return;
+  throw new Error(`Issue ${issue.id} is ${workType} work and cannot be assigned to ${owner} (${role}). ${workType} work must be owned by ${expectedRoleForWorkType(workType)}.`);
+}
+
+function issueOwnerCanOwnWorkType(role: string, owner: string, workType: IssueWorkType): boolean {
+  if (workType === "implementation") return role === "coder" || owner.startsWith("coder");
+  if (workType === "design") return role === "designer" || owner.startsWith("designer");
+  if (workType === "product") return role === "pm" || owner.startsWith("pm");
+  if (workType === "test") return role === "tester" || owner.startsWith("tester");
+  if (workType === "review") return role === "reviewer" || owner.startsWith("reviewer");
+  if (workType === "research") return role === "researcher" || owner.startsWith("researcher");
+  return false;
+}
+
+function expectedRoleForWorkType(workType: IssueWorkType): string {
+  return ({
+    product: "pm",
+    design: "designer",
+    implementation: "coder",
+    test: "tester",
+    review: "reviewer",
+    research: "researcher",
+  } satisfies Record<IssueWorkType, string>)[workType];
 }
 
 export function startTask(root: string, actor: string, issueId: string, note?: string | null): CompanyState {
@@ -932,6 +992,7 @@ export function ensureCoderWorktree(root: string, plan: { worktree: string | nul
   if (!yes) {
     throw new Error(`Refusing to create worktree without confirmation. Re-run with --yes.\nWould run: git worktree add ${plan.worktree} -b ${plan.branch}`);
   }
+  ensureGitHeadForWorktree(root);
   const branchExists = gitRefExists(root, plan.branch);
   const baseRef = resolveGitHead(root, "main") ? "main" : "HEAD";
   const args = branchExists
@@ -942,6 +1003,39 @@ export function ensureCoderWorktree(root: string, plan: { worktree: string | nul
   });
   if (result.status !== 0) {
     throw new Error(result.stderr || result.stdout || "git worktree add failed");
+  }
+}
+
+function ensureGitHeadForWorktree(root: string): void {
+  if (resolveGitHead(root, "HEAD")) return;
+  const gitDir = spawnSync("git", ["-C", root, "rev-parse", "--git-dir"], { encoding: "utf8" });
+  if (gitDir.status !== 0) {
+    const init = spawnSync("git", ["-C", root, "init", "-b", "main"], { encoding: "utf8" });
+    if (init.status !== 0) {
+      throw new Error(init.stderr || init.stdout || "git init failed while preparing initial worktree baseline");
+    }
+  }
+
+  ensureCompanyGitignore(root);
+  const add = spawnSync("git", ["-C", root, "add", ".gitignore"], { encoding: "utf8" });
+  if (add.status !== 0) {
+    throw new Error(add.stderr || add.stdout || "git add .gitignore failed while preparing initial worktree baseline");
+  }
+  const commit = spawnSync("git", [
+    "-C",
+    root,
+    "-c",
+    "user.name=pi-company",
+    "-c",
+    "user.email=pi-company@example.local",
+    "commit",
+    "-m",
+    "Initialize pi-company workspace",
+    "--",
+    ".gitignore",
+  ], { encoding: "utf8" });
+  if (commit.status !== 0) {
+    throw new Error(commit.stderr || commit.stdout || "git commit failed while preparing initial worktree baseline");
   }
 }
 
@@ -1193,16 +1287,63 @@ function rootWorktreeStatus(root: string): string[] {
   return result.stdout.split(/\r?\n/).filter((line) => line.trim().length > 0);
 }
 
+function issueAssignmentBoundaryFindings(state: CompanyState): string[] {
+  return Object.values(state.issues)
+    .filter((issue) => issue.status !== "done" && issue.owner && issue.work_type)
+    .flatMap((issue) => {
+      const owner = issue.owner ?? "";
+      const agent = state.agents[owner];
+      if (agent && issueOwnerCanOwnWorkType(agent.role, owner, issue.work_type as IssueWorkType)) return [];
+      return [`${issue.id} is ${issue.work_type} work but is assigned to ${owner || "nobody"}; reassign it to ${expectedRoleForWorkType(issue.work_type as IssueWorkType)}`];
+    });
+}
+
+function rootDeliverableBoundaryFindings(root: string): string[] {
+  const git = spawnSync("git", ["-C", root, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8" });
+  if (git.status === 0) return [];
+  const deliverables = rootDeliverableFiles(root);
+  if (deliverables.length === 0) return [];
+  return [`project root has runnable deliverables outside git/worktree PR flow: ${deliverables.slice(0, 8).join(", ")}`];
+}
+
+function rootDeliverableFiles(root: string): string[] {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((entry) => entry.name !== ".pi-company" && entry.name !== ".git")
+    .filter((entry) => {
+      if (entry.isDirectory()) return ["src", "app", "pages", "components", "server", "client", "public", "assets"].includes(entry.name);
+      if (!entry.isFile()) return false;
+      return /\.(html|css|js|jsx|ts|tsx|vue|svelte|astro|json|mjs|cjs)$/i.test(entry.name) ||
+        /^(package|vite\.config|next\.config|nuxt\.config|webpack\.config|rollup\.config|tsconfig)\b/i.test(entry.name);
+    })
+    .map((entry) => entry.name)
+    .sort();
+}
+
 function buildLeadBriefNextActions(
   incompleteIssues: IssueRecord[],
   nonMergedPrs: LeadBriefPr[],
   blockedPrs: LeadBriefPr[],
   dirtyPrs: LeadBriefPr[],
   rootWorktreeChanges: string[],
+  roleBoundaryFindings: string[] = [],
 ): string[] {
   const actions: string[] = [];
+  for (const finding of roleBoundaryFindings) {
+    actions.push(`Fix role boundary violation: ${finding}`);
+  }
   for (const pr of blockedPrs) {
-    actions.push(`${pr.id}: resolve gates before announcing completion (${pr.blockers.join("; ") || pr.status})`);
+    const blockers = pr.blockers.join("; ") || pr.status;
+    if (pr.blockers.some(isCaveatedGateBlocker)) {
+      actions.push(`${pr.id}: caveated gate evidence blocks delivery (${blockers}); assign ${pr.author} to resolve it and collect fresh clean review/test/acceptance, or ask the human for an explicit risk waiver. Do not describe this as complete, usable, or only a minor suggestion.`);
+    } else {
+      actions.push(`${pr.id}: resolve gates before announcing completion (${blockers})`);
+    }
   }
   for (const pr of nonMergedPrs.filter((pr) => pr.ready && pr.blockers.length === 0)) {
     actions.push(`${pr.id}: gates are green; lead should merge when the root worktree is clean`);
@@ -1217,6 +1358,10 @@ function buildLeadBriefNextActions(
     actions.push(`${issue.id}: continue assigned work with ${issue.owner ?? "an owner"}`);
   }
   return actions;
+}
+
+function isCaveatedGateBlocker(blocker: string): boolean {
+  return /\bcontains caveat\b/i.test(blocker);
 }
 
 function compareIds(left: { id: string }, right: { id: string }): number {
@@ -1297,12 +1442,14 @@ export function submitReview(root: string, actor: string, prId: string, decision
   requireAgentRole(state, actor, "reviewer", "submit reviews");
   if (actor === pr.author) throw new Error(`PR author ${actor} cannot review their own PR.`);
   if (decision === "approve") assertCleanPrWorktreeForEvidence(pr, "approve");
-  return recordEvent(root, makeEvent("review.submitted", actor, {
+  const next = recordEvent(root, makeEvent("review.submitted", actor, {
     pr_id: prId,
     decision,
     summary,
     head: pr ? resolveGitHead(root, pr.branch) : null,
   }));
+  notifyLeadOfPrGate(root, next, actor, prId, `Review ${decision} submitted by ${actor} for ${prId}. Check gates and route fixes or acceptance.`);
+  return loadState(root);
 }
 
 export function submitTest(root: string, actor: string, prId: string, status: "pass" | "fail" | "blocked", summary: string): CompanyState {
@@ -1314,12 +1461,14 @@ export function submitTest(root: string, actor: string, prId: string, status: "p
   requireAgentRole(state, actor, "tester", "submit tests");
   if (actor === pr.author) throw new Error(`PR author ${actor} cannot test their own PR.`);
   if (status === "pass") assertCleanPrWorktreeForEvidence(pr, "pass");
-  return recordEvent(root, makeEvent("test.submitted", actor, {
+  const next = recordEvent(root, makeEvent("test.submitted", actor, {
     pr_id: prId,
     status,
     summary,
     head: pr ? resolveGitHead(root, pr.branch) : null,
   }));
+  notifyLeadOfPrGate(root, next, actor, prId, `Tester status ${status} submitted by ${actor} for ${prId}. Check gates and route fixes or acceptance.`);
+  return loadState(root);
 }
 
 export function submitAcceptance(root: string, actor: string, prId: string, decision: "accept" | "request_changes" | "comment", summary: string): CompanyState {
@@ -1336,12 +1485,14 @@ export function submitAcceptance(root: string, actor: string, prId: string, deci
   }
   if (actor === pr.author) throw new Error(`PR author ${actor} cannot accept their own PR.`);
   if (decision === "accept") assertCleanPrWorktreeForEvidence(pr, "accept");
-  return recordEvent(root, makeEvent("acceptance.submitted", actor, {
+  const next = recordEvent(root, makeEvent("acceptance.submitted", actor, {
     pr_id: prId,
     decision,
     summary,
     head: pr ? resolveGitHead(root, pr.branch) : null,
   }));
+  notifyLeadOfPrGate(root, next, actor, prId, `Product acceptance ${decision} submitted by ${actor} for ${prId}. Check gates and merge readiness.`);
+  return loadState(root);
 }
 
 export function recordAutomatedTests(root: string, actor: string, prId: string, status: "passed" | "failed" | "blocked", summary: string, command?: string | null): CompanyState {
@@ -1356,13 +1507,30 @@ export function recordAutomatedTests(root: string, actor: string, prId: string, 
     throw new Error(`Only ${pr.author}, tester agents, or system can record automated tests for ${prId}.`);
   }
   if (status === "passed") assertCleanPrWorktreeForEvidence(pr, "record passing automated tests");
-  return recordEvent(root, makeEvent("pr.automated_tests", actor, {
+  const next = recordEvent(root, makeEvent("pr.automated_tests", actor, {
     pr_id: prId,
     status,
     summary,
     command: command ?? null,
     head: pr ? resolveGitHead(root, pr.branch) : null,
   }));
+  notifyLeadOfPrGate(root, next, actor, prId, `Automated tests ${status} recorded by ${actor} for ${prId}. Check gates and route fixes or acceptance.`);
+  return loadState(root);
+}
+
+function notifyLeadOfPrGate(root: string, state: CompanyState, actor: string, prId: string, text: string): void {
+  const lead = state.config?.lead ?? "lead";
+  if (actor === lead || !state.agents[lead]) return;
+  sendCompanyMessage(root, {
+    from: actor,
+    to: lead,
+    type: "report",
+    task: prId,
+    priority: "high",
+    text,
+  }, {
+    bypassTargetCooldown: true,
+  });
 }
 
 function requirePrNotMerged(pr: PullRequestRecord, action: string): void {
@@ -1459,6 +1627,10 @@ export function buildLeadBrief(root: string): LeadBrief {
   const nonMergedPrs = prs.filter((pr) => pr.status !== "merged" && pr.status !== "abandoned");
   const dirtyPrs = prs.filter((pr) => pr.status !== "abandoned" && pr.worktree_dirty.length > 0);
   const rootWorktreeChanges = rootWorktreeStatus(root);
+  const roleBoundaryFindings = [
+    ...issueAssignmentBoundaryFindings(state),
+    ...rootDeliverableBoundaryFindings(root),
+  ];
   const reasons: string[] = [];
 
   if (incompleteIssues.length > 0) {
@@ -1473,15 +1645,16 @@ export function buildLeadBrief(root: string): LeadBrief {
   if (dirtyPrs.length > 0) {
     reasons.push(`${dirtyPrs.length} PR worktree(s) have uncommitted changes`);
   }
+  reasons.push(...roleBoundaryFindings);
 
   const blockedPrs = nonMergedPrs.filter((pr) => pr.blockers.length > 0);
   const canClaimComplete = reasons.length === 0;
-  const nextActions = buildLeadBriefNextActions(incompleteIssues, nonMergedPrs, blockedPrs, dirtyPrs, rootWorktreeChanges);
+  const nextActions = buildLeadBriefNextActions(incompleteIssues, nonMergedPrs, blockedPrs, dirtyPrs, rootWorktreeChanges, roleBoundaryFindings);
 
   return {
     company: state.config?.id ?? "not initialized",
     updated_at: state.updated_at,
-    delivery_state: canClaimComplete ? "complete" : blockedPrs.length > 0 || dirtyPrs.length > 0 || rootWorktreeChanges.length > 0 ? "blocked" : "in_progress",
+    delivery_state: canClaimComplete ? "complete" : blockedPrs.length > 0 || dirtyPrs.length > 0 || rootWorktreeChanges.length > 0 || roleBoundaryFindings.length > 0 ? "blocked" : "in_progress",
     can_claim_complete: canClaimComplete,
     reasons_not_complete: reasons,
     incomplete_issues: incompleteIssues,
@@ -1633,7 +1806,7 @@ export function renderLeadBrief(brief: LeadBrief): string {
     ? brief.reasons_not_complete.map((reason) => `- ${reason}`).join("\n")
     : "- none";
   const issues = brief.incomplete_issues.length
-    ? brief.incomplete_issues.map((issue) => `- ${issue.id} ${issue.status} ${issue.title}${issue.owner ? ` -> ${issue.owner}` : ""}`).join("\n")
+    ? brief.incomplete_issues.map((issue) => `- ${issue.id} ${issue.status}${issue.work_type ? ` ${issue.work_type}` : ""} ${issue.title}${issue.owner ? ` -> ${issue.owner}` : ""}`).join("\n")
     : "- none";
   const prs = brief.prs.length
     ? brief.prs.map((pr) => {
@@ -1829,6 +2002,7 @@ export function renderIssue(issue: IssueRecord): string {
 
 Status: ${issue.status}
 Owner: ${issue.owner ?? "unassigned"}
+Work type: ${issue.work_type ?? "unspecified"}
 Created by: ${issue.created_by}
 
 ${issue.body}

@@ -36,6 +36,7 @@ import {
   normalizeMessagePolicy,
   rateLimitIsActive,
   reportRateLimit,
+  resolveGitHead,
   startTask,
   submitReview,
   sendCompanyMessage,
@@ -441,6 +442,26 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(loadState(root).issues[issue.id].owner).toBe("tester");
   });
 
+  it("enforces work-type ownership boundaries for issue assignment", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "work-type-boundary-demo" });
+    registerCoder(root);
+    const implementation = createIssue(root, "lead", "Build keyboard simulator", "Create index.html.", { work_type: "implementation" });
+    const design = createIssue(root, "lead", "Design keyboard simulator", "Use impeccable.", { work_type: "design" });
+    const product = createIssue(root, "lead", "Scope keyboard simulator", "Define acceptance.", { work_type: "product" });
+
+    expect(() => assignIssue(root, "lead", implementation.id, "pm")).toThrow(/implementation work/);
+    expect(() => assignIssue(root, "lead", implementation.id, "designer")).toThrow(/implementation work/);
+    assignIssue(root, "lead", implementation.id, "coder");
+    assignIssue(root, "lead", design.id, "designer");
+    assignIssue(root, "lead", product.id, "pm");
+
+    const state = loadState(root);
+    expect(state.issues[implementation.id].owner).toBe("coder");
+    expect(state.issues[design.id].owner).toBe("designer");
+    expect(state.issues[product.id].owner).toBe("pm");
+  });
+
   it("blocks assignment to unknown issues or agents", () => {
     const root = tempRoot();
     initCompany({ root, id: "assign-target-demo" });
@@ -548,6 +569,37 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(messages[0].priority).toBe("high");
     expect(messages[0].wake?.mode).toBe("immediate");
     expect(messages[0].text).toContain("Assign reviewer/tester");
+  });
+
+  it("notifies lead when PR gate evidence is submitted", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "gate-notify-demo" });
+    const plan = registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Gate notification",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate feature behavior.");
+    acknowledgeInbox(root, "lead", listInbox(root, "lead").map((message) => message.id));
+
+    recordAutomatedTests(root, "coder", pr.id, "passed", "Automated checks passed.", "npm test");
+    submitReview(root, "reviewer", pr.id, "approve", "Approved.");
+    submitTest(root, "tester", pr.id, "pass", "Passed.");
+    submitAcceptance(root, "pm", pr.id, "accept", "Product behavior accepted.");
+
+    const messages = listInbox(root, "lead");
+    expect(messages.map((message) => message.from)).toEqual(["coder", "reviewer", "tester", "pm"]);
+    expect(messages.map((message) => message.task)).toEqual([pr.id, pr.id, pr.id, pr.id]);
+    expect(messages.every((message) => message.priority === "high")).toBe(true);
+    expect(messages.every((message) => message.wake?.mode === "immediate")).toBe(true);
+    expect(messages.map((message) => message.text).join("\n")).toContain("Automated tests passed");
+    expect(messages.map((message) => message.text).join("\n")).toContain("Review approve");
+    expect(messages.map((message) => message.text).join("\n")).toContain("Tester status pass");
+    expect(messages.map((message) => message.text).join("\n")).toContain("Product acceptance accept");
   });
 
   it("blocks positive PR evidence when the PR worktree has uncommitted changes", () => {
@@ -665,6 +717,37 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(message.text).toContain("review: approve by reviewer caveat=true");
   });
 
+  it("tells lead to fix or waive caveated gates instead of calling work usable", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "caveated-gate-next-action-demo" });
+    const plan = registerCoder(root);
+    ensureCoderWorktree(root, plan, true);
+    commitFile(plan.worktree ?? root, "game.html", "<canvas></canvas>\n", "game");
+    const pr = createPr(root, "coder", {
+      title: "Pixel game",
+      issue_id: null,
+      summary: "Implements the game.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate gameplay.");
+    recordAutomatedTests(root, "coder", pr.id, "passed", "58 tests passed, 0 failed.", "npm test");
+    submitReview(root, "reviewer", pr.id, "approve", "Approve, but bird drawing needs polish before merge.");
+    submitTest(root, "tester", pr.id, "pass", "PASS. Gameplay works.");
+    submitAcceptance(root, "pm", pr.id, "accept", "Product behavior accepted.");
+
+    const rendered = renderLeadBrief(buildLeadBrief(root));
+
+    expect(getPrGateStatus(root, pr.id).blockers).toContain("Reviewer approval contains caveat");
+    expect(rendered).toContain("caveated gate evidence blocks delivery");
+    expect(rendered).toContain("assign coder to resolve it");
+    expect(rendered).toContain("explicit risk waiver");
+    expect(rendered).toContain("Do not describe this as complete, usable, or only a minor suggestion.");
+  });
+
   it("blocks final completion when project root has untracked artifacts", () => {
     const root = tempRoot();
     initGitRepo(root);
@@ -684,6 +767,20 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(brief.root_worktree_changes).toContain("?? PRODUCT.md");
     expect(rendered).toContain("Root Worktree Changes:");
     expect(rendered).toContain("Resolve tracked, staged, or untracked project-root changes before final delivery");
+  });
+
+  it("blocks delivery when runnable files appear in a non-git project root outside PR flow", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "root-deliverable-boundary-demo" });
+    fs.writeFileSync(path.join(root, "index.html"), "<html></html>\n", "utf8");
+
+    const brief = buildLeadBrief(root);
+    const rendered = renderLeadBrief(brief);
+
+    expect(brief.delivery_state).toBe("blocked");
+    expect(brief.can_claim_complete).toBe(false);
+    expect(rendered).toContain("project root has runnable deliverables outside git/worktree PR flow: index.html");
+    expect(rendered).toContain("Fix role boundary violation");
   });
 
   it("does not count author self-review or self-test as independent gates", () => {
@@ -1232,8 +1329,9 @@ Rate limit 已过期，可以恢复正常工作`);
     const state = reportRateLimit(root, "system", "429 storm", "provider_429", "2099-01-01T00:00:00.000Z");
 
     expect(agentRateLimitResumeAt(state, "lead")).toBe("2099-01-01T00:01:00.000Z");
-    expect(agentRateLimitResumeAt(state, "pm")).toBe("2099-01-01T00:01:30.000Z");
-    expect(agentRateLimitResumeAt(state, "tester")).toBe("2099-01-01T00:03:00.000Z");
+    expect(agentRateLimitResumeAt(state, "designer")).toBe("2099-01-01T00:01:30.000Z");
+    expect(agentRateLimitResumeAt(state, "pm")).toBe("2099-01-01T00:02:00.000Z");
+    expect(agentRateLimitResumeAt(state, "tester")).toBe("2099-01-01T00:03:30.000Z");
 
     const leadMessage = sendCompanyMessage(root, {
       from: "tester",
@@ -1253,11 +1351,11 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(leadMessage.wake?.mode).toBe("digest");
     expect(leadMessage.wake?.next_wake_after).toBe("2099-01-01T00:01:00.000Z");
     expect(testerMessage.wake?.mode).toBe("digest");
-    expect(testerMessage.wake?.next_wake_after).toBe("2099-01-01T00:03:00.000Z");
+    expect(testerMessage.wake?.next_wake_after).toBe("2099-01-01T00:03:30.000Z");
     expect(shouldAutoDeliverMessage(leadMessage, latestState, "lead", "2099-01-01T00:00:30.000Z")).toBe(false);
     expect(shouldAutoDeliverMessage(leadMessage, latestState, "lead", "2099-01-01T00:01:00.000Z")).toBe(true);
-    expect(shouldAutoDeliverMessage(testerMessage, latestState, "tester", "2099-01-01T00:02:59.000Z")).toBe(false);
-    expect(shouldAutoDeliverMessage(testerMessage, latestState, "tester", "2099-01-01T00:03:00.000Z")).toBe(true);
+    expect(shouldAutoDeliverMessage(testerMessage, latestState, "tester", "2099-01-01T00:03:29.000Z")).toBe(false);
+    expect(shouldAutoDeliverMessage(testerMessage, latestState, "tester", "2099-01-01T00:03:30.000Z")).toBe(true);
   });
 
   it("keeps human steering immediate during organization rate-limit backoff", () => {
@@ -2802,6 +2900,36 @@ Rate limit 已过期，可以恢复正常工作`);
 
     expect(fs.existsSync(path.join(plan.worktree ?? "", "unrelated.txt"))).toBe(false);
     expect(gitOutput(root, ["rev-parse", "pi-company/coder-new"]).trim()).toBe(gitOutput(root, ["rev-parse", "main"]).trim());
+  });
+
+  it("creates an initial pi-company baseline commit before worktree creation in an empty git repo", () => {
+    const root = tempRoot();
+    runGit(root, ["init", "-b", "main"]);
+    fs.writeFileSync(path.join(root, "scratch.txt"), "do not commit me\n", "utf8");
+    initCompany({ root, id: "empty-head-demo" });
+
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder-empty", "Implement from an empty repository.");
+    ensureCoderWorktree(root, plan, true);
+
+    expect(resolveGitHead(root, "HEAD")).toBeTruthy();
+    expect(fs.existsSync(plan.worktree ?? "")).toBe(true);
+    expect(gitOutput(root, ["show", "--stat", "--oneline", "HEAD"])).toContain(".gitignore");
+    expect(gitOutput(root, ["status", "--porcelain", "--untracked-files=all"])).toContain("?? scratch.txt");
+  });
+
+  it("initializes git before worktree creation when a company project has no git repo yet", () => {
+    const root = tempRoot();
+    fs.writeFileSync(path.join(root, "scratch.txt"), "do not commit me\n", "utf8");
+    initCompany({ root, id: "nogit-worktree-demo" });
+
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder-nogit", "Implement from a no-git project.");
+    ensureCoderWorktree(root, plan, true);
+
+    expect(resolveGitHead(root, "HEAD")).toBeTruthy();
+    expect(fs.existsSync(plan.worktree ?? "")).toBe(true);
+    expect(gitOutput(root, ["branch", "--show-current"]).trim()).toBe("main");
+    expect(gitOutput(root, ["show", "--stat", "--oneline", "HEAD"])).toContain(".gitignore");
+    expect(gitOutput(root, ["status", "--porcelain", "--untracked-files=all"])).toContain("?? scratch.txt");
   });
 
   it("reuses an existing correct coder worktree without requiring creation confirmation", () => {

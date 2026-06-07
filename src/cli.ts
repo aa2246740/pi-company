@@ -17,6 +17,7 @@ import {
   createPr,
   ensureCoderWorktree,
   getPrGateStatus,
+  inferIssueWorkType,
   initCompany,
   launchCommand,
   loadState,
@@ -43,6 +44,7 @@ import {
   listInbox,
 } from "./core/company.js";
 import { parseCmuxSurfaceRef } from "./core/cmux.js";
+import type { IssueWorkType } from "./core/types.js";
 import { companyPaths } from "./core/paths.js";
 import { classifyRateLimitText } from "./core/rate-limit.js";
 import type { MailboxMessage } from "./core/types.js";
@@ -80,7 +82,7 @@ program.command("status")
   .description("Show company status")
   .action(() => {
     const state = loadState(rootOpt());
-    printStatus(state);
+    printStatus(rootOpt(), state);
   });
 
 program.command("brief")
@@ -178,9 +180,11 @@ const issue = program.command("issue").description("Manage local issues");
 issue.command("create")
   .argument("<title>")
   .option("--body <body>", "Issue body", "")
+  .option("--work-type <type>", "product|design|implementation|test|review|research")
   .option("--actor <agent>", "Actor", "lead")
   .action((title, opts) => {
-    const created = createIssue(rootOpt(), opts.actor, title, opts.body);
+    const workType = validateWorkType(opts.workType ?? inferIssueWorkType(title, opts.body));
+    const created = createIssue(rootOpt(), opts.actor, title, opts.body, { work_type: workType });
     console.log(`${created.id}: ${created.title}`);
   });
 
@@ -560,7 +564,7 @@ function prAuthor(root: string, prId: string): string {
   return pr.author;
 }
 
-function printStatus(state: ReturnType<typeof loadState>): void {
+function printStatus(root: string, state: ReturnType<typeof loadState>): void {
   console.log(`Company: ${state.config?.id ?? "not initialized"}`);
   console.log(`Updated: ${state.updated_at ?? "never"}`);
   console.log("");
@@ -571,7 +575,7 @@ function printStatus(state: ReturnType<typeof loadState>): void {
   console.log("");
   console.log("Issues:");
   for (const issue of Object.values(state.issues)) {
-    console.log(`- ${issue.id} ${issue.status} ${issue.title}${issue.owner ? ` -> ${issue.owner}` : ""}`);
+    console.log(`- ${issue.id} ${issue.status}${issue.work_type ? ` ${issue.work_type}` : ""} ${issue.title}${issue.owner ? ` -> ${issue.owner}` : ""}`);
   }
   console.log("");
   console.log("PRs:");
@@ -579,7 +583,13 @@ function printStatus(state: ReturnType<typeof loadState>): void {
     const pending = item.merge_requested_at && item.status !== "merged" && item.status !== "blocked"
       ? ` pending_merge_since=${item.merge_requested_at}`
       : "";
-    console.log(`- ${item.id} ${item.status}${pending} ${item.title}`);
+    const gates = getPrGateStatus(root, item.id);
+    const hasCoderReadyEvidence = Boolean(item.self_test?.trim() && item.test_brief?.trim());
+    const coderReady = hasCoderReadyEvidence ? " coder_ready=yes" : " coder_ready=no";
+    const blockers = gates.ready
+      ? " gates=green"
+      : ` gate_blockers=${gates.blockers.join("; ") || "unknown"}`;
+    console.log(`- ${item.id} ${item.status}${coderReady}${pending} ${blockers} ${item.title}`);
   }
   const pendingMerges = pendingMergeRequests(state);
   if (pendingMerges.length > 0) {
@@ -608,6 +618,13 @@ function printMessages(messages: MailboxMessage[]): void {
     console.log(message.text);
     console.log("");
   }
+}
+
+function validateWorkType(value: unknown): IssueWorkType | null {
+  if (value === null || value === undefined || value === "") return null;
+  const text = String(value);
+  if (["product", "design", "implementation", "test", "review", "research"].includes(text)) return text as IssueWorkType;
+  throw new Error(`Invalid work type ${text}. Expected product, design, implementation, test, review, or research.`);
 }
 
 function launchInCmux(command: string): void {

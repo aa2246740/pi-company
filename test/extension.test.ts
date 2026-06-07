@@ -8,10 +8,12 @@ import {
   assignIssue,
   completeTask,
   createIssue,
+  createPr,
   initCompany,
   listInbox,
   loadConfig,
   loadState,
+  markPrReady,
   registerAgent,
   reportRateLimit,
   requestAgentSpawn,
@@ -251,6 +253,113 @@ describe("pi-company extension", () => {
 
     expect(result.content[0].text).toContain("PI_COMPANY_AGENT='pm'");
     expect(result.details.existing).toBe(true);
+  });
+
+  it("queues a mission briefing when launching an existing planned agent without assigned work", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-launch-mission-briefing" });
+    const { handlers, pi, tools } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx } = fakeContext(root);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const spawnTool = tools.find((tool) => tool.name === "company_spawn_agent");
+    if (!spawnTool) throw new Error("company_spawn_agent tool was not registered");
+    const result = await spawnTool.execute("tool-1", {
+      role: "pm",
+      name: "pm",
+      mission: "Use grill-me to pressure-test the Matrix 2048 concept.",
+      launch_in_cmux: false,
+    }, undefined, undefined, ctx) as ToolResult;
+    await handlers.session_shutdown?.({ reason: "quit" }, ctx);
+
+    const inbox = listInbox(root, "pm");
+    expect(result.details.briefing).toMatchObject({
+      to: "pm",
+      type: "assignment",
+      task: null,
+      priority: "high",
+    });
+    expect(inbox).toHaveLength(1);
+    expect(inbox[0].text).toContain("Use grill-me to pressure-test the Matrix 2048 concept.");
+    expect(inbox[0].text).toContain("(no issue assigned yet)");
+  });
+
+  it("auto-assigns the only unowned open issue when spawning a coder", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-spawn-coder-auto-assign" });
+    const issue = createIssue(root, "lead", "Implement Matrix 2048", "Build the game.");
+    const { handlers, pi, tools } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx } = fakeContext(root);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const spawnTool = tools.find((tool) => tool.name === "company_spawn_agent");
+    if (!spawnTool) throw new Error("company_spawn_agent tool was not registered");
+    const result = await spawnTool.execute("tool-1", {
+      role: "coder",
+      name: "coder",
+      mission: "Implement the Matrix-themed 2048 game.",
+      launch_in_cmux: false,
+      create_worktree: false,
+    }, undefined, undefined, ctx) as ToolResult;
+    await handlers.session_shutdown?.({ reason: "quit" }, ctx);
+
+    const state = loadState(root);
+    const inbox = listInbox(root, "coder");
+    expect(state.issues[issue.id].owner).toBe("coder");
+    expect(result.details.assigned_issue).toMatchObject({ id: issue.id, owner: "coder" });
+    expect(result.details.briefing).toMatchObject({
+      to: "coder",
+      type: "assignment",
+      task: issue.id,
+      priority: "high",
+    });
+    expect(inbox.some((message) => message.text.includes("[pi-company assignment]"))).toBe(true);
+    expect(inbox.some((message) => message.text.includes("[pi-company launch briefing]"))).toBe(true);
+  });
+
+  it("shows coder-ready PRs separately from missing gate blockers in status", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-status-ready-blocked" });
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder", "Implement the feature.");
+    registerAgent(root, {
+      ...plan,
+      status: "online",
+    });
+    const pr = createPr(root, "coder", {
+      title: "Ready but gate-blocked",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate feature behavior.");
+    const { handlers, pi, tools } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx } = fakeContext(root);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const statusTool = tools.find((tool) => tool.name === "company_status");
+    if (!statusTool) throw new Error("company_status tool was not registered");
+    const result = await statusTool.execute("tool-1", {}, undefined, undefined, ctx) as ToolResult;
+    await handlers.session_shutdown?.({ reason: "quit" }, ctx);
+
+    expect(result.content[0].text).toContain(`${pr.id} blocked coder_ready=yes`);
+    expect(result.content[0].text).toContain("gate_blockers=Needs 1 reviewer approval(s); Missing tester validation; Missing automated test result; Missing PM/lead product acceptance");
   });
 
   it("queues a launch briefing when an existing agent has assigned work", async () => {
@@ -502,6 +611,237 @@ describe("pi-company extension", () => {
     expect(listInbox(root, "tester")).toHaveLength(1);
   });
 
+  it("keeps inbox messages queued when Pi rejects a follow-up because the agent became busy", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-busy-race-delivery" });
+    sendCompanyMessage(root, {
+      from: "lead",
+      to: "tester",
+      type: "assignment",
+      priority: "high",
+      text: "Please validate PR-123.",
+    });
+    const { handlers, pi } = fakePi({
+      "company-root": root,
+      "company-agent": "tester",
+      "company-role": "tester",
+    });
+    const sendUserMessage = pi.sendUserMessage as unknown as ReturnType<typeof vi.fn>;
+    sendUserMessage.mockRejectedValue(new Error("Agent is already processing a prompt. Use steer() or followUp() to queue messages."));
+    const { ctx, ui } = fakeContext(root);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    await handlers.session_shutdown?.({}, ctx);
+
+    expect(sendUserMessage).toHaveBeenCalledTimes(1);
+    expect(listInbox(root, "tester")).toHaveLength(1);
+    expect(ui.setStatus).not.toHaveBeenCalledWith("pi-company", expect.stringContaining("mailbox error"));
+  });
+
+  it("blocks lead from writing deliverables directly through built-in tools", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-lead-tool-guard" });
+    const { handlers, pi } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx } = fakeContext(root);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const writeResult = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-1",
+      toolName: "write",
+      input: { path: path.join(root, "index.html"), content: "<html></html>" },
+    }, ctx);
+    const editResult = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-2",
+      toolName: "edit",
+      input: { path: path.join(root, "index.html"), edits: [] },
+    }, ctx);
+    const bashResult = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-3",
+      toolName: "bash",
+      input: { command: "mkdir -p site && git add -A && git commit -m work" },
+    }, ctx);
+    const readOnlyBash = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-4",
+      toolName: "bash",
+      input: { command: "git status --short && ls -la" },
+    }, ctx);
+    await handlers.session_shutdown?.({ reason: "quit" }, ctx);
+
+    expect(writeResult).toMatchObject({ block: true });
+    expect(editResult).toMatchObject({ block: true });
+    expect(bashResult).toMatchObject({ block: true });
+    expect(readOnlyBash).toBeUndefined();
+  });
+
+  it("does not apply the lead direct-work guard to coder agents", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-coder-tool-guard" });
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder", "Implement feature.");
+    const worktree = path.join(root, ".pi-company", "worktrees", "coder");
+    registerAgent(root, {
+      ...plan,
+      worktree,
+      cwd: worktree,
+      status: "online",
+    });
+    const { handlers, pi } = fakePi({
+      "company-root": root,
+      "company-agent": "coder",
+      "company-role": "coder",
+    });
+    const { ctx } = fakeContext(worktree);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const writeResult = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-1",
+      toolName: "write",
+      input: { path: path.join(worktree, "index.html"), content: "<html></html>" },
+    }, ctx);
+    await handlers.session_shutdown?.({ reason: "quit" }, ctx);
+
+    expect(writeResult).toBeUndefined();
+  });
+
+  it("allows PM product specs but blocks PM business-code writes", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-pm-write-boundary" });
+    const { handlers, pi } = fakePi({
+      "company-root": root,
+      "company-agent": "pm",
+      "company-role": "pm",
+    });
+    const { ctx } = fakeContext(root);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const productSpec = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-1",
+      toolName: "write",
+      input: { path: "PRODUCT_SPEC_HEADPHONE_3D.md", content: "# Product" },
+    }, ctx);
+    const docsMkdir = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-1b",
+      toolName: "bash",
+      input: { command: "mkdir -p docs/product" },
+    }, ctx);
+    const implementation = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-2",
+      toolName: "write",
+      input: { path: path.join(root, "index.html"), content: "<html></html>" },
+    }, ctx);
+    const mutatingBash = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-3",
+      toolName: "bash",
+      input: { command: "cat > index.html <<'EOF'\n<html></html>\nEOF" },
+    }, ctx);
+    await handlers.session_shutdown?.({ reason: "quit" }, ctx);
+
+    expect(productSpec).toBeUndefined();
+    expect(docsMkdir).toBeUndefined();
+    expect(implementation).toMatchObject({ block: true });
+    expect(String((implementation as { reason?: string } | undefined)?.reason)).toContain("Business code and runnable deliverables must be assigned to coder");
+    expect(mutatingBash).toMatchObject({ block: true });
+  });
+
+  it("allows designer design specs but blocks designer runnable UI writes", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-designer-write-boundary" });
+    const { handlers, pi } = fakePi({
+      "company-root": root,
+      "company-agent": "designer",
+      "company-role": "designer",
+    });
+    const { ctx } = fakeContext(root);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const designSpec = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-1",
+      toolName: "write",
+      input: { path: "DESIGN_SPEC.md", content: "# Design" },
+    }, ctx);
+    const docsMkdir = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-1b",
+      toolName: "bash",
+      input: { command: "mkdir -p docs/design" },
+    }, ctx);
+    const cssWrite = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-2",
+      toolName: "write",
+      input: { path: path.join(root, "style.css"), content: "body {}" },
+    }, ctx);
+    await handlers.session_shutdown?.({ reason: "quit" }, ctx);
+
+    expect(designSpec).toBeUndefined();
+    expect(docsMkdir).toBeUndefined();
+    expect(cssWrite).toMatchObject({ block: true });
+    expect(String((cssWrite as { reason?: string } | undefined)?.reason)).toContain("Runnable UI, styles, assets, and code must be assigned to coder");
+  });
+
+  it("blocks coder write/edit calls that target files outside the assigned worktree", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-coder-worktree-write-guard" });
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder", "Implement feature.");
+    const worktree = path.join(root, ".pi-company", "worktrees", "coder");
+    registerAgent(root, {
+      ...plan,
+      worktree,
+      cwd: worktree,
+      status: "online",
+    });
+    const { handlers, pi } = fakePi({
+      "company-root": root,
+      "company-agent": "coder",
+      "company-role": "coder",
+    });
+    const { ctx } = fakeContext(worktree);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const insideWrite = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-1",
+      toolName: "write",
+      input: { path: path.join(worktree, "site", "index.html"), content: "<html></html>" },
+    }, ctx);
+    const outsideWrite = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-2",
+      toolName: "write",
+      input: { path: path.join(root, "site", "index.html"), content: "<html></html>" },
+    }, ctx);
+    const outsideEdit = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-3",
+      toolName: "edit",
+      input: { path: path.join(root, "site", "index.html"), edits: [] },
+    }, ctx);
+    await handlers.session_shutdown?.({ reason: "quit" }, ctx);
+
+    expect(insideWrite).toBeUndefined();
+    expect(outsideWrite).toMatchObject({ block: true });
+    expect(outsideEdit).toMatchObject({ block: true });
+  });
+
   it("records provider 429 responses from Pi provider hooks", async () => {
     const root = tempRoot();
     initCompany({ root, id: "extension-provider-rate-limit" });
@@ -575,10 +915,10 @@ describe("pi-company extension", () => {
       expect(providerQueueSnapshot(root, "openai-codex").leases).toHaveLength(0);
       expect(ui.setStatus).toHaveBeenCalledWith(
         "pi-company",
-        "provider gate: paused until 2099-01-01T00:03:00.000Z",
+        "provider gate: paused until 2099-01-01T00:03:30.000Z",
       );
 
-      await vi.advanceTimersByTimeAsync(180_000);
+      await vi.advanceTimersByTimeAsync(210_000);
       await request;
 
       expect(providerQueueSnapshot(root, "openai-codex").leases.map((lease) => lease.agent)).toEqual(["tester"]);

@@ -18,6 +18,7 @@ import {
   ensurePendingMergeReminder,
   getPrGateStatus,
   heartbeatAgent,
+  inferIssueWorkType,
   initCompany,
   launchCommand,
   listInbox,
@@ -53,7 +54,7 @@ import {
 import { classifyRateLimitText } from "../src/core/rate-limit.js";
 import { DEFAULT_ROLES } from "../src/core/defaults.js";
 import { companyPaths } from "../src/core/paths.js";
-import type { AgentRecord, CompanyState, IssueRecord, MailboxMessage, PiModelConfig } from "../src/core/types.js";
+import type { AgentRecord, CompanyState, IssueRecord, IssueWorkType, MailboxMessage, PiModelConfig } from "../src/core/types.js";
 
 const currentExtensionPath = fileURLToPath(import.meta.url);
 
@@ -90,6 +91,15 @@ const acceptanceDecisionSchema = Type.Union([
   Type.Literal("accept"),
   Type.Literal("request_changes"),
   Type.Literal("comment"),
+]);
+
+const issueWorkTypeSchema = Type.Union([
+  Type.Literal("product"),
+  Type.Literal("design"),
+  Type.Literal("implementation"),
+  Type.Literal("test"),
+  Type.Literal("review"),
+  Type.Literal("research"),
 ]);
 
 const automatedTestStatusSchema = Type.Union([
@@ -248,6 +258,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
           deliveredThisSession.add(message.id);
           acknowledgeInbox(root, agentName, [message.id]);
         } catch (error) {
+          if (isAgentBusyError(error)) break;
           const classification = classifyRateLimitError(error);
           if (!classification) throw error;
           const reported = reportAutomaticRateLimit(classification.kind, classification.reason);
@@ -381,6 +392,16 @@ export default function companyExtension(pi: ExtensionAPI): void {
       };
     }
     return { action: "continue" };
+  });
+
+  pi.on("tool_call", async (event) => {
+    if (!isCompanyActive()) return undefined;
+    const state = loadState(root);
+    const agent = state.agents[agentName];
+    const blockReason = agentName === lead
+      ? leadToolBlockReason(event)
+      : workerToolBlockReason(event, agent);
+    return blockReason ? { block: true, reason: blockReason } : undefined;
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
@@ -559,6 +580,123 @@ function noCompanyMessage(root: string): string {
   return `This is an ordinary Pi session. To create a pi-company project here, run /company-init. You can also exit Pi and run: pi-company init. Checked: ${root}`;
 }
 
+function leadToolBlockReason(event: { toolName: string; input: Record<string, unknown> }): string | null {
+  if (event.toolName === "write" || event.toolName === "edit") {
+    return "pi-company lead cannot write or edit deliverable files directly. Create/assign an issue and delegate implementation to the owning worker.";
+  }
+  if (event.toolName === "bash") {
+    const command = typeof event.input.command === "string" ? event.input.command : "";
+    if (isMutatingLeadBashCommand(command)) {
+      return "pi-company lead cannot mutate the project through raw bash. Use pi-company issue/spawn/PR/merge tools and delegate implementation to workers.";
+    }
+  }
+  return null;
+}
+
+function workerToolBlockReason(event: { toolName: string; input: Record<string, unknown> }, agent: AgentRecord | undefined): string | null {
+  if (!agent) return null;
+  if (event.toolName === "write" || event.toolName === "edit") {
+    const target = typeof event.input.path === "string" ? resolveToolPath(event.input.path, agent.cwd) : "";
+    if (!target) return null;
+    if (agent.role === "coder" || agent.name.startsWith("coder")) {
+      if (!agent.worktree) return `pi-company coder ${agent.name} has no assigned worktree. Ask lead to spawn a coder with worktree isolation before writing implementation files.`;
+      const worktree = path.resolve(agent.worktree);
+      if (isPathInside(target, worktree)) return null;
+      return `pi-company coder ${agent.name} must write inside its assigned worktree (${worktree}). Use the same relative output path inside the worktree, not the project root.`;
+    }
+    const allowed = nonCoderAllowedWriteReason(agent, target);
+    if (!allowed.allowed) return allowed.reason;
+  }
+  if (event.toolName === "bash" && agent.role !== "coder" && !agent.name.startsWith("coder")) {
+    const command = typeof event.input.command === "string" ? event.input.command : "";
+    if (isAllowedNonCoderMkdir(command, agent)) return null;
+    if (isMutatingLeadBashCommand(command)) {
+      return `pi-company ${agent.role} ${agent.name} cannot mutate project files or git state through raw bash. Report the need to lead so coder can implement through worktree and PR.`;
+    }
+  }
+  return null;
+}
+
+function isPathInside(target: string, parent: string): boolean {
+  const relative = path.relative(parent, target);
+  return relative === "" || Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+function nonCoderAllowedWriteReason(agent: AgentRecord, target: string): { allowed: true } | { allowed: false; reason: string } {
+  const rel = path.relative(path.resolve(agent.cwd), target).replace(/\\/g, "/");
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    return { allowed: false, reason: `pi-company ${agent.role} ${agent.name} cannot write outside its project. Ask lead to route the work deliberately.` };
+  }
+  const role = agent.role;
+  if (role === "pm" || agent.name.startsWith("pm")) {
+    if (isProductSpecPath(rel)) return { allowed: true };
+    return { allowed: false, reason: `pi-company PM can write product/requirements/acceptance Markdown only. Business code and runnable deliverables must be assigned to coder.` };
+  }
+  if (role === "designer" || agent.name.startsWith("designer")) {
+    if (isDesignSpecPath(rel)) return { allowed: true };
+    return { allowed: false, reason: `pi-company designer can write design/UX Markdown only. Runnable UI, styles, assets, and code must be assigned to coder.` };
+  }
+  return { allowed: false, reason: `pi-company ${role} ${agent.name} cannot write project files. Only coder writes implementation; this role should report evidence or findings through pi-company tools.` };
+}
+
+function isProductSpecPath(rel: string): boolean {
+  const base = path.basename(rel);
+  return /\.md$/i.test(rel) && (
+    /^(PRODUCT|REQUIREMENTS|ACCEPTANCE)\.md$/i.test(base) ||
+    /(product|requirements|acceptance|scope|criteria)/i.test(base) ||
+    /^docs\/(product|requirements|acceptance)(\/|[^/]*\.md$)/i.test(rel)
+  );
+}
+
+function isDesignSpecPath(rel: string): boolean {
+  const base = path.basename(rel);
+  return /\.md$/i.test(rel) && (
+    /^(DESIGN|UX)\.md$/i.test(base) ||
+    /(design|ux|prototype|interaction|visual)/i.test(base) ||
+    /^docs\/(design|ux|prototype)(\/|[^/]*\.md$)/i.test(rel)
+  );
+}
+
+function resolveToolPath(inputPath: string, cwd: string): string {
+  return path.isAbsolute(inputPath) ? path.resolve(inputPath) : path.resolve(cwd, inputPath);
+}
+
+function isAllowedNonCoderMkdir(command: string, agent: AgentRecord): boolean {
+  const normalized = command.replace(/\\\n/g, " ").replace(/\s+/g, " ").trim();
+  const match = normalized.match(/^mkdir\s+-p\s+(.+)$/);
+  if (!match) return false;
+  const parts = match[1].split(/\s+/).map((part) => part.replace(/^['"]|['"]$/g, ""));
+  if (parts.length === 0) return false;
+  if (agent.role === "pm" || agent.name.startsWith("pm")) {
+    return parts.every((part) => /^docs\/(product|requirements|acceptance)(\/.*)?$/i.test(part));
+  }
+  if (agent.role === "designer" || agent.name.startsWith("designer")) {
+    return parts.every((part) => /^docs\/(design|ux|prototype)(\/.*)?$/i.test(part));
+  }
+  return false;
+}
+
+function isMutatingLeadBashCommand(command: string): boolean {
+  const normalized = command
+    .replace(/\\\n/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return false;
+  const mutatingPatterns = [
+    /(^|[;&|]\s*)(mkdir|touch|rm|mv|cp|install|chmod|chown|truncate)\b/i,
+    /(^|[;&|]\s*)(npm|pnpm|yarn|bun)\s+(install|add|remove|update|upgrade|dlx)\b/i,
+    /(^|[;&|]\s*)git\s+(init|add|commit|merge|rebase|checkout|switch|reset|clean|stash|restore|rm|mv|worktree\s+(add|remove|prune|move|repair))\b/i,
+    /(^|[;&|]\s*)(cat|printf|echo)\b[^;&|]*(>|>>)\s*\S+/i,
+    /(^|[;&|]\s*)tee\b/i,
+    /<<\s*['"]?\w+['"]?/,
+  ];
+  return mutatingPatterns.some((pattern) => pattern.test(normalized));
+}
+
+function isAgentBusyError(error: unknown): boolean {
+  return /already processing/i.test(errorMessage(error));
+}
+
 function renderCompanySystemPrompt(root: string, agentName: string, fallbackRole: string, lead: string): string {
   const state = loadState(root);
   const agent = state.agents[agentName];
@@ -626,7 +764,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       await refreshUi(ctx);
       const state = loadState(root);
-      return toolResult(renderStatus(state), { state });
+      return toolResult(renderStatus(root, state), { state });
     },
   });
 
@@ -639,6 +777,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
       "Lead must use company_lead_brief before telling the human that work, a feature, a PR, or the project is complete or merged.",
       "Treat worker statements such as 'done', 'merged', 'tested', or 'basically complete' as unverified until company_lead_brief agrees.",
       "If company_lead_brief says can_claim_complete is false, report the blockers and next owner instead of saying the work is complete.",
+      "If a PR is blocked by caveated gate evidence, route a fix or ask the human for an explicit risk waiver; do not call it complete, usable, or only a minor suggestion.",
     ],
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
@@ -765,21 +904,25 @@ function registerTools(pi: ExtensionAPI, runtime: {
     promptSnippet: "Create a lead-owned local issue and optionally assign it.",
     promptGuidelines: [
       "Use company_create_issue only when lead is creating concrete work with clear acceptance criteria or investigation goals.",
+      "Set work_type by real responsibility: product for PM specs, design for designer specs, implementation for coder work, test for tester validation, review for reviewer review, research for researcher work.",
+      "If a request mixes design and implementation, create separate design and implementation issues.",
       "Non-lead agents should message lead with proposed follow-up work instead of creating formal issues directly.",
     ],
     parameters: Type.Object({
       title: Type.String(),
       body: Type.Optional(Type.String()),
+      work_type: Type.Optional(issueWorkTypeSchema),
       owner: Type.Optional(Type.String()),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       if (params.owner && !loadState(root).agents[params.owner]) {
         throw new Error(`Unknown agent ${params.owner}. Spawn or register the agent before assigning issues.`);
       }
-      const issue = createIssue(root, agentName, params.title, params.body ?? "");
-      if (params.owner) assignIssue(root, agentName, issue.id, params.owner);
+      const workType = (params.work_type as IssueWorkType | undefined) ?? inferIssueWorkType(params.title, params.body ?? "");
+      const issue = createIssue(root, agentName, params.title, params.body ?? "", { work_type: workType });
+      const launch = params.owner ? assignAndLaunchIfNeeded(root, agentName, params.owner, issue.id) : null;
       await refreshUi(ctx);
-      return toolResult(`${issue.id}: ${issue.title}`, { issue: loadState(root).issues[issue.id] });
+      return toolResult(`${issue.id}: ${issue.title}${launch?.cmux ? `\nLaunched ${params.owner} in ${launch.cmux}` : ""}`, { issue: loadState(root).issues[issue.id], launch });
     },
   });
 
@@ -790,15 +933,16 @@ function registerTools(pi: ExtensionAPI, runtime: {
     promptSnippet: "Assign a lead-owned local issue to a pi-company agent.",
     promptGuidelines: [
       "Use company_assign_issue only when lead routes work to the agent that should own it.",
+      "Implementation work belongs to coder, design work to designer, product work to PM, test work to tester, review work to reviewer, research work to researcher.",
     ],
     parameters: Type.Object({
       issue_id: Type.String(),
       owner: Type.String(),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      assignIssue(root, agentName, params.issue_id, params.owner);
+      const launch = assignAndLaunchIfNeeded(root, agentName, params.owner, params.issue_id);
       await refreshUi(ctx);
-      return toolResult(`Assigned ${params.issue_id} to ${params.owner}`, { issue: loadState(root).issues[params.issue_id] });
+      return toolResult(`Assigned ${params.issue_id} to ${params.owner}${launch?.cmux ? `\nLaunched ${params.owner} in ${launch.cmux}` : ""}`, { issue: loadState(root).issues[params.issue_id], launch });
     },
   });
 
@@ -840,14 +984,18 @@ function registerTools(pi: ExtensionAPI, runtime: {
     promptSnippet: "Create or launch a role agent with optional coder worktree isolation.",
     promptGuidelines: [
       "Use company_spawn_agent when lead needs another persistent role context for project work.",
+      "Spawning a worker should include a concrete mission. For implementation work, pass issue_id or create/assign an issue before launch.",
+      "If the human asks to restart, relaunch, wake, or recover an agent window, set force_launch to true.",
       "Use coder worktrees for agents that will edit code in parallel.",
     ],
     parameters: Type.Object({
       role: Type.String({ description: "Role name, for example coder, tester, reviewer, pm, researcher." }),
       name: Type.String({ description: "Agent name, for example coder-api or tester." }),
       mission: Type.Optional(Type.String()),
+      issue_id: Type.Optional(Type.String({ description: "Issue to assign to this agent before launch." })),
       create_worktree: Type.Optional(Type.Boolean({ description: "Create git worktree when this is a coder." })),
       launch_in_cmux: Type.Optional(Type.Boolean({ description: "Open a cmux pane and run Pi automatically when cmux is available." })),
+      force_launch: Type.Optional(Type.Boolean({ description: "Open a fresh cmux pane even if pi-company state still marks the agent online." })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const existing = loadState(root).agents[params.name];
@@ -855,18 +1003,20 @@ function registerTools(pi: ExtensionAPI, runtime: {
         if (existing.role !== params.role) {
           throw new Error(`Agent ${params.name} already exists as role ${existing.role}, not ${params.role}.`);
         }
+        const assignedIssue = assignSpawnIssueIfNeeded(root, agentName, existing, params.issue_id ?? null);
         const command = launchCommand(root, existing.name, currentExtensionPath);
-        const shouldLaunch = params.launch_in_cmux !== false && existing.status !== "online" && existing.status !== "running";
-        const briefing = shouldLaunch || params.launch_in_cmux === false
-          ? sendLaunchBriefingIfNeeded(root, agentName, existing)
+        const shouldLaunch = params.launch_in_cmux !== false && (params.force_launch === true || (existing.status !== "online" && existing.status !== "running"));
+        const briefing = shouldLaunch || params.launch_in_cmux === false || params.mission || assignedIssue
+          ? sendLaunchBriefingIfNeeded(root, agentName, loadState(root).agents[existing.name] ?? existing, params.mission ?? null)
           : null;
         const cmux = shouldLaunch ? launchInCmux(command) : null;
         await refreshUi(ctx);
-        if (cmux) return toolResult(`Launched existing ${existing.name} in ${cmux}`, { plan: existing, command, cmux, existing: true, briefing });
+        if (cmux) return toolResult(`Launched existing ${existing.name} in ${cmux}`, { plan: existing, command, cmux, existing: true, briefing, assigned_issue: assignedIssue });
         if (existing.status === "online" || existing.status === "running") {
-          return toolResult(`Agent ${existing.name} is already ${existing.status}. Launch command:\n${command}`, { plan: existing, command, cmux, existing: true, briefing });
+          const notice = briefing ? `\nQueued launch briefing ${briefing.id}.` : "";
+          return toolResult(`Agent ${existing.name} is already ${existing.status}.${notice} Launch command:\n${command}`, { plan: existing, command, cmux, existing: true, briefing, assigned_issue: assignedIssue });
         }
-        return toolResult(command, { plan: existing, command, cmux, existing: true, briefing });
+        return toolResult(command, { plan: existing, command, cmux, existing: true, briefing, assigned_issue: assignedIssue });
       }
       const plan = planAgentSpawn(root, params.role, params.name, params.mission ?? null);
       const shouldCreateWorktree = (params.role === "coder" || params.name.startsWith("coder")) && params.create_worktree !== false;
@@ -881,11 +1031,14 @@ function registerTools(pi: ExtensionAPI, runtime: {
         mission: plan.mission,
         status: "planned",
       });
+      const registered = loadState(root).agents[plan.name] ?? plan;
+      const assignedIssue = assignSpawnIssueIfNeeded(root, agentName, registered, params.issue_id ?? null);
+      const briefing = sendLaunchBriefingIfNeeded(root, agentName, loadState(root).agents[plan.name] ?? registered, params.mission ?? plan.mission);
       const command = launchCommand(root, plan.name, currentExtensionPath);
       let cmux: string | null = null;
       if (params.launch_in_cmux !== false) cmux = launchInCmux(command);
       await refreshUi(ctx);
-      return toolResult(cmux ? `Launched ${plan.name} in ${cmux}` : command, { plan, command, cmux });
+      return toolResult(cmux ? `Launched ${plan.name} in ${cmux}` : command, { plan, command, cmux, briefing, assigned_issue: assignedIssue });
     },
   });
 
@@ -1370,19 +1523,25 @@ function numericSuffix(id: string): number {
   return match ? Number(match[1]) : 0;
 }
 
-function renderStatus(state: ReturnType<typeof loadState>): string {
+function renderStatus(root: string, state: ReturnType<typeof loadState>): string {
   const agents = Object.values(state.agents)
     .map((agent) => `- ${agent.name} (${agent.role}) ${agent.status}${agent.current_task ? ` task=${agent.current_task}` : ""}`)
     .join("\n");
   const issues = Object.values(state.issues)
-    .map((issue) => `- ${issue.id} ${issue.status} ${issue.title}${issue.owner ? ` -> ${issue.owner}` : ""}`)
+    .map((issue) => `- ${issue.id} ${issue.status}${issue.work_type ? ` ${issue.work_type}` : ""} ${issue.title}${issue.owner ? ` -> ${issue.owner}` : ""}`)
     .join("\n") || "- none";
   const prs = Object.values(state.prs)
     .map((pr) => {
       const pending = pr.merge_requested_at && pr.status !== "merged" && pr.status !== "blocked"
         ? ` pending_merge_since=${pr.merge_requested_at}`
         : "";
-      return `- ${pr.id} ${pr.status}${pending} ${pr.title}`;
+      const gates = getPrGateStatus(root, pr.id);
+      const hasCoderReadyEvidence = Boolean(pr.self_test?.trim() && pr.test_brief?.trim());
+      const coderReady = hasCoderReadyEvidence ? " coder_ready=yes" : " coder_ready=no";
+      const blockers = gates.ready
+        ? " gates=green"
+        : ` gate_blockers=${gates.blockers.join("; ") || "unknown"}`;
+      return `- ${pr.id} ${pr.status}${coderReady}${pending} ${blockers} ${pr.title}`;
     })
     .join("\n") || "- none";
   const pendingMerges = pendingMergeRequests(state)
@@ -1429,15 +1588,58 @@ time: ${message.ts}
 ${message.text}`;
 }
 
-function sendLaunchBriefingIfNeeded(root: string, from: string, agent: AgentRecord): MailboxMessage | null {
+function assignSpawnIssueIfNeeded(root: string, actor: string, agent: AgentRecord, requestedIssueId: string | null): IssueRecord | null {
+  const state = loadState(root);
+  const requestedIssue = requestedIssueId ? state.issues[requestedIssueId] : null;
+  if (requestedIssueId && !requestedIssue) throw new Error(`Unknown issue ${requestedIssueId}`);
+  const issue = requestedIssue ?? inferSpawnIssue(state, agent);
+  if (!issue) return null;
+  if (issue.owner === agent.name) return issue;
+  if (issue.owner && !requestedIssueId) return null;
+  assignIssue(root, actor, issue.id, agent.name);
+  return loadState(root).issues[issue.id] ?? issue;
+}
+
+function assignAndLaunchIfNeeded(root: string, actor: string, owner: string, issueId: string): { command: string; cmux: string | null; briefing: MailboxMessage | null } | null {
+  assignIssue(root, actor, issueId, owner);
+  const state = loadState(root);
+  const agent = state.agents[owner];
+  if (!agent || owner === actor || agent.status === "online" || agent.status === "running") return null;
+  const briefing = sendLaunchBriefingIfNeeded(root, actor, agent);
+  const command = launchCommand(root, owner, currentExtensionPath);
+  const delaySeconds = autoLaunchDelaySeconds(state, owner);
+  const delayedCommand = delaySeconds > 0 ? `sleep ${delaySeconds}; ${command}` : command;
+  const cmux = launchInCmux(delayedCommand);
+  return { command, cmux, briefing };
+}
+
+function autoLaunchDelaySeconds(state: CompanyState, owner: string): number {
+  const lead = state.config?.lead ?? "lead";
+  const activeNonLead = Object.values(state.agents)
+    .filter((agent) => agent.name !== lead && agent.name !== owner && (agent.status === "online" || agent.status === "running"))
+    .length;
+  return Math.min(45, activeNonLead * 12);
+}
+
+function inferSpawnIssue(state: CompanyState, agent: AgentRecord): IssueRecord | null {
+  const isCoder = agent.role === "coder" || agent.name.startsWith("coder");
+  if (!isCoder) return null;
+  const unownedOpenIssues = Object.values(state.issues)
+    .filter((issue) => issue.status !== "done" && !issue.owner)
+    .sort((left, right) => left.id.localeCompare(right.id));
+  return unownedOpenIssues.length === 1 ? unownedOpenIssues[0] : null;
+}
+
+function sendLaunchBriefingIfNeeded(root: string, from: string, agent: AgentRecord, mission?: string | null): MailboxMessage | null {
   const state = loadState(root);
   const issues = outstandingIssuesForAgent(state, agent.name);
-  if (issues.length === 0) return null;
+  const missionText = (mission ?? agent.mission ?? "").trim();
+  if (issues.length === 0 && !missionText) return null;
 
-  const primary = issues[0];
+  const primary = issues[0] ?? null;
   const alreadyQueued = listInbox(root, agent.name).some((message) =>
     message.type === "assignment" &&
-    message.task === primary.id &&
+    (primary ? message.task === primary.id : message.task === null) &&
     message.text.includes("[pi-company launch briefing]")
   );
   if (alreadyQueued) return null;
@@ -1446,21 +1648,25 @@ function sendLaunchBriefingIfNeeded(root: string, from: string, agent: AgentReco
     agent.worktree ? `Worktree: ${agent.worktree}` : null,
     agent.branch ? `Branch: ${agent.branch}` : null,
   ].filter(Boolean).join("\n");
-  const issueList = issues.map(formatIssueBrief).join("\n");
+  const issueList = issues.length > 0 ? issues.map(formatIssueBrief).join("\n") : "(no issue assigned yet)";
   const text = `[pi-company launch briefing]
 
-You were launched with assigned work.
+You were launched with work context.
+
+Mission:
+${missionText || "(use the assigned work below)"}
 
 Assigned work:
 ${issueList}
 ${workContext ? `\n${workContext}\n` : ""}
+${agent.worktree ? `Write implementation files inside your assigned worktree. If an issue or mission names an absolute path under the project root, translate it to the same relative path inside the worktree before writing or editing.\n` : ""}
 Start or continue the appropriate issue with company_task_update, inspect the local project files you need, and report blockers or PR readiness through the normal pi-company tools.`;
 
   return sendCompanyMessage(root, {
     from,
     to: agent.name,
     type: "assignment",
-    task: primary.id,
+    task: primary?.id ?? null,
     priority: "high",
     text,
   });
@@ -1473,7 +1679,7 @@ function outstandingIssuesForAgent(state: CompanyState, agentName: string): Issu
 }
 
 function formatIssueBrief(issue: IssueRecord): string {
-  return `- ${issue.id} ${issue.status}: ${issue.title}`;
+  return `- ${issue.id} ${issue.status}${issue.work_type ? ` ${issue.work_type}` : ""}: ${issue.title}`;
 }
 
 function launchInCmux(command: string): string | null {

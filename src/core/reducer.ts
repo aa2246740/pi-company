@@ -6,6 +6,7 @@ import type {
   CompanyEvent,
   CompanyState,
   IssueRecord,
+  IssueWorkType,
   PullRequestRecord,
   ReviewRecord,
 } from "./types.js";
@@ -54,6 +55,17 @@ function agentCurrentTaskEventMatches(state: CompanyState, name: string, event: 
   if (typeof event.data.current_task !== "string") return false;
   const issue = state.issues[event.data.current_task];
   return Boolean(issue && issue.owner === name && issue.status !== "done");
+}
+
+function issueOwnerCanOwnWorkType(role: string, owner: string, workType: IssueWorkType | null): boolean {
+  if (!workType) return true;
+  if (workType === "implementation") return role === "coder" || owner.startsWith("coder");
+  if (workType === "design") return role === "designer" || owner.startsWith("designer");
+  if (workType === "product") return role === "pm" || owner.startsWith("pm");
+  if (workType === "test") return role === "tester" || owner.startsWith("tester");
+  if (workType === "review") return role === "reviewer" || owner.startsWith("reviewer");
+  if (workType === "research") return role === "researcher" || owner.startsWith("researcher");
+  return false;
 }
 
 export function reduceEvents(events: CompanyEvent[]): CompanyState {
@@ -157,7 +169,13 @@ export function reduceEvents(events: CompanyEvent[]): CompanyState {
         const id = String(event.data.issue_id);
         const issue = state.issues[id];
         const owner = String(event.data.owner);
-        if (event.actor === (state.config?.lead ?? "lead") && issue && issue.status !== "done" && state.agents[owner]) {
+        if (
+          event.actor === (state.config?.lead ?? "lead") &&
+          issue &&
+          issue.status !== "done" &&
+          state.agents[owner] &&
+          issueOwnerCanOwnWorkType(state.agents[owner].role, owner, issue.work_type ?? null)
+        ) {
           issue.owner = owner;
           issue.status = "assigned";
           issue.updated_at = event.ts;

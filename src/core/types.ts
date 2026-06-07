@@ -1,4 +1,6 @@
-export type AgentRole = "lead" | "pm" | "researcher" | "coder" | "reviewer" | "tester" | string;
+export type AgentRole = "lead" | "pm" | "designer" | "researcher" | "coder" | "reviewer" | "tester" | string;
+
+export type IssueWorkType = "product" | "design" | "implementation" | "test" | "review" | "research";
 
 export type EventType =
   | "company.initialized"
@@ -151,6 +153,7 @@ export interface IssueRecord {
   id: string;
   title: string;
   body: string;
+  work_type?: IssueWorkType | null;
   status: "open" | "assigned" | "in_progress" | "blocked" | "done";
   owner?: string | null;
   created_by: string;
