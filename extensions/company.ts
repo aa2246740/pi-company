@@ -143,6 +143,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
   let pollTimer: NodeJS.Timeout | null = null;
   let heartbeatTimer: NodeJS.Timeout | null = null;
   let delivering = false;
+  let resumedThisSession = false;
   let lastAutomaticRateLimitReportAt = 0;
   const activeProviderLeases: ProviderRequestLease[] = [];
 
@@ -193,8 +194,9 @@ export default function companyExtension(pi: ExtensionAPI): void {
     const inbox = state.inbox_counts[agentName] ?? 0;
     const displayRole = current?.role ?? role;
     ctx.ui.setTitle(`pi-company ${agentName}`);
-    ctx.ui.setStatus("pi-company", `${agentName}/${displayRole} inbox:${inbox}`);
-    ctx.ui.setWidget("pi-company", renderDeskPanel(state, agentName), { placement: "belowEditor" });
+    const resumeHint = resumedThisSession ? "resumed" : "run /company-resume";
+    ctx.ui.setStatus("pi-company", `${agentName}/${displayRole} inbox:${inbox} · ${resumeHint}`);
+    ctx.ui.setWidget("pi-company", renderDeskPanel(state, agentName, resumedThisSession), { placement: "belowEditor" });
   }
 
   async function deliverInbox(ctx: ExtensionContext, mode: "auto" | "manual" = "auto"): Promise<void> {
@@ -394,6 +396,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
       notifyNoCompany(ctx);
       return;
     }
+    resumedThisSession = true;
     recordLiveHeartbeat();
     await refreshUi(ctx);
     await pi.sendUserMessage(renderResumePrompt(root, agentName, role, lead), { deliverAs: "followUp" });
@@ -1267,7 +1270,7 @@ function classifyRateLimitError(error: unknown): { kind: "provider_429" | "quota
   return classifyRateLimitText(errorMessage(error));
 }
 
-function renderDeskPanel(state: ReturnType<typeof loadState>, agentName: string): string[] {
+function renderDeskPanel(state: ReturnType<typeof loadState>, agentName: string, resumedThisSession: boolean): string[] {
   const agent = state.agents[agentName];
   const activeIssue = agent?.current_task ? state.issues[agent.current_task] : null;
   const ownedIssues = Object.values(state.issues)
@@ -1280,6 +1283,7 @@ function renderDeskPanel(state: ReturnType<typeof loadState>, agentName: string)
   const pendingMerges = pendingMergeRequests(state);
   const lines = [
     `pi-company ${state.config?.id ?? "uninitialized"} | ${agentName} (${agent?.role ?? "unknown"})`,
+    resumedThisSession ? "context: resumed" : "context: extension active | run /company-resume",
     activeIssue ? `focus: ${activeIssue.id} ${activeIssue.title}` : "focus: idle",
     `task: ${agent?.current_task ?? "idle"} | inbox: ${state.inbox_counts[agentName] ?? 0}`,
   ];

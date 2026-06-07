@@ -117,7 +117,7 @@ describe("pi-company extension", () => {
     await handlers.session_start?.({}, ctx);
     await handlers.session_shutdown?.({}, ctx);
 
-    expect(ui.setStatus).toHaveBeenCalledWith("pi-company", "pm/pm inbox:0");
+    expect(ui.setStatus).toHaveBeenCalledWith("pi-company", "pm/pm inbox:0 · run /company-resume");
   });
 
   it("resumes pi-company context from a plain Pi session through a slash command", async () => {
@@ -132,9 +132,14 @@ describe("pi-company extension", () => {
 
     companyExtension(pi);
     await handlers.session_start?.({}, ctx);
+    const preResumeWidget = ui.setWidget.mock.calls.at(-1)?.[1] as string[];
+    expect(preResumeWidget).toContain("context: extension active | run /company-resume");
     const resume = commands.find((command) => command.name === "company-resume");
     if (!resume) throw new Error("company-resume command was not registered");
     await resume.handler("", ctx);
+    const postResumeWidget = ui.setWidget.mock.calls.at(-1)?.[1] as string[];
+    expect(postResumeWidget).toContain("context: resumed");
+    expect(ui.setStatus).toHaveBeenCalledWith("pi-company", "lead/lead inbox:0 · resumed");
     await handlers.session_shutdown?.({}, ctx);
 
     const sendUserMessage = pi.sendUserMessage as unknown as ReturnType<typeof vi.fn>;
@@ -298,7 +303,7 @@ describe("pi-company extension", () => {
       await handlers.session_start?.({}, ctx);
       await handlers.session_shutdown?.({}, ctx);
 
-      expect(ui.setStatus).toHaveBeenCalledWith("pi-company", "pm/pm inbox:0");
+      expect(ui.setStatus).toHaveBeenCalledWith("pi-company", "pm/pm inbox:0 · run /company-resume");
     } finally {
       restoreEnv("PI_COMPANY_AGENT", previousAgent);
       restoreEnv("PI_COMPANY_ROLE", previousRole);
