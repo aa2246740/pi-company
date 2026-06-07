@@ -13,7 +13,7 @@
   },
   "type": "module",
   "bin": {
-    "pi-company": "./dist/src/cli.js"
+    "pi-company": "dist/src/cli.js"
   },
   "keywords": [
     "pi-package",
