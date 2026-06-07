@@ -143,7 +143,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
   let pollTimer: NodeJS.Timeout | null = null;
   let heartbeatTimer: NodeJS.Timeout | null = null;
   let delivering = false;
-  let startedThisSession = false;
+  let manuallyRefreshedThisSession = false;
   let lastAutomaticRateLimitReportAt = 0;
   const activeProviderLeases: ProviderRequestLease[] = [];
 
@@ -194,9 +194,9 @@ export default function companyExtension(pi: ExtensionAPI): void {
     const inbox = state.inbox_counts[agentName] ?? 0;
     const displayRole = current?.role ?? role;
     ctx.ui.setTitle(`pi-company ${agentName}`);
-    const startHint = startedThisSession ? "context loaded" : "run /company-start";
-    ctx.ui.setStatus("pi-company", `${agentName}/${displayRole} inbox:${inbox} · ${startHint}`);
-    ctx.ui.setWidget("pi-company", renderDeskPanel(state, agentName, startedThisSession), { placement: "belowEditor" });
+    const contextHint = manuallyRefreshedThisSession ? "brief refreshed" : "active";
+    ctx.ui.setStatus("pi-company", `${agentName}/${displayRole} inbox:${inbox} · ${contextHint}`);
+    ctx.ui.setWidget("pi-company", renderDeskPanel(state, agentName, manuallyRefreshedThisSession), { placement: "belowEditor" });
   }
 
   async function deliverInbox(ctx: ExtensionContext, mode: "auto" | "manual" = "auto"): Promise<void> {
@@ -365,6 +365,16 @@ export default function companyExtension(pi: ExtensionAPI): void {
     return { action: "continue" };
   });
 
+  pi.on("before_agent_start", async (event, ctx) => {
+    if (!isCompanyActive()) return undefined;
+    await refreshUi(ctx);
+    return {
+      systemPrompt: `${event.systemPrompt}
+
+${renderCompanySystemPrompt(root, agentName, role, lead)}`,
+    };
+  });
+
   async function waitForProviderBackoff(ctx: ExtensionContext): Promise<void> {
     for (;;) {
       const state = loadState(root);
@@ -396,22 +406,22 @@ export default function companyExtension(pi: ExtensionAPI): void {
       notifyNoCompany(ctx);
       return;
     }
-    startedThisSession = true;
+    manuallyRefreshedThisSession = true;
     recordLiveHeartbeat();
     await refreshUi(ctx);
-    await pi.sendUserMessage(renderStartPrompt(root, agentName, role, lead), { deliverAs: "followUp" });
-    if (ctx.hasUI) ctx.ui.notify(`pi-company context loaded for ${agentName}`, "info");
+    await pi.sendUserMessage(renderManualBriefRefreshPrompt(root, agentName, role, lead), { deliverAs: "followUp" });
+    if (ctx.hasUI) ctx.ui.notify(`pi-company brief refreshed for ${agentName}`, "info");
   }
 
   pi.registerCommand("company-start", {
-    description: "Start or reattach pi-company context in this Pi session",
+    description: "Manually refresh pi-company role instructions and lead brief in this Pi session",
     handler: async (_args, ctx) => {
       await startCompanyContext(ctx);
     },
   });
 
   pi.registerCommand("company-resume", {
-    description: "Alias for /company-start",
+    description: "Compatibility alias for /company-start",
     handler: async (_args, ctx) => {
       await startCompanyContext(ctx);
     },
@@ -517,7 +527,7 @@ function noCompanyMessage(root: string): string {
   return `No pi-company project found at ${root}. Run pi-company init first, or start Pi from a directory that already contains .pi-company.`;
 }
 
-function renderStartPrompt(root: string, agentName: string, fallbackRole: string, lead: string): string {
+function renderCompanySystemPrompt(root: string, agentName: string, fallbackRole: string, lead: string): string {
   const state = loadState(root);
   const agent = state.agents[agentName];
   const role = agent?.role ?? fallbackRole;
@@ -530,9 +540,9 @@ function renderStartPrompt(root: string, agentName: string, fallbackRole: string
       ? "You are the lead. Use the lead brief as authoritative project truth before declaring completion, routing gates, or merging."
       : `You are ${agentName}. Read your inbox before continuing. Coordinate with ${lead} for scope, sequencing, blockers, and completion claims.`;
 
-  return `[pi-company start]
+  return `[pi-company context]
 
-You are starting or reattaching a pi-company session in this project.
+You are operating inside an active pi-company project. Pi owns chat session resume; pi-company owns local company state, role context, inboxes, issues, PR gates, and provider coordination.
 
 Agent: ${agentName}
 Role: ${role}
@@ -549,6 +559,10 @@ ${brief}
 
 Next step:
 Summarize the current state briefly, name blockers and owners, then continue through pi-company tools. Do not rely on stale chat memory or say the project is complete unless the authoritative brief allows it.`;
+}
+
+function renderManualBriefRefreshPrompt(root: string, agentName: string, fallbackRole: string, lead: string): string {
+  return renderCompanySystemPrompt(root, agentName, fallbackRole, lead).replace("[pi-company context]", "[pi-company brief refresh]");
 }
 
 function readRolePrompt(root: string, role: string): string {
@@ -1270,7 +1284,7 @@ function classifyRateLimitError(error: unknown): { kind: "provider_429" | "quota
   return classifyRateLimitText(errorMessage(error));
 }
 
-function renderDeskPanel(state: ReturnType<typeof loadState>, agentName: string, startedThisSession: boolean): string[] {
+function renderDeskPanel(state: ReturnType<typeof loadState>, agentName: string, manuallyRefreshedThisSession: boolean): string[] {
   const agent = state.agents[agentName];
   const activeIssue = agent?.current_task ? state.issues[agent.current_task] : null;
   const ownedIssues = Object.values(state.issues)
@@ -1283,7 +1297,9 @@ function renderDeskPanel(state: ReturnType<typeof loadState>, agentName: string,
   const pendingMerges = pendingMergeRequests(state);
   const lines = [
     `pi-company ${state.config?.id ?? "uninitialized"} | ${agentName} (${agent?.role ?? "unknown"})`,
-    startedThisSession ? "context: company context loaded" : "context: extension active | run /company-start",
+    manuallyRefreshedThisSession
+      ? "context: active | brief refreshed in chat"
+      : "context: active | Pi resumes chat; company context updates each turn",
     activeIssue ? `focus: ${activeIssue.id} ${activeIssue.title}` : "focus: idle",
     `task: ${agent?.current_task ?? "idle"} | inbox: ${state.inbox_counts[agentName] ?? 0}`,
   ];

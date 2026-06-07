@@ -242,8 +242,8 @@ export const cliCommands: CliCommand[] = [
 
 /** Pi 扩展命令 */
 export const extensionCommands = [
-  { command: '/company-resume', description: '在裸 Pi 会话中恢复/启动 pi-company 上下文' },
-  { command: '/company-start', description: '/company-resume 的别名' },
+  { command: '/company-start', description: '手动刷新角色职责和 lead brief 到当前 Pi 对话' },
+  { command: '/company-resume', description: '/company-start 的兼容别名' },
   { command: '/company-status', description: '刷新并显示 pi-company 面板' },
   { command: '/company-brief', description: '注入权威的 lead/全局交付摘要' },
   { command: '/company-inbox', description: '注入未读邮箱消息' },

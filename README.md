@@ -71,13 +71,9 @@ pi-company init
 pi
 ```
 
-Then run inside Pi:
+`pi-company init` creates the project-local `.pi-company/` state. After that, starting Pi from that directory is enough: Pi restores the chat session normally, and pi-company automatically attaches to the existing company, shows the desk panel, registers company tools, mirrors human steering, gates provider requests, and refreshes role/lead context before each agent turn. The default agent is `lead`, so this is the most natural path for existing Pi users.
 
-```text
-/company-start
-```
-
-`pi-company init` creates the project-local `.pi-company/` state. `/company-start` starts or reattaches the current Pi session to that company, injects the current agent's role instructions, and injects the authoritative lead brief. The default agent is `lead`, so this is the most natural path for existing Pi users.
+If you want to manually push the current role instructions and lead brief into the visible chat, run `/company-start` inside Pi. It is a refresh command, not a required resume step.
 
 Installing the Pi package does not make every `pi` session a company session. In ordinary directories without `.pi-company/`, Pi stays ordinary: pi-company does not create files, register company tools, mirror human input, gate provider requests, or show the company desk panel.
 
@@ -241,7 +237,7 @@ The extension registers:
 - UI: status line and desk panel for the current agent
 - input hook: mirrors interactive human steering to lead
 - mailbox poller: reads local messages; wake metadata tells future launchers whether a message should wake immediately or wait for digest
-- commands: `/company-start`, `/company-resume` (alias), `/company-status`, `/company-brief`, `/company-inbox`, `/company-ack`, `/company-send`
+- commands: `/company-start` (manual brief refresh), `/company-resume` (compatibility alias), `/company-status`, `/company-brief`, `/company-inbox`, `/company-ack`, `/company-send`
 - tools: status, lead/global brief, inbox, send message, issues, task updates, spawn agent, local PR gates, review, test, product acceptance, merge request, rate-limit report
 
 `company_lead_brief` is the lead's authoritative global delivery view. Lead

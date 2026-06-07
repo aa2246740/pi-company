@@ -118,10 +118,37 @@ describe("pi-company extension", () => {
     await handlers.session_start?.({}, ctx);
     await handlers.session_shutdown?.({}, ctx);
 
-    expect(ui.setStatus).toHaveBeenCalledWith("pi-company", "pm/pm inbox:0 · run /company-start");
+    expect(ui.setStatus).toHaveBeenCalledWith("pi-company", "pm/pm inbox:0 · active");
   });
 
-  it("starts pi-company context from a plain Pi session through a slash command", async () => {
+  it("automatically appends pi-company context before each agent turn", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-auto-context" });
+    const { handlers, pi } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx, ui } = fakeContext(root);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const widget = ui.setWidget.mock.calls.at(-1)?.[1] as string[];
+    expect(widget).toContain("context: active | Pi resumes chat; company context updates each turn");
+    const result = await handlers.before_agent_start?.({ systemPrompt: "base system" }, ctx) as { systemPrompt: string };
+    await handlers.session_shutdown?.({}, ctx);
+
+    expect(result.systemPrompt).toContain("base system");
+    expect(result.systemPrompt).toContain("[pi-company context]");
+    expect(result.systemPrompt).toContain("Pi owns chat session resume");
+    expect(result.systemPrompt).toContain("Agent: lead");
+    expect(result.systemPrompt).toContain("You protect project direction");
+    expect(result.systemPrompt).toContain("Authoritative project brief:");
+    expect(result.systemPrompt).toContain("Delivery State:");
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+  });
+
+  it("manually refreshes pi-company context from a slash command", async () => {
     const root = tempRoot();
     initCompany({ root, id: "extension-resume" });
     const { handlers, pi, commands } = fakePi({
@@ -133,24 +160,24 @@ describe("pi-company extension", () => {
 
     companyExtension(pi);
     await handlers.session_start?.({}, ctx);
-    const preResumeWidget = ui.setWidget.mock.calls.at(-1)?.[1] as string[];
-    expect(preResumeWidget).toContain("context: extension active | run /company-start");
+    const preStartWidget = ui.setWidget.mock.calls.at(-1)?.[1] as string[];
+    expect(preStartWidget).toContain("context: active | Pi resumes chat; company context updates each turn");
     const start = commands.find((command) => command.name === "company-start");
     if (!start) throw new Error("company-start command was not registered");
     await start.handler("", ctx);
     const postStartWidget = ui.setWidget.mock.calls.at(-1)?.[1] as string[];
-    expect(postStartWidget).toContain("context: company context loaded");
-    expect(ui.setStatus).toHaveBeenCalledWith("pi-company", "lead/lead inbox:0 · context loaded");
+    expect(postStartWidget).toContain("context: active | brief refreshed in chat");
+    expect(ui.setStatus).toHaveBeenCalledWith("pi-company", "lead/lead inbox:0 · brief refreshed");
     await handlers.session_shutdown?.({}, ctx);
 
     const sendUserMessage = pi.sendUserMessage as unknown as ReturnType<typeof vi.fn>;
     const injected = sendUserMessage.mock.calls.at(-1)?.[0] as string;
-    expect(injected).toContain("[pi-company start]");
+    expect(injected).toContain("[pi-company brief refresh]");
     expect(injected).toContain("Agent: lead");
     expect(injected).toContain("You protect project direction");
     expect(injected).toContain("Authoritative project brief:");
     expect(injected).toContain("Delivery State:");
-    expect(ui.notify).toHaveBeenCalledWith("pi-company context loaded for lead", "info");
+    expect(ui.notify).toHaveBeenCalledWith("pi-company brief refreshed for lead", "info");
   });
 
   it("marks the agent offline when the Pi session shuts down", async () => {
@@ -304,7 +331,7 @@ describe("pi-company extension", () => {
       await handlers.session_start?.({}, ctx);
       await handlers.session_shutdown?.({}, ctx);
 
-      expect(ui.setStatus).toHaveBeenCalledWith("pi-company", "pm/pm inbox:0 · run /company-start");
+      expect(ui.setStatus).toHaveBeenCalledWith("pi-company", "pm/pm inbox:0 · active");
     } finally {
       restoreEnv("PI_COMPANY_AGENT", previousAgent);
       restoreEnv("PI_COMPANY_ROLE", previousRole);
