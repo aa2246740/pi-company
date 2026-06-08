@@ -415,8 +415,8 @@ export function reduceEvents(events: CompanyEvent[]): CompanyState {
     if (pr.status !== "merged" && pr.status !== "abandoned" && !pr.merge_blockers?.length) {
       const gate = evaluatePrGates(state.config, pr, state.agents);
       if (gate.ready) pr.status = "ready_to_merge";
-      else if (gate.blockers.length > 0 && pr.status !== "draft" && pr.status !== "changes_requested") {
-        pr.status = "blocked";
+      else if (gate.blockers.length > 0 && pr.status !== "draft") {
+        pr.status = statusForGateBlockers(gate.blockers);
       }
     }
   }
@@ -498,6 +498,14 @@ export function evaluatePrGates(config: CompanyConfig | null, pr: PullRequestRec
   }
 
   return { ready: blockers.length === 0, blockers };
+}
+
+function statusForGateBlockers(blockers: string[]): PullRequestRecord["status"] {
+  return blockers.some(isChangeRequestGateBlocker) ? "changes_requested" : "blocked";
+}
+
+function isChangeRequestGateBlocker(blocker: string): boolean {
+  return blocker === "Latest review requests changes" || blocker === "Product acceptance is request_changes";
 }
 
 function latestReviewPerReviewer(reviews: ReviewRecord[]): ReviewRecord[] {

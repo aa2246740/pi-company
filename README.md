@@ -132,8 +132,8 @@ npm run build
 node dist/src/cli.js status
 ```
 
-Use `spawn` only for new agents. For an existing roster member or already planned
-agent, use `launch-command <agent>` to start another visible Pi session.
+Use `spawn` to create a new named agent or to launch an existing roster member.
+For an exact shell command without spawn ergonomics, use `launch-command <agent>`.
 
 ## Role Model Policy
 
@@ -151,7 +151,7 @@ Lead opens a choice-based wizard. The human does not need to know role names
 ahead of time. The wizard lists:
 
 - default model for future and unconfigured roles
-- all built-in supported roles: lead, pm, researcher, coder, reviewer, tester
+- all built-in supported roles: lead, pm, designer, researcher, coder, reviewer, tester
 - existing named agents
 
 For each target, lead chooses one model from Pi's configured models, then an
@@ -244,8 +244,8 @@ The extension registers:
 - UI: status line and desk panel for the current agent
 - input hook: mirrors interactive human steering to lead
 - mailbox poller: reads local messages; wake metadata tells future launchers whether a message should wake immediately or wait for digest
-- commands: `/company-init`, `/company-start` (manual brief refresh), `/company-resume` (compatibility alias), `/company-status`, `/company-brief`, `/company-inbox`, `/company-ack`, `/company-send`
-- tools: status, lead/global brief, inbox, send message, issues, task updates, spawn agent, local PR gates, review, test, product acceptance, merge request, rate-limit report
+- commands: `/company-init`, `/company-start` (manual brief refresh), `/company-resume` (compatibility alias), `/company-status`, `/company-brief`, `/company-inbox`, `/company-ack`, `/company-send`, `/company-configure-models`
+- tools: status, lead/global brief, inbox, send message, issues, task updates, spawn agent, local PR gates, review, test, product acceptance, automated-test evidence, merge request, rate-limit report, model policy configuration
 
 `company_lead_brief` is the lead's authoritative global delivery view. Lead
 must use it before telling the human that work, a feature, a PR, or the project

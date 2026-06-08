@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import YAML from "yaml";
 import { describe, expect, it } from "vitest";
 import {
   acknowledgeInbox,
@@ -1163,6 +1164,31 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(DEFAULT_MESSAGE_POLICY.org_max_immediate_per_minute).toBe(12);
   });
 
+  it("honors current company.yaml message wake policy without replay-only stale config", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "wake-policy-yaml-demo" });
+    const config = loadState(root).config;
+    if (!config) throw new Error("Missing config");
+    fs.writeFileSync(companyPaths(root).config, YAML.stringify({
+      ...config,
+      message_policy: {
+        ...DEFAULT_MESSAGE_POLICY,
+        immediate_types: [],
+      },
+    }), "utf8");
+
+    const message = sendCompanyMessage(root, {
+      from: "lead",
+      to: "tester",
+      type: "assignment",
+      priority: "normal",
+      text: "This assignment should respect the edited YAML wake policy.",
+    });
+
+    expect(message.wake?.mode).toBe("digest");
+    expect(message.wake?.reason).toContain("assignment is digest by default");
+  });
+
   it("rate-limits repeated urgent wakes for the same target", () => {
     const root = tempRoot();
     initCompany({ root, id: "urgent-rate-demo" });
@@ -1483,6 +1509,31 @@ Rate limit 已过期，可以恢复正常工作`);
     const gates = getPrGateStatus(root, pr.id);
     expect(gates.ready).toBe(false);
     expect(gates.blockers).toContain("Tester pass contains caveat");
+  });
+
+  it("clears stale changes_requested status after a latest clean reviewer approval", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "reviewer-status-reapproval-demo" });
+    registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Fix UI",
+      issue_id: null,
+      summary: "Fixes UI.",
+      branch: "pi-company/coder",
+      worktree: path.join(root, ".pi-company/worktrees/coder"),
+      base: "main",
+    });
+
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate UI rendering.");
+    submitReview(root, "reviewer", pr.id, "request_changes", "Fix the unsafe rendering path.");
+    expect(loadState(root).prs[pr.id].status).toBe("changes_requested");
+
+    submitReview(root, "reviewer", pr.id, "approve", "Approve. Rechecked current head; requested changes are fixed.");
+    const state = loadState(root);
+
+    expect(state.prs[pr.id].status).toBe("blocked");
+    expect(getPrGateStatus(root, pr.id).blockers).not.toContain("Latest review requests changes");
+    expect(getPrGateStatus(root, pr.id).blockers).toContain("Missing tester validation");
   });
 
   it("allows a latest clean reviewer approval to supersede that reviewer's caveated approval", () => {
@@ -2747,10 +2798,52 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(state.agents["coder-existing"].status).toBe("online");
   });
 
-  it("rejects repeated CLI spawn before creating worktree side effects", () => {
+  it("launches existing roster agents through CLI spawn manual mode", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "cli-spawn-roster-demo" });
+
+    const result = spawnSync(process.execPath, [
+      "--import",
+      "tsx",
+      path.join(process.cwd(), "src/cli.ts"),
+      "--root",
+      root,
+      "spawn",
+      "tester",
+      "--manual",
+    ], { encoding: "utf8" });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("PI_COMPANY_AGENT='tester'");
+    expect(result.stdout).toContain("--company-role 'tester'");
+  });
+
+  it("records cmux surfaces launched by CLI spawn", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "cli-spawn-cmux-record-demo" });
+
+    withFakeCmuxLaunch("surface:cli-test", () => {
+      const result = spawnSync(process.execPath, [
+        "--import",
+        "tsx",
+        path.join(process.cwd(), "src/cli.ts"),
+        "--root",
+        root,
+        "spawn",
+        "tester",
+        "--cmux",
+      ], { encoding: "utf8" });
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("Launched in surface:cli-test");
+      expect(loadState(root).agents.tester.cmux_surface).toBe("surface:cli-test");
+    });
+  });
+
+  it("reuses CLI spawn for existing planned agents and creates confirmed missing coder worktrees", () => {
     const root = tempRoot();
     initGitRepo(root);
-    initCompany({ root, id: "cli-spawn-side-effect-demo" });
+    initCompany({ root, id: "cli-spawn-existing-demo" });
     const plan = requestAgentSpawn(root, "lead", "coder", "coder-repeat", "Planned coder.");
     expect(fs.existsSync(plan.worktree ?? "")).toBe(false);
 
@@ -2768,9 +2861,9 @@ Rate limit 已过期，可以恢复正常工作`);
       "--manual",
     ], { encoding: "utf8" });
 
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("Agent coder-repeat already exists");
-    expect(fs.existsSync(plan.worktree ?? "")).toBe(false);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("PI_COMPANY_AGENT='coder-repeat'");
+    expect(fs.existsSync(plan.worktree ?? "")).toBe(true);
   });
 
   it("rejects unplanned agent registration and ignores rogue spawn events", () => {
@@ -3027,6 +3120,22 @@ function withFakeCmuxTree<T>(options: { liveSurfaces: string[] }, fn: () => T): 
   const surfaces = options.liveSurfaces.map((ref) => ({ ref, type: "terminal", title: ref }));
   const tree = JSON.stringify({ windows: [{ workspaces: [{ panes: [{ surfaces }] }] }] });
   fs.writeFileSync(cmuxPath, `#!/bin/sh\nif [ "$1" = "tree" ]; then\n  cat <<'JSON'\n${tree}\nJSON\n  exit 0\nfi\nexit 1\n`, "utf8");
+  fs.chmodSync(cmuxPath, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${binDir}${path.delimiter}${previousPath ?? ""}`;
+  try {
+    return fn();
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+  }
+}
+
+function withFakeCmuxLaunch<T>(surface: string, fn: () => T): T {
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-company-cmux-launch-bin-"));
+  const cmuxPath = path.join(binDir, "cmux");
+  const tree = JSON.stringify({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ ref: surface, type: "terminal", title: "pi-company tester" }] }] }] }] });
+  fs.writeFileSync(cmuxPath, `#!/bin/sh\nif [ "$1" = "--json" ] && [ "$2" = "new-pane" ]; then\n  printf '{"surface_ref":"${surface}"}\\n'\n  exit 0\nfi\nif [ "$1" = "send" ]; then\n  exit 0\nfi\nif [ "$1" = "tree" ]; then\n  cat <<'JSON'\n${tree}\nJSON\n  exit 0\nfi\nexit 1\n`, "utf8");
   fs.chmodSync(cmuxPath, 0o755);
   const previousPath = process.env.PATH;
   process.env.PATH = `${binDir}${path.delimiter}${previousPath ?? ""}`;

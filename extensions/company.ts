@@ -608,13 +608,81 @@ function workerToolBlockReason(event: { toolName: string; input: Record<string, 
     const allowed = nonCoderAllowedWriteReason(agent, target);
     if (!allowed.allowed) return allowed.reason;
   }
-  if (event.toolName === "bash" && agent.role !== "coder" && !agent.name.startsWith("coder")) {
+  if (event.toolName === "bash") {
     const command = typeof event.input.command === "string" ? event.input.command : "";
+    if (agent.role === "coder" || agent.name.startsWith("coder")) {
+      return coderBashBlockReason(command, agent);
+    }
     if (isAllowedNonCoderMkdir(command, agent)) return null;
     if (isMutatingLeadBashCommand(command)) {
       return `pi-company ${agent.role} ${agent.name} cannot mutate project files or git state through raw bash. Report the need to lead so coder can implement through worktree and PR.`;
     }
   }
+  return null;
+}
+
+function coderBashBlockReason(command: string, agent: AgentRecord): string | null {
+  if (!isMutatingLeadBashCommand(command)) return null;
+  if (!agent.worktree) {
+    return `pi-company coder ${agent.name} has no assigned worktree. Ask lead to spawn a coder with worktree isolation before mutating files or git state.`;
+  }
+  const worktree = path.resolve(agent.worktree);
+  const cwd = path.resolve(agent.cwd || worktree);
+  for (const token of shellWordsLite(command)) {
+    const candidate = pathCandidateFromShellToken(token);
+    if (!candidate) continue;
+    const resolved = path.isAbsolute(candidate) ? path.resolve(candidate) : path.resolve(cwd, candidate);
+    if (!isPathInside(resolved, worktree)) {
+      return `pi-company coder ${agent.name} can mutate files and git state only inside its assigned worktree (${worktree}). The bash command references ${candidate}, which resolves outside that worktree.`;
+    }
+  }
+  return null;
+}
+
+function shellWordsLite(command: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  let escaping = false;
+  for (const char of command.replace(/\\\n/g, " ")) {
+    if (escaping) {
+      current += char;
+      escaping = false;
+      continue;
+    }
+    if (char === "\\" && quote !== "'") {
+      escaping = true;
+      continue;
+    }
+    if ((char === "'" || char === '"') && !quote) {
+      quote = char;
+      continue;
+    }
+    if (quote === char) {
+      quote = null;
+      continue;
+    }
+    if (!quote && /\s/.test(char)) {
+      if (current) tokens.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (current) tokens.push(current);
+  return tokens;
+}
+
+function pathCandidateFromShellToken(token: string): string | null {
+  const cleaned = token
+    .replace(/^\d*[<>]+/, "")
+    .replace(/^["']|["']$/g, "")
+    .trim();
+  if (!cleaned || cleaned === "." || cleaned === "-" || cleaned.startsWith("$")) return null;
+  const value = cleaned.startsWith("--") && cleaned.includes("=") ? cleaned.slice(cleaned.indexOf("=") + 1) : cleaned;
+  if (!value || value.startsWith("$") || /^[a-z]+:\/\//i.test(value)) return null;
+  if (value === ".." || value.startsWith("../") || value.includes("/../")) return value;
+  if (path.isAbsolute(value) || value.startsWith("./") || value.includes("/")) return value;
   return null;
 }
 
@@ -1161,12 +1229,34 @@ function registerTools(pi: ExtensionAPI, runtime: {
   });
 
   pi.registerTool({
+    name: "company_record_automated_tests",
+    label: "Record Automated Tests",
+    description: "Record automated test command outcome for a local PR.",
+    promptSnippet: "Record automated test command outcome for a local PR.",
+    promptGuidelines: [
+      "Use company_record_automated_tests whenever automated tests are run for a local PR, whether they pass or fail.",
+      "Record the command outcome truthfully. Any failed tests, partial pass counts, warnings, or pre-existing failures must be recorded as failed/blocked or stated plainly; never rewrite them as a clean pass.",
+    ],
+    parameters: Type.Object({
+      pr_id: Type.String(),
+      status: automatedTestStatusSchema,
+      summary: Type.String(),
+      command: Type.Optional(Type.String()),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      recordAutomatedTests(root, agentName, params.pr_id, params.status, params.summary, params.command ?? null);
+      await refreshUi(ctx);
+      return toolResult(`Automated tests ${params.status} for ${params.pr_id}`, { pr: loadState(root).prs[params.pr_id] });
+    },
+  });
+
+  pi.registerTool({
     name: "company_record_auto_tests",
     label: "Record Tests",
     description: "Record automated test command outcome for a local PR.",
     promptSnippet: "Record automated test command outcome for a local PR.",
     promptGuidelines: [
-      "Use company_record_auto_tests whenever automated tests are run for a local PR, whether they pass or fail.",
+      "Backward-compatible alias for company_record_automated_tests.",
       "Record the command outcome truthfully. Any failed tests, partial pass counts, warnings, or pre-existing failures must be recorded as failed/blocked or stated plainly; never rewrite them as a clean pass.",
     ],
     parameters: Type.Object({

@@ -28,6 +28,7 @@ import {
   reportTask,
   rebuildState,
   recordAutomatedTests,
+  recordAgentLaunch,
   planAgentSpawn,
   registerAgent,
   requestAgentSpawn,
@@ -121,8 +122,21 @@ program.command("spawn")
     const root = rootOpt();
     const name = opts.name ?? defaultNameForRole(role);
     const mission = readTextOption(opts.mission, opts.missionFile, opts.missionStdin === true, "mission", false);
-    if (loadState(root).agents[name]) {
-      throw new Error(`Agent ${name} already exists. Use launch-command to start existing agents.`);
+    const existing = loadState(root).agents[name];
+    if (existing) {
+      if (existing.role !== role) {
+        throw new Error(`Agent ${name} already exists as role ${existing.role}, not ${role}.`);
+      }
+      if ((existing.role === "coder" || existing.name.startsWith("coder")) && existing.worktree && existing.branch && !fs.existsSync(existing.worktree)) {
+        ensureCoderWorktree(root, { worktree: existing.worktree, branch: existing.branch }, opts.yes === true);
+      }
+      const cmd = launchCommand(root, name, extensionPath);
+      if (opts.manual || !opts.cmux) {
+        console.log(cmd);
+        return;
+      }
+      launchInCmux(root, currentLead(root), name, cmd);
+      return;
     }
     const plan = planAgentSpawn(root, role, name, mission);
     if (role === "coder") {
@@ -144,7 +158,7 @@ program.command("spawn")
       console.log(cmd);
       return;
     }
-    launchInCmux(cmd);
+    launchInCmux(root, currentLead(root), name, cmd);
   });
 
 program.command("steer")
@@ -554,6 +568,10 @@ function defaultNameForRole(role: string): string {
   return role;
 }
 
+function currentLead(root: string): string {
+  return loadState(root).config?.lead ?? "lead";
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -627,7 +645,7 @@ function validateWorkType(value: unknown): IssueWorkType | null {
   throw new Error(`Invalid work type ${text}. Expected product, design, implementation, test, review, or research.`);
 }
 
-function launchInCmux(command: string): void {
+function launchInCmux(root: string, actor: string, agentName: string, command: string): void {
   const pane = spawnSync("cmux", ["--json", "new-pane", "--type", "terminal", "--direction", "right", "--focus", "false"], {
     encoding: "utf8",
   });
@@ -636,6 +654,7 @@ function launchInCmux(command: string): void {
   if (!surface) throw new Error(`cmux new-pane did not return a surface ref: ${pane.stdout}`);
   const send = spawnSync("cmux", ["send", "--surface", surface, `${command}\n`], { encoding: "utf8" });
   if (send.status !== 0) throw new Error(send.stderr || send.stdout || "cmux send failed");
+  recordAgentLaunch(root, actor, agentName, surface);
   console.log(`Launched in ${surface}`);
 }
 

@@ -366,6 +366,10 @@ export function sendCompanyMessage(
   ensureCompanyDirs(paths);
   const events = readEvents(paths);
   const state = reduceEvents(events);
+  // Message wake decisions must honor the current editable company.yaml,
+  // not only the historical config captured by the initialization event.
+  // This keeps operator-tuned wake policy changes effective immediately.
+  state.config = loadConfig(root) ?? state.config;
   if (message.from !== "system" && !state.agents[message.from]) {
     throw new Error(`Unknown message sender ${message.from}.`);
   }
@@ -1279,10 +1283,18 @@ function refreshPrStatuses(root: string, state: CompanyState): void {
     }
     const gate = evaluatePrGates(state.config, pr, state.agents);
     if (gate.ready) pr.status = "ready_to_merge";
-    else if (gate.blockers.length > 0 && pr.status !== "draft" && pr.status !== "changes_requested") {
-      pr.status = "blocked";
+    else if (gate.blockers.length > 0 && pr.status !== "draft") {
+      pr.status = statusForGateBlockers(gate.blockers);
     }
   }
+}
+
+function statusForGateBlockers(blockers: string[]): PullRequestRecord["status"] {
+  return blockers.some(isChangeRequestGateBlocker) ? "changes_requested" : "blocked";
+}
+
+function isChangeRequestGateBlocker(blocker: string): boolean {
+  return blocker === "Latest review requests changes" || blocker === "Product acceptance is request_changes";
 }
 
 function branchIsAncestor(root: string, branch: string, base: string): boolean {
@@ -1432,7 +1444,7 @@ function refreshAgentLiveness(state: CompanyState, now = nowIso()): void {
 
 function currentCmuxSurfacesIfNeeded(state: CompanyState): Set<string> | null {
   if (!Object.values(state.agents).some((agent) => agent.cmux_surface)) return null;
-  const result = spawnSync("cmux", ["tree", "--json"], { encoding: "utf8" });
+  const result = runCmuxTreeJson();
   if (result.status !== 0 || !result.stdout.trim()) return null;
   try {
     const parsed = JSON.parse(result.stdout) as unknown;
@@ -1442,6 +1454,24 @@ function currentCmuxSurfacesIfNeeded(state: CompanyState): Set<string> | null {
   } catch {
     return null;
   }
+}
+
+function runCmuxTreeJson(): { status: number; stdout: string; stderr: string } {
+  const candidates = ["cmux", "/Applications/cmux.app/Contents/Resources/bin/cmux"];
+  let last = { status: 127, stdout: "", stderr: "cmux not found" };
+  for (const command of candidates) {
+    const result = spawnSync(command, ["tree", "--json"], { encoding: "utf8" });
+    if (result.error && "code" in result.error && result.error.code === "ENOENT") {
+      last = { status: 127, stdout: "", stderr: result.error.message };
+      continue;
+    }
+    return {
+      status: result.status ?? 1,
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? "",
+    };
+  }
+  return last;
 }
 
 function collectCmuxSurfaceRefs(value: unknown, surfaces: Set<string>): void {

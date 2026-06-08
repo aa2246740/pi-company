@@ -75,6 +75,8 @@ describe("pi-company extension", () => {
 
     expect(loadConfig(root)?.id).toBe("friendly-company");
     expect(tools.some((tool) => tool.name === "company_status")).toBe(true);
+    expect(tools.some((tool) => tool.name === "company_record_automated_tests")).toBe(true);
+    expect(tools.some((tool) => tool.name === "company_record_auto_tests")).toBe(true);
     expect(ui.setWidget).toHaveBeenCalledWith(
       "pi-company",
       expect.arrayContaining([
@@ -709,9 +711,16 @@ describe("pi-company extension", () => {
       toolName: "write",
       input: { path: path.join(worktree, "index.html"), content: "<html></html>" },
     }, ctx);
+    const bashResult = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-2",
+      toolName: "bash",
+      input: { command: "mkdir -p site && touch site/index.html && git add site/index.html" },
+    }, ctx);
     await handlers.session_shutdown?.({ reason: "quit" }, ctx);
 
     expect(writeResult).toBeUndefined();
+    expect(bashResult).toBeUndefined();
   });
 
   it("allows PM product specs but blocks PM business-code writes", async () => {
@@ -795,6 +804,52 @@ describe("pi-company extension", () => {
     expect(docsMkdir).toBeUndefined();
     expect(cssWrite).toMatchObject({ block: true });
     expect(String((cssWrite as { reason?: string } | undefined)?.reason)).toContain("Runnable UI, styles, assets, and code must be assigned to coder");
+  });
+
+  it("blocks coder bash mutations that reference paths outside the assigned worktree", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-coder-worktree-bash-guard" });
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder", "Implement feature.");
+    const worktree = path.join(root, ".pi-company", "worktrees", "coder");
+    registerAgent(root, {
+      ...plan,
+      worktree,
+      cwd: worktree,
+      status: "online",
+    });
+    const { handlers, pi } = fakePi({
+      "company-root": root,
+      "company-agent": "coder",
+      "company-role": "coder",
+    });
+    const { ctx } = fakeContext(worktree);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const insideBash = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-1",
+      toolName: "bash",
+      input: { command: "mkdir -p site && touch site/index.html && git add site/index.html" },
+    }, ctx);
+    const outsideBash = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-2",
+      toolName: "bash",
+      input: { command: `mkdir -p ${path.join(root, "site")} && touch ${path.join(root, "site", "index.html")}` },
+    }, ctx);
+    const parentBash = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-3",
+      toolName: "bash",
+      input: { command: "cat > ../index.html <<'EOF'\n<html></html>\nEOF" },
+    }, ctx);
+    await handlers.session_shutdown?.({ reason: "quit" }, ctx);
+
+    expect(insideBash).toBeUndefined();
+    expect(outsideBash).toMatchObject({ block: true });
+    expect(parentBash).toMatchObject({ block: true });
+    expect(String((outsideBash as { reason?: string } | undefined)?.reason)).toContain("only inside its assigned worktree");
   });
 
   it("blocks coder write/edit calls that target files outside the assigned worktree", async () => {

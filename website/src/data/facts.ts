@@ -181,7 +181,7 @@ export const cliCommands: CliCommand[] = [
   {
     command: 'pi-company steer',
     description: '为 agent 记录人类引导并镜像到 lead',
-    example: 'pi-company steer --to coder --text "Keep the UI minimal"',
+    example: 'pi-company steer --agent coder --text "Keep the UI minimal"',
     category: '消息',
   },
   {
@@ -193,19 +193,19 @@ export const cliCommands: CliCommand[] = [
   {
     command: 'pi-company issue',
     description: '管理本地 issues',
-    example: 'pi-company issue create --title "Build UI"',
+    example: 'pi-company issue create "Build UI" --work-type implementation',
     category: 'Issues',
   },
   {
     command: 'pi-company task',
     description: '记录任务进度',
-    example: 'pi-company task start --issue ISSUE-001',
+    example: 'pi-company task start ISSUE-001 --actor coder',
     category: 'Issues',
   },
   {
     command: 'pi-company pr',
     description: '管理本地 PRs',
-    example: 'pi-company pr create --title "feat: add UI"',
+    example: 'pi-company pr create --title "feat: add UI" --author coder --branch pi-company/coder --worktree .pi-company/worktrees/coder',
     category: 'PR',
   },
   {
@@ -271,7 +271,8 @@ export const piTools = [
   { name: 'company_submit_review', description: '提交 reviewer 审批/评论/请求变更' },
   { name: 'company_submit_test', description: '提交独立 tester 验证' },
   { name: 'company_submit_acceptance', description: '提交 PM/lead 产品验收' },
-  { name: 'company_record_auto_tests', description: '记录自动化测试命令结果' },
+  { name: 'company_record_automated_tests', description: '记录自动化测试命令结果' },
+  { name: 'company_record_auto_tests', description: '记录自动化测试命令结果（兼容别名）' },
   { name: 'company_pr_gates', description: '检查本地 PR 是否可合并' },
   { name: 'company_merge_pr', description: '请求或执行门控的本地 PR 合并' },
 ]

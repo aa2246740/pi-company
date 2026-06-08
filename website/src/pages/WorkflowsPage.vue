@@ -116,12 +116,12 @@ function sendSteering() {
         <p>Lead 创建 issue 并分配给 owner。只有分配的 owner 能更新任务状态。</p>
 
         <CodeBlock
-          code='pi-company --root ./my-project issue create --title "Build UI components"'
+          code='pi-company --root ./my-project issue create "Build UI components" --work-type implementation'
           prompt="$ "
         />
 
         <CodeBlock
-          code='pi-company --root ./my-project task start --issue ISSUE-001'
+          code='pi-company --root ./my-project task start ISSUE-001 --actor coder-ui'
           prompt="$ "
         />
 
@@ -183,7 +183,7 @@ function sendSteering() {
           <div class="pr-step">
             <h4>1. Coder 创建 PR</h4>
             <CodeBlock
-              code='pi-company --root ./my-project pr create --title "feat: add components"'
+              code='pi-company --root ./my-project pr create --title "feat: add components" --author coder-ui --branch pi-company/coder-ui --worktree .pi-company/worktrees/coder-ui'
               prompt="$ "
             />
           </div>
@@ -191,7 +191,7 @@ function sendSteering() {
           <div class="pr-step">
             <h4>2. Coder 运行测试并标记 Ready</h4>
             <CodeBlock
-              code='pi-company --root ./my-project pr mark-ready --pr PR-001 --self-test "Unit tests pass" --test-brief "Validate component rendering"'
+              code='pi-company --root ./my-project pr ready PR-001 --actor coder-ui --self-test "Unit tests pass" --test-brief "Validate component rendering"'
               prompt="$ "
             />
           </div>
@@ -199,7 +199,7 @@ function sendSteering() {
           <div class="pr-step">
             <h4>3. 记录自动化测试</h4>
             <CodeBlock
-              code='pi-company --root ./my-project pr auto-tests --pr PR-001 --status passed --summary "All 42 tests pass"'
+              code='pi-company --root ./my-project pr auto-test PR-001 --actor coder-ui --status passed --summary "All 42 tests pass"'
               prompt="$ "
             />
           </div>
