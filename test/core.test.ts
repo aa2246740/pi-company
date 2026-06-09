@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import YAML from "yaml";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   acknowledgeInbox,
   abandonPr,
@@ -59,6 +59,15 @@ import {
 } from "../src/core/provider-queue.js";
 import { classifyRateLimitText } from "../src/core/rate-limit.js";
 import { hasGateCaveat } from "../src/core/reducer.js";
+
+const tempRoots = new Set<string>();
+
+afterEach(() => {
+  for (const root of tempRoots) {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+  tempRoots.clear();
+});
 
 describe("pi-company core", () => {
   it("classifies visible provider rate-limit failures from screen text", () => {
@@ -528,6 +537,7 @@ Rate limit 已过期，可以恢复正常工作`);
       provider: "xiaomi-token-plan-cn",
       model: "mimo-v2.5-pro",
     });
+    fs.writeFileSync(path.join(companyPaths(root).rolesDir, "ops.md"), "# Ops\n\nCoordinate rollout operations.\n", "utf8");
     const plan = requestAgentSpawn(root, "lead", "ops", "ops", "Handle rollout coordination.");
     registerAgent(root, { ...plan, status: "planned" });
 
@@ -1635,6 +1645,40 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(getPrGateStatus(root, pr.id)).toEqual({ ready: true, blockers: [] });
   });
 
+  it("uses structured gate evidence before summary caveat heuristics", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "structured-evidence-demo" });
+    registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Fix UI",
+      issue_id: null,
+      summary: "Fixes UI.",
+      branch: "pi-company/coder",
+      worktree: path.join(root, ".pi-company/worktrees/coder"),
+      base: "main",
+    });
+
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate UI rendering.");
+    recordAutomatedTests(root, "tester", pr.id, "passed", "Automated checks passed but text includes legacy caution wording.", "npm test", { clean: true });
+    submitTest(root, "tester", pr.id, "pass", "PASS, but this legacy prose should not block when clean is explicit.", { clean: true });
+    submitAcceptance(root, "pm", pr.id, "accept", "Accept, but legacy prose should not block when clean is explicit.", { clean: true });
+    submitReview(root, "reviewer", pr.id, "approve", "Approved.", { caveats: ["browser flow was not validated"] });
+
+    let gates = getPrGateStatus(root, pr.id);
+    expect(gates.ready).toBe(false);
+    expect(gates.blockers).toContain("Reviewer approval contains caveat");
+    expect(loadState(root).prs[pr.id].reviews.at(-1)?.caveats).toEqual(["browser flow was not validated"]);
+
+    expect(() => submitReview(root, "reviewer", pr.id, "approve", "Approved.", {
+      clean: true,
+      caveats: ["contradictory"],
+    })).toThrow(/cannot be clean and include caveats/i);
+
+    submitReview(root, "reviewer", pr.id, "approve", "Approve, but this legacy prose is explicitly clean.", { clean: true });
+    gates = getPrGateStatus(root, pr.id);
+    expect(gates).toEqual({ ready: true, blockers: [] });
+  });
+
   it("blocks product acceptance that contains unverified behavior caveats", () => {
     const root = tempRoot();
     initCompany({ root, id: "acceptance-caveat-demo" });
@@ -2472,6 +2516,37 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(loadState(root).prs[pr.id].status).toBe("blocked");
   });
 
+  it("keeps persisted state pure while returning live git overlays", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "pure-state-overlay-demo" });
+    const plan = registerCoder(root);
+    ensureCoderWorktree(root, plan, true);
+    commitFile(plan.worktree ?? root, "feature.txt", "first\n", "feature first");
+
+    const pr = createPr(root, "coder", {
+      title: "Feature",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    const originalHead = pr.head;
+    expect(originalHead).toBeTruthy();
+
+    commitFile(plan.worktree ?? root, "feature.txt", "second\n", "feature second");
+    const newHead = resolveGitHead(root, plan.branch ?? "pi-company/coder");
+    expect(newHead).toBeTruthy();
+    expect(newHead).not.toBe(originalHead);
+
+    const live = loadState(root);
+    const persisted = JSON.parse(fs.readFileSync(companyPaths(root).state, "utf8")) as { prs: Record<string, { head?: string | null }> };
+
+    expect(live.prs[pr.id].head).toBe(newHead);
+    expect(persisted.prs[pr.id].head).toBe(originalHead);
+  });
+
   it("ignores headless merge completion after a lead request when the branch head advances", () => {
     const root = tempRoot();
     initGitRepo(root);
@@ -2829,6 +2904,20 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(state.agents["coder-extra"].status).toBe("planned");
   });
 
+  it("rejects unknown spawn roles unless a custom role pack exists or lead forces it", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "spawn-role-validation-demo" });
+
+    expect(() => requestAgentSpawn(root, "lead", "codre", "codre-typo", "Typo role.")).toThrow(/Unknown role codre/);
+
+    fs.writeFileSync(path.join(companyPaths(root).rolesDir, "ops.md"), "# Ops\n\nCoordinate releases.\n", "utf8");
+    const custom = requestAgentSpawn(root, "lead", "ops", "ops", "Coordinate release.");
+    expect(custom.role).toBe("ops");
+
+    const forced = requestAgentSpawn(root, "lead", "copywriter", "copywriter", "Draft copy.", { allowUnknownRole: true });
+    expect(forced.role).toBe("copywriter");
+  });
+
   it("does not let repeated spawn requests rewrite existing agent identity", () => {
     const root = tempRoot();
     initCompany({ root, id: "spawn-identity-demo" });
@@ -3172,11 +3261,14 @@ Rate limit 已过期，可以恢复正常工作`);
 });
 
 function tempRoot(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "pi-company-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-company-"));
+  tempRoots.add(root);
+  return root;
 }
 
 function withFakeCmuxTree<T>(options: { liveSurfaces: string[] }, fn: () => T): T {
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-company-cmux-bin-"));
+  tempRoots.add(binDir);
   const cmuxPath = path.join(binDir, "cmux");
   const surfaces = options.liveSurfaces.map((ref) => ({ ref, type: "terminal", title: ref }));
   const tree = JSON.stringify({ windows: [{ workspaces: [{ panes: [{ surfaces }] }] }] });
@@ -3194,6 +3286,7 @@ function withFakeCmuxTree<T>(options: { liveSurfaces: string[] }, fn: () => T): 
 
 function withFakeCmuxLaunch<T>(surface: string, fn: () => T): T {
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-company-cmux-launch-bin-"));
+  tempRoots.add(binDir);
   const cmuxPath = path.join(binDir, "cmux");
   const tree = JSON.stringify({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ ref: surface, type: "terminal", title: "pi-company tester" }] }] }] }] });
   fs.writeFileSync(cmuxPath, `#!/bin/sh\nif [ "$1" = "--json" ] && [ "$2" = "new-pane" ]; then\n  printf '{"surface_ref":"${surface}"}\\n'\n  exit 0\nfi\nif [ "$1" = "send" ]; then\n  exit 0\nfi\nif [ "$1" = "tree" ]; then\n  cat <<'JSON'\n${tree}\nJSON\n  exit 0\nfi\nexit 1\n`, "utf8");

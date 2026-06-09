@@ -135,7 +135,7 @@ The MVP is local-only. It does not require GitHub, Linear, remote servers, A2A, 
 - Keep cmux workspace status updates optional and additive.
 - Re-running initialization in an existing company must be idempotent and must not reset roster, issues, PRs, or agent status.
 - Initialization must ensure `.pi-company/` is ignored by git so local company state and managed worktrees are not committed by normal project work.
-- Default company roles are `lead`, `pm`, `researcher`, `coder-*`, `reviewer`, and `tester`.
+- Default company roles are `lead`, `pm`, `designer`, `researcher`, `coder-*`, `reviewer`, and `tester`.
 - Role separation is justified by context isolation and responsibility boundaries, not human company hierarchy.
 - Do not include senior/junior coder hierarchy.
 - Do not include a permanent architect role in the default roster. Architecture concerns are handled by lead, coder, reviewer, and optional future role packs.
@@ -171,7 +171,7 @@ The MVP is local-only. It does not require GitHub, Linear, remote servers, A2A, 
 - Local PR branch and worktree metadata must match the author's registered branch and worktree when those are known.
 - GitHub PR publishing is a future adapter, not an MVP requirement.
 - The default workflow is: user request, lead planning, local issues, development, draft PR, ready PR, review and test in parallel, PM/lead product acceptance, fix loop, gated lead merge.
-- A reviewer approval or tester pass with caveats, known issues, or unresolved risks is not a green gate. The gate blocks until the caveat is resolved or explicitly converted to an accepted human override.
+- A reviewer approval, tester pass, automated-test pass, or product acceptance with structured caveats, known issues, or unresolved risks is not a green gate. New evidence should use explicit `clean` and `caveats` fields; legacy summary text is still scanned as a compatibility fallback. The gate blocks until the caveat is resolved or explicitly converted to an accepted human override.
 - Product acceptance is separate from tester validation and code review. PM or lead must verify the implemented user-facing behavior against the human request and acceptance criteria before merge.
 - Product acceptance must not accept if a key flow is unobserved, an API request/result is not visible when relevant, a required skill/tool/method was skipped, or important evidence is missing.
 - Coder self-test, reviewer approval, tester validation, product acceptance, and automated test evidence are valid only for the PR branch HEAD they recorded. If the branch advances, gates reset until fresh evidence is submitted.

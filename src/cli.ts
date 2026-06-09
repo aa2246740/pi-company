@@ -118,6 +118,7 @@ program.command("spawn")
   .option("--yes", "Allow creating git worktrees")
   .option("--cmux", "Launch in cmux if cmux is available")
   .option("--manual", "Only print launch command")
+  .option("--force-role", "Allow spawning a custom role without an existing .pi-company/roles/<role>.md file")
   .action((role, opts) => {
     const root = rootOpt();
     const name = opts.name ?? defaultNameForRole(role);
@@ -138,11 +139,11 @@ program.command("spawn")
       launchInCmux(root, currentLead(root), name, cmd);
       return;
     }
-    const plan = planAgentSpawn(root, role, name, mission);
+    const plan = planAgentSpawn(root, role, name, mission, { allowUnknownRole: opts.forceRole === true });
     if (role === "coder") {
       ensureCoderWorktree(root, plan, opts.yes === true);
     }
-    requestAgentSpawn(root, "lead", role, name, mission);
+    requestAgentSpawn(root, "lead", role, name, mission, { allowUnknownRole: opts.forceRole === true });
     registerAgent(root, {
       name: plan.name,
       role: plan.role,
@@ -318,11 +319,13 @@ pr.command("review")
   .requiredOption("--reviewer <agent>")
   .requiredOption("--decision <decision>", "approve | request_changes | comment")
   .requiredOption("--summary <text>")
+  .option("--clean", "Mark approval evidence as explicitly clean")
+  .option("--caveat <text>", "Structured caveat that blocks green evidence; repeat for multiple caveats", collectOption, [])
   .action((prId, opts) => {
     if (!["approve", "request_changes", "comment"].includes(opts.decision)) {
       throw new Error("decision must be approve, request_changes, or comment");
     }
-    submitReview(rootOpt(), opts.reviewer, prId, opts.decision, opts.summary);
+    submitReview(rootOpt(), opts.reviewer, prId, opts.decision, opts.summary, gateEvidenceOptions(opts));
     console.log(`${opts.reviewer} submitted ${opts.decision} for ${prId}`);
   });
 
@@ -331,11 +334,13 @@ pr.command("test")
   .requiredOption("--tester <agent>")
   .requiredOption("--status <status>", "pass | fail | blocked")
   .requiredOption("--summary <text>")
+  .option("--clean", "Mark passing evidence as explicitly clean")
+  .option("--caveat <text>", "Structured caveat that blocks green evidence; repeat for multiple caveats", collectOption, [])
   .action((prId, opts) => {
     if (!["pass", "fail", "blocked"].includes(opts.status)) {
       throw new Error("status must be pass, fail, or blocked");
     }
-    submitTest(rootOpt(), opts.tester, prId, opts.status, opts.summary);
+    submitTest(rootOpt(), opts.tester, prId, opts.status, opts.summary, gateEvidenceOptions(opts));
     console.log(`${opts.tester} submitted test ${opts.status} for ${prId}`);
   });
 
@@ -344,11 +349,13 @@ pr.command("accept")
   .requiredOption("--actor <agent>", "PM or lead actor")
   .requiredOption("--decision <decision>", "accept | request_changes | comment")
   .requiredOption("--summary <text>")
+  .option("--clean", "Mark acceptance evidence as explicitly clean")
+  .option("--caveat <text>", "Structured caveat that blocks green evidence; repeat for multiple caveats", collectOption, [])
   .action((prId, opts) => {
     if (!["accept", "request_changes", "comment"].includes(opts.decision)) {
       throw new Error("decision must be accept, request_changes, or comment");
     }
-    submitAcceptance(rootOpt(), opts.actor, prId, opts.decision, opts.summary);
+    submitAcceptance(rootOpt(), opts.actor, prId, opts.decision, opts.summary, gateEvidenceOptions(opts));
     console.log(`${opts.actor} submitted product acceptance ${opts.decision} for ${prId}`);
   });
 
@@ -358,12 +365,14 @@ pr.command("auto-test")
   .option("--summary <text>", "Summary", "")
   .option("--command <command>", "Command")
   .option("--actor <agent>", "Actor; defaults to PR author")
+  .option("--clean", "Mark passing automated-test evidence as explicitly clean")
+  .option("--caveat <text>", "Structured caveat that blocks green evidence; repeat for multiple caveats", collectOption, [])
   .action((prId, opts) => {
     if (!["passed", "failed", "blocked"].includes(opts.status)) {
       throw new Error("status must be passed, failed, or blocked");
     }
     const root = rootOpt();
-    recordAutomatedTests(root, opts.actor ?? prAuthor(root, prId), prId, opts.status, opts.summary, opts.command ?? null);
+    recordAutomatedTests(root, opts.actor ?? prAuthor(root, prId), prId, opts.status, opts.summary, opts.command ?? null, gateEvidenceOptions(opts));
     console.log(`Automated tests ${opts.status} for ${prId}`);
   });
 
@@ -580,6 +589,17 @@ function prAuthor(root: string, prId: string): string {
   const pr = loadState(root).prs[prId];
   if (!pr) throw new Error(`Unknown PR ${prId}`);
   return pr.author;
+}
+
+function collectOption(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
+
+function gateEvidenceOptions(opts: { clean?: boolean; caveat?: string[] }): { clean?: boolean; caveats?: string[] } {
+  return {
+    clean: opts.clean === true ? true : undefined,
+    caveats: opts.caveat ?? [],
+  };
 }
 
 function printStatus(root: string, state: ReturnType<typeof loadState>): void {

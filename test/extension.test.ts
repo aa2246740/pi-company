@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import companyExtension from "../extensions/company.js";
 import {
   assignIssue,
@@ -23,6 +23,15 @@ import {
 import { writeYaml } from "../src/core/io.js";
 import { companyPaths } from "../src/core/paths.js";
 import { providerQueueSnapshot } from "../src/core/provider-queue.js";
+
+const tempRoots = new Set<string>();
+
+afterEach(() => {
+  for (const root of tempRoots) {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+  tempRoots.clear();
+});
 
 describe("pi-company extension", () => {
   it("stays inactive in ordinary Pi sessions outside a company project", async () => {
@@ -291,6 +300,30 @@ describe("pi-company extension", () => {
     expect(inbox).toHaveLength(1);
     expect(inbox[0].text).toContain("Use grill-me to pressure-test the Matrix 2048 concept.");
     expect(inbox[0].text).toContain("(no issue assigned yet)");
+  });
+
+  it("rejects unknown roles from the spawn tool unless a role pack exists", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-spawn-role-validation" });
+    const { handlers, pi, tools } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx } = fakeContext(root);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const spawnTool = tools.find((tool) => tool.name === "company_spawn_agent");
+    if (!spawnTool) throw new Error("company_spawn_agent tool was not registered");
+    await expect(spawnTool.execute("tool-1", {
+      role: "codre",
+      name: "codre-typo",
+      mission: "Typo role.",
+      launch_in_cmux: false,
+      create_worktree: false,
+    }, undefined, undefined, ctx)).rejects.toThrow(/Unknown role codre/);
+    await handlers.session_shutdown?.({ reason: "quit" }, ctx);
   });
 
   it("auto-assigns the only unowned open issue when spawning a coder", async () => {
@@ -1135,6 +1168,7 @@ function fakeContext(cwd: string): {
 
 function tempRoot(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-company-extension-"));
+  tempRoots.add(root);
   return root;
 }
 

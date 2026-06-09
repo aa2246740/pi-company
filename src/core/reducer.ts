@@ -2,13 +2,16 @@ import path from "node:path";
 import type {
   AgentRecord,
   AcceptanceRecord,
+  AutomatedTestRecord,
   CompanyConfig,
   CompanyEvent,
   CompanyState,
+  GateEvidenceRecord,
   IssueRecord,
   IssueWorkType,
   PullRequestRecord,
   ReviewRecord,
+  TestRecord,
 } from "./types.js";
 
 export function emptyState(): CompanyState {
@@ -31,6 +34,20 @@ function hasOwn(data: Record<string, unknown>, key: string): boolean {
 function nullableEventString(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   return String(value);
+}
+
+function normalizedEventCaveats(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value
+    .map((item) => String(item).trim())
+    .filter((item) => item.length > 0);
+}
+
+function gateEvidenceFromEvent(data: Record<string, unknown>): GateEvidenceRecord {
+  const evidence: GateEvidenceRecord = {};
+  if (typeof data.clean === "boolean") evidence.clean = data.clean;
+  if (Array.isArray(data.caveats)) evidence.caveats = normalizedEventCaveats(data.caveats) ?? [];
+  return evidence;
 }
 
 function sameNullablePath(left: string | null, right: string | null): boolean {
@@ -276,6 +293,7 @@ export function reduceEvents(events: CompanyEvent[]): CompanyState {
             command: (event.data.command as string | undefined) ?? null,
             summary: String(event.data.summary ?? ""),
             head: (event.data.head as string | undefined) ?? null,
+            ...gateEvidenceFromEvent(event.data),
             ts: event.ts,
           };
           pr.automated_test_history = [...(pr.automated_test_history ?? []), pr.automated_tests];
@@ -293,6 +311,7 @@ export function reduceEvents(events: CompanyEvent[]): CompanyState {
             decision,
             summary: String(event.data.summary ?? ""),
             head: (event.data.head as string | undefined) ?? null,
+            ...gateEvidenceFromEvent(event.data),
             ts: event.ts,
           });
           pr.status = decision === "request_changes" ? "changes_requested" : pr.status;
@@ -310,6 +329,7 @@ export function reduceEvents(events: CompanyEvent[]): CompanyState {
             status,
             summary: String(event.data.summary ?? ""),
             head: (event.data.head as string | undefined) ?? null,
+            ...gateEvidenceFromEvent(event.data),
             ts: event.ts,
           });
           pr.updated_at = event.ts;
@@ -326,6 +346,7 @@ export function reduceEvents(events: CompanyEvent[]): CompanyState {
             decision,
             summary: String(event.data.summary ?? ""),
             head: (event.data.head as string | undefined) ?? null,
+            ...gateEvidenceFromEvent(event.data),
             ts: event.ts,
           }];
           pr.status = decision === "request_changes" ? "changes_requested" : pr.status;
@@ -457,14 +478,14 @@ export function evaluatePrGates(config: CompanyConfig | null, pr: PullRequestRec
   if (currentHead && pr.ready_head !== currentHead) blockers.push("Coder self-test/test brief are stale for current head");
   if (approved < requiredReviews) blockers.push(`Needs ${requiredReviews} reviewer approval(s)`);
   if (lastReview?.decision === "request_changes") blockers.push("Latest review requests changes");
-  if (blockCaveatedPasses && hasUnresolvedCaveatedEvidence(latestEligibleReviews.filter((r) => r.decision === "approve").map((r) => r.summary))) {
+  if (blockCaveatedPasses && hasUnresolvedCaveatedEvidence(latestEligibleReviews.filter((r) => r.decision === "approve"))) {
     blockers.push("Reviewer approval contains caveat");
   }
 
   if (config?.quality_gates.require_tester_pass !== false) {
     if (!lastTest) blockers.push("Missing tester validation");
     else if (lastTest.status !== "pass") blockers.push(`Tester status is ${lastTest.status}`);
-    else if (blockCaveatedPasses && hasGateCaveat(lastTest.summary)) {
+    else if (blockCaveatedPasses && evidenceHasGateCaveat(lastTest)) {
       blockers.push("Tester pass contains caveat");
     }
   }
@@ -473,7 +494,7 @@ export function evaluatePrGates(config: CompanyConfig | null, pr: PullRequestRec
     if (!pr.automated_tests) blockers.push("Missing automated test result");
     else if (pr.automated_tests.status !== "passed") blockers.push(`Automated tests are ${pr.automated_tests.status}`);
     else if (currentHead && pr.automated_tests.head !== currentHead) blockers.push("Automated tests are stale for current head");
-    else if (blockCaveatedPasses && hasGateCaveat(pr.automated_tests.summary)) {
+    else if (blockCaveatedPasses && evidenceHasGateCaveat(pr.automated_tests)) {
       blockers.push("Automated test pass contains caveat");
     }
   }
@@ -482,7 +503,7 @@ export function evaluatePrGates(config: CompanyConfig | null, pr: PullRequestRec
     if (!lastAcceptance) blockers.push("Missing PM/lead product acceptance");
     else if (lastAcceptance.decision !== "accept") blockers.push(`Product acceptance is ${lastAcceptance.decision}`);
     else if (currentHead && lastAcceptance.head !== currentHead) blockers.push("Product acceptance is stale for current head");
-    else if (blockCaveatedPasses && hasGateCaveat(lastAcceptance.summary)) {
+    else if (blockCaveatedPasses && evidenceHasGateCaveat(lastAcceptance)) {
       blockers.push("Product acceptance contains caveat");
     }
   }
@@ -532,12 +553,21 @@ export function hasGateCaveat(summary: string): boolean {
   return false;
 }
 
-function hasUnresolvedCaveatedEvidence(summaries: string[]): boolean {
+type GateEvidenceLike = Pick<GateEvidenceRecord, "clean" | "caveats"> & { summary: string };
+
+export function evidenceHasGateCaveat(evidence: GateEvidenceLike): boolean {
+  if (evidence.clean === false) return true;
+  if ((evidence.caveats ?? []).some((caveat) => caveat.trim().length > 0)) return true;
+  if (evidence.clean === true) return false;
+  return hasGateCaveat(evidence.summary);
+}
+
+function hasUnresolvedCaveatedEvidence(records: Array<ReviewRecord | TestRecord | AutomatedTestRecord | AcceptanceRecord>): boolean {
   let unresolved = false;
-  for (const summary of summaries) {
-    if (hasGateCaveat(summary)) {
+  for (const record of records) {
+    if (evidenceHasGateCaveat(record)) {
       unresolved = true;
-    } else if (mentionsResolvedHistoricalCaveat(summary)) {
+    } else if (record.clean === true || mentionsResolvedHistoricalCaveat(record.summary)) {
       unresolved = false;
     }
   }

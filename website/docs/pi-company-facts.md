@@ -187,7 +187,7 @@ available model list, not free-form text.
 Targets:
 
 - default model for future and unconfigured roles
-- built-in roles: lead, pm, researcher, coder, reviewer, tester
+- built-in roles: lead, pm, designer, researcher, coder, reviewer, tester
 - existing named agents
 
 Stored in `.pi-company/company.yaml` under `model_policy`.
@@ -279,8 +279,8 @@ A PR is mergeable only when:
   match the current PR branch HEAD
 - PR branch resolves to a git commit and is not the base branch
 - PR branch still merges cleanly against the current base branch
-- pass/approve summaries do not contain caveats, known issues, or unresolved
-  risks
+- green evidence is explicitly clean and has no structured caveats; legacy
+  summaries are also scanned for caveats, known issues, or unresolved risks
 
 Product acceptance is separate from tester validation and code review.
 

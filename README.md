@@ -349,13 +349,13 @@ A PR is mergeable only when:
 - self-test, review, tester validation, product acceptance, and automated test evidence all match the current PR branch HEAD
 - the PR branch resolves to a git commit and is not the base branch
 - the PR branch still merges cleanly against the current base branch
-- pass/approve summaries do not contain caveats, known issues, or unresolved risks
+- green evidence is explicitly clean and has no structured caveats; legacy summaries are also scanned for caveats, known issues, or unresolved risks
 
 Product acceptance is a product-level gate, separate from tester validation and
 code review. PM or lead must verify that the user-facing behavior matches the
 human request and acceptance criteria. If a required flow was not observed, an
 API request/result was not visible, a named skill/tool/method was skipped, or
-evidence is missing, product acceptance must request changes or record a caveat;
+evidence is missing, product acceptance must request changes or record a structured caveat;
 it cannot green-light the merge.
 
 `company_merge_pr` executes the local git merge by default when lead calls it and

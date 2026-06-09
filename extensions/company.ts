@@ -1056,6 +1056,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
       "Spawning a worker should include a concrete mission. For implementation work, pass issue_id or create/assign an issue before launch.",
       "If the human asks to restart, relaunch, wake, or recover an agent window, set force_launch to true.",
       "Use coder worktrees for agents that will edit code in parallel.",
+      "Use built-in roles unless a project-local role pack exists in .pi-company/roles/<role>.md. Do not use force_role for ordinary typos or speculative roles.",
     ],
     parameters: Type.Object({
       role: Type.String({ description: "Role name, for example coder, tester, reviewer, pm, researcher." }),
@@ -1065,6 +1066,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
       create_worktree: Type.Optional(Type.Boolean({ description: "Create git worktree when this is a coder." })),
       launch_in_cmux: Type.Optional(Type.Boolean({ description: "Open a cmux pane and run Pi automatically when cmux is available." })),
       force_launch: Type.Optional(Type.Boolean({ description: "Open a fresh cmux pane even if pi-company state still marks the agent online." })),
+      force_role: Type.Optional(Type.Boolean({ description: "Allow a custom role without an existing .pi-company/roles/<role>.md file. Use only after explicit human approval." })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const existing = loadState(root).agents[params.name];
@@ -1087,10 +1089,10 @@ function registerTools(pi: ExtensionAPI, runtime: {
         }
         return toolResult(command, { plan: existing, command, cmux, existing: true, briefing, assigned_issue: assignedIssue });
       }
-      const plan = planAgentSpawn(root, params.role, params.name, params.mission ?? null);
+      const plan = planAgentSpawn(root, params.role, params.name, params.mission ?? null, { allowUnknownRole: params.force_role === true });
       const shouldCreateWorktree = (params.role === "coder" || params.name.startsWith("coder")) && params.create_worktree !== false;
       if (shouldCreateWorktree) ensureCoderWorktree(root, plan, true);
-      requestAgentSpawn(root, agentName, params.role, params.name, params.mission ?? null);
+      requestAgentSpawn(root, agentName, params.role, params.name, params.mission ?? null, { allowUnknownRole: params.force_role === true });
       registerAgent(root, {
         name: plan.name,
         role: plan.role,
@@ -1172,14 +1174,17 @@ function registerTools(pi: ExtensionAPI, runtime: {
     promptSnippet: "Submit local PR review result.",
     promptGuidelines: [
       "Use company_submit_review after reviewing diff, implementation quality, risks, and test quality.",
+      "For approval, set clean true only when there are no known merge blockers or caveats. If any approval caveat remains, put it in caveats instead of burying it in prose.",
     ],
     parameters: Type.Object({
       pr_id: Type.String(),
       decision: reviewDecisionSchema,
       summary: Type.String(),
+      clean: Type.Optional(Type.Boolean({ description: "Explicitly mark green review evidence clean. Clean evidence must not include caveats." })),
+      caveats: Type.Optional(Type.Array(Type.String({ description: "Structured caveat that blocks a green approval until resolved." }))),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      submitReview(root, agentName, params.pr_id, params.decision, params.summary);
+      submitReview(root, agentName, params.pr_id, params.decision, params.summary, gateEvidenceParams(params));
       await refreshUi(ctx);
       return toolResult(`${agentName} submitted ${params.decision} for ${params.pr_id}`, { pr: loadState(root).prs[params.pr_id] });
     },
@@ -1193,14 +1198,17 @@ function registerTools(pi: ExtensionAPI, runtime: {
     promptGuidelines: [
       "Use company_submit_test after validating the test brief, user behavior, edge cases, and relevant regressions.",
       "Do not submit pass with hidden caveats. If validation has failures, partial coverage, or pre-existing issues, submit blocked/fail or state the caveat plainly.",
+      "For pass, set clean true only when validation has no caveats. Put partial coverage, skipped checks, or unresolved issues in caveats.",
     ],
     parameters: Type.Object({
       pr_id: Type.String(),
       status: testStatusSchema,
       summary: Type.String(),
+      clean: Type.Optional(Type.Boolean({ description: "Explicitly mark green tester evidence clean. Clean evidence must not include caveats." })),
+      caveats: Type.Optional(Type.Array(Type.String({ description: "Structured caveat that blocks a green tester pass until resolved." }))),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      submitTest(root, agentName, params.pr_id, params.status, params.summary);
+      submitTest(root, agentName, params.pr_id, params.status, params.summary, gateEvidenceParams(params));
       await refreshUi(ctx);
       return toolResult(`${agentName} submitted test ${params.status} for ${params.pr_id}`, { pr: loadState(root).prs[params.pr_id] });
     },
@@ -1215,14 +1223,17 @@ function registerTools(pi: ExtensionAPI, runtime: {
       "Use company_submit_acceptance only as PM or lead after product-level validation.",
       "Acceptance is not a replacement for tester validation or code review; it verifies that the delivered behavior matches the human request and acceptance criteria.",
       "Do not accept if a key user flow is unobserved, an interface request is not visibly satisfied, a required skill/tool/method was skipped, or important evidence is missing. Request changes or comment instead.",
+      "For accept, set clean true only when product acceptance has no caveats. Put unobserved flows, skipped scope, or missing evidence in caveats.",
     ],
     parameters: Type.Object({
       pr_id: Type.String(),
       decision: acceptanceDecisionSchema,
       summary: Type.String(),
+      clean: Type.Optional(Type.Boolean({ description: "Explicitly mark green acceptance evidence clean. Clean evidence must not include caveats." })),
+      caveats: Type.Optional(Type.Array(Type.String({ description: "Structured caveat that blocks green product acceptance until resolved." }))),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      submitAcceptance(root, agentName, params.pr_id, params.decision, params.summary);
+      submitAcceptance(root, agentName, params.pr_id, params.decision, params.summary, gateEvidenceParams(params));
       await refreshUi(ctx);
       return toolResult(`${agentName} submitted product acceptance ${params.decision} for ${params.pr_id}`, { pr: loadState(root).prs[params.pr_id] });
     },
@@ -1236,15 +1247,18 @@ function registerTools(pi: ExtensionAPI, runtime: {
     promptGuidelines: [
       "Use company_record_automated_tests whenever automated tests are run for a local PR, whether they pass or fail.",
       "Record the command outcome truthfully. Any failed tests, partial pass counts, warnings, or pre-existing failures must be recorded as failed/blocked or stated plainly; never rewrite them as a clean pass.",
+      "For passed, set clean true only when the command result has no blocking caveats. Put skipped suites, partial counts, or unresolved failures in caveats.",
     ],
     parameters: Type.Object({
       pr_id: Type.String(),
       status: automatedTestStatusSchema,
       summary: Type.String(),
       command: Type.Optional(Type.String()),
+      clean: Type.Optional(Type.Boolean({ description: "Explicitly mark green automated-test evidence clean. Clean evidence must not include caveats." })),
+      caveats: Type.Optional(Type.Array(Type.String({ description: "Structured caveat that blocks green automated-test evidence until resolved." }))),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      recordAutomatedTests(root, agentName, params.pr_id, params.status, params.summary, params.command ?? null);
+      recordAutomatedTests(root, agentName, params.pr_id, params.status, params.summary, params.command ?? null, gateEvidenceParams(params));
       await refreshUi(ctx);
       return toolResult(`Automated tests ${params.status} for ${params.pr_id}`, { pr: loadState(root).prs[params.pr_id] });
     },
@@ -1258,15 +1272,18 @@ function registerTools(pi: ExtensionAPI, runtime: {
     promptGuidelines: [
       "Backward-compatible alias for company_record_automated_tests.",
       "Record the command outcome truthfully. Any failed tests, partial pass counts, warnings, or pre-existing failures must be recorded as failed/blocked or stated plainly; never rewrite them as a clean pass.",
+      "For passed, set clean true only when the command result has no blocking caveats. Put skipped suites, partial counts, or unresolved failures in caveats.",
     ],
     parameters: Type.Object({
       pr_id: Type.String(),
       status: automatedTestStatusSchema,
       summary: Type.String(),
       command: Type.Optional(Type.String()),
+      clean: Type.Optional(Type.Boolean({ description: "Explicitly mark green automated-test evidence clean. Clean evidence must not include caveats." })),
+      caveats: Type.Optional(Type.Array(Type.String({ description: "Structured caveat that blocks green automated-test evidence until resolved." }))),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      recordAutomatedTests(root, agentName, params.pr_id, params.status, params.summary, params.command ?? null);
+      recordAutomatedTests(root, agentName, params.pr_id, params.status, params.summary, params.command ?? null, gateEvidenceParams(params));
       await refreshUi(ctx);
       return toolResult(`Automated tests ${params.status} for ${params.pr_id}`, { pr: loadState(root).prs[params.pr_id] });
     },
@@ -1343,6 +1360,13 @@ function configString(pi: ExtensionAPI, name: string, envName: string, fallback:
   const envValue = process.env[envName];
   if (envValue && envValue.trim().length > 0) return envValue;
   return fallback;
+}
+
+function gateEvidenceParams(params: { clean?: boolean; caveats?: string[] }): { clean?: boolean; caveats?: string[] } {
+  return {
+    clean: params.clean === true ? true : params.clean === false ? false : undefined,
+    caveats: params.caveats ?? [],
+  };
 }
 
 async function configureModelPolicyInteractively(root: string, agentName: string, lead: string, ctx: ExtensionContext): Promise<string> {

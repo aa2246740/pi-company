@@ -30,10 +30,15 @@ import { defaultCoderWorktree, defaultConfig, DEFAULT_MESSAGE_POLICY, DEFAULT_RA
 import { makeEvent } from "./events.js";
 import { newId, nowIso, slug } from "./id.js";
 import { withCompanyLock } from "./lock.js";
-import { evaluatePrGates, hasGateCaveat, reduceEvents } from "./reducer.js";
+import { evaluatePrGates, evidenceHasGateCaveat, reduceEvents } from "./reducer.js";
 
 const AGENT_STALE_MS = 5 * 60_000;
 const PENDING_MERGE_REMINDER_PREFIX = "[pi-company pending merge]";
+
+export interface GateEvidenceInput {
+  clean?: boolean | null;
+  caveats?: string[] | null;
+}
 
 export interface InitOptions {
   root?: string;
@@ -174,11 +179,24 @@ export function rebuildState(root = process.cwd()): CompanyState {
   const events = readEvents(paths);
   const state = reduceEvents(events);
   state.config = loadConfig(root) ?? state.config;
+  writeJson(paths.state, state);
+  return applyLiveStateOverlay(root, state);
+}
+
+function applyLiveStateOverlay(root: string, state: CompanyState): CompanyState {
   refreshPrGitState(root, state);
   refreshPrStatuses(root, state);
   refreshAgentLiveness(state);
-  writeJson(paths.state, state);
   return state;
+}
+
+export function roleIsAvailable(root: string, role: string): boolean {
+  return Object.prototype.hasOwnProperty.call(DEFAULT_ROLES, role) || fs.existsSync(path.join(companyPaths(root).rolesDir, `${role}.md`));
+}
+
+function assertRoleAvailable(root: string, role: string): void {
+  if (roleIsAvailable(root, role)) return;
+  throw new Error(`Unknown role ${role}. Use a built-in role or add .pi-company/roles/${role}.md before spawning a custom role.`);
 }
 
 export function recordEvent(root: string, event: CompanyEvent): CompanyState {
@@ -990,7 +1008,7 @@ export function completeTask(root: string, actor: string, issueId: string, summa
   }));
 }
 
-export function planAgentSpawn(root: string, role: AgentRole, name: string, mission?: string | null): {
+export function planAgentSpawn(root: string, role: AgentRole, name: string, mission?: string | null, options: { allowUnknownRole?: boolean } = {}): {
   name: string;
   role: AgentRole;
   cwd: string;
@@ -998,6 +1016,7 @@ export function planAgentSpawn(root: string, role: AgentRole, name: string, miss
   branch: string | null;
   mission: string | null;
 } {
+  if (options.allowUnknownRole !== true) assertRoleAvailable(root, role);
   const config = loadConfig(root);
   const projectId = config?.id ?? slug(path.basename(root));
   const isCoder = role === "coder";
@@ -1013,12 +1032,12 @@ export function planAgentSpawn(root: string, role: AgentRole, name: string, miss
   };
 }
 
-export function requestAgentSpawn(root: string, actor: string, role: AgentRole, name: string, mission?: string | null): ReturnType<typeof planAgentSpawn> {
+export function requestAgentSpawn(root: string, actor: string, role: AgentRole, name: string, mission?: string | null, options: { allowUnknownRole?: boolean } = {}): ReturnType<typeof planAgentSpawn> {
   requireLead(root, actor, "spawn agents");
   if (loadState(root).agents[name]) {
     throw new Error(`Agent ${name} already exists. Use launch-command to start existing agents.`);
   }
-  const plan = planAgentSpawn(root, role, name, mission);
+  const plan = planAgentSpawn(root, role, name, mission, options);
   recordEvent(root, makeEvent("agent.spawn_requested", actor, plan));
   return plan;
 }
@@ -1570,7 +1589,7 @@ export function markPrReady(root: string, actor: string, prId: string, selfTest:
   return loadState(root);
 }
 
-export function submitReview(root: string, actor: string, prId: string, decision: "approve" | "request_changes" | "comment", summary: string): CompanyState {
+export function submitReview(root: string, actor: string, prId: string, decision: "approve" | "request_changes" | "comment", summary: string, evidence?: GateEvidenceInput | null): CompanyState {
   const state = loadState(root);
   const pr = state.prs[prId];
   if (!pr) throw new Error(`Unknown PR ${prId}`);
@@ -1584,12 +1603,13 @@ export function submitReview(root: string, actor: string, prId: string, decision
     decision,
     summary,
     head: pr ? resolveGitHead(root, pr.branch) : null,
+    ...normalizeGateEvidenceInput(evidence),
   }));
   notifyLeadOfPrGate(root, next, actor, prId, `Review ${decision} submitted by ${actor} for ${prId}. Check gates and route fixes or acceptance.`);
   return loadState(root);
 }
 
-export function submitTest(root: string, actor: string, prId: string, status: "pass" | "fail" | "blocked", summary: string): CompanyState {
+export function submitTest(root: string, actor: string, prId: string, status: "pass" | "fail" | "blocked", summary: string, evidence?: GateEvidenceInput | null): CompanyState {
   const state = loadState(root);
   const pr = state.prs[prId];
   if (!pr) throw new Error(`Unknown PR ${prId}`);
@@ -1603,12 +1623,13 @@ export function submitTest(root: string, actor: string, prId: string, status: "p
     status,
     summary,
     head: pr ? resolveGitHead(root, pr.branch) : null,
+    ...normalizeGateEvidenceInput(evidence),
   }));
   notifyLeadOfPrGate(root, next, actor, prId, `Tester status ${status} submitted by ${actor} for ${prId}. Check gates and route fixes or acceptance.`);
   return loadState(root);
 }
 
-export function submitAcceptance(root: string, actor: string, prId: string, decision: "accept" | "request_changes" | "comment", summary: string): CompanyState {
+export function submitAcceptance(root: string, actor: string, prId: string, decision: "accept" | "request_changes" | "comment", summary: string, evidence?: GateEvidenceInput | null): CompanyState {
   const state = loadState(root);
   const pr = state.prs[prId];
   if (!pr) throw new Error(`Unknown PR ${prId}`);
@@ -1627,12 +1648,13 @@ export function submitAcceptance(root: string, actor: string, prId: string, deci
     decision,
     summary,
     head: pr ? resolveGitHead(root, pr.branch) : null,
+    ...normalizeGateEvidenceInput(evidence),
   }));
   notifyLeadOfPrGate(root, next, actor, prId, `Product acceptance ${decision} submitted by ${actor} for ${prId}. Check gates and merge readiness.`);
   return loadState(root);
 }
 
-export function recordAutomatedTests(root: string, actor: string, prId: string, status: "passed" | "failed" | "blocked", summary: string, command?: string | null): CompanyState {
+export function recordAutomatedTests(root: string, actor: string, prId: string, status: "passed" | "failed" | "blocked", summary: string, command?: string | null, evidence?: GateEvidenceInput | null): CompanyState {
   const state = loadState(root);
   const pr = state.prs[prId];
   if (!pr) throw new Error(`Unknown PR ${prId}`);
@@ -1650,9 +1672,24 @@ export function recordAutomatedTests(root: string, actor: string, prId: string, 
     summary,
     command: command ?? null,
     head: pr ? resolveGitHead(root, pr.branch) : null,
+    ...normalizeGateEvidenceInput(evidence),
   }));
   notifyLeadOfPrGate(root, next, actor, prId, `Automated tests ${status} recorded by ${actor} for ${prId}. Check gates and route fixes or acceptance.`);
   return loadState(root);
+}
+
+function normalizeGateEvidenceInput(input?: GateEvidenceInput | null): { clean?: boolean; caveats?: string[] } {
+  if (!input) return {};
+  const caveats = (input.caveats ?? [])
+    .map((caveat) => String(caveat).trim())
+    .filter((caveat) => caveat.length > 0);
+  if (input.clean === true && caveats.length > 0) {
+    throw new Error("Gate evidence cannot be clean and include caveats.");
+  }
+  const evidence: { clean?: boolean; caveats?: string[] } = {};
+  if (typeof input.clean === "boolean") evidence.clean = input.clean;
+  if (caveats.length > 0) evidence.caveats = caveats;
+  return evidence;
 }
 
 function notifyLeadOfPrGate(root: string, state: CompanyState, actor: string, prId: string, text: string): void {
@@ -1864,32 +1901,32 @@ function describeReadyEvidence(pr: PullRequestRecord, currentHead: string | null
 function describeAutomatedEvidence(record: AutomatedTestRecord | null, currentHead: string | null): string {
   if (!record) return "missing";
   const stale = currentHead && record.head !== currentHead ? ` stale at ${shortHead(record.head)}, current ${shortHead(currentHead)}` : "";
-  const caveat = record.status === "passed" && hasGateCaveat(record.summary) ? " caveat=true" : "";
+  const caveat = record.status === "passed" && evidenceHasGateCaveat(record) ? " caveat=true" : "";
   return `${record.status}${stale}${caveat}${record.command ? ` (${record.command})` : ""}: ${snippet(record.summary)}`;
 }
 
 function describeReviewEvidence(record: ReviewRecord | null, currentHead: string | null): string {
   if (!record) return currentHead ? `missing for current head ${shortHead(currentHead)}` : "missing";
-  const caveat = record.decision === "approve" && hasGateCaveat(record.summary) ? " caveat=true" : "";
+  const caveat = record.decision === "approve" && evidenceHasGateCaveat(record) ? " caveat=true" : "";
   return `${record.decision} by ${record.reviewer}${caveat}: ${snippet(record.summary)}`;
 }
 
 function describeTestEvidence(record: TestRecord | null, currentHead: string | null): string {
   if (!record) return currentHead ? `missing for current head ${shortHead(currentHead)}` : "missing";
-  const caveat = record.status === "pass" && hasGateCaveat(record.summary) ? " caveat=true" : "";
+  const caveat = record.status === "pass" && evidenceHasGateCaveat(record) ? " caveat=true" : "";
   return `${record.status} by ${record.tester}${caveat}: ${snippet(record.summary)}`;
 }
 
 function describeAcceptanceEvidence(record: AcceptanceRecord | null, currentHead: string | null): string {
   if (!record) return currentHead ? `missing for current head ${shortHead(currentHead)}` : "missing";
-  const caveat = record.decision === "accept" && hasGateCaveat(record.summary) ? " caveat=true" : "";
+  const caveat = record.decision === "accept" && evidenceHasGateCaveat(record) ? " caveat=true" : "";
   return `${record.decision} by ${record.accepter}${caveat}: ${snippet(record.summary)}`;
 }
 
 function recentPrRisks(pr: PullRequestRecord): string[] {
   const risks: Array<{ ts: string; text: string }> = [];
   for (const review of pr.reviews) {
-    if (review.decision === "request_changes" || hasGateCaveat(review.summary)) {
+    if (review.decision === "request_changes" || evidenceHasGateCaveat(review)) {
       risks.push({
         ts: review.ts,
         text: `review ${review.decision} by ${review.reviewer} @${shortHead(review.head)}: ${snippet(review.summary)}`,
@@ -1897,7 +1934,7 @@ function recentPrRisks(pr: PullRequestRecord): string[] {
     }
   }
   for (const test of pr.tests) {
-    if (test.status !== "pass" || hasGateCaveat(test.summary)) {
+    if (test.status !== "pass" || evidenceHasGateCaveat(test)) {
       risks.push({
         ts: test.ts,
         text: `test ${test.status} by ${test.tester} @${shortHead(test.head)}: ${snippet(test.summary)}`,
@@ -1905,7 +1942,7 @@ function recentPrRisks(pr: PullRequestRecord): string[] {
     }
   }
   for (const acceptance of pr.acceptances ?? []) {
-    if (acceptance.decision !== "accept" || hasGateCaveat(acceptance.summary)) {
+    if (acceptance.decision !== "accept" || evidenceHasGateCaveat(acceptance)) {
       risks.push({
         ts: acceptance.ts,
         text: `acceptance ${acceptance.decision} by ${acceptance.accepter} @${shortHead(acceptance.head)}: ${snippet(acceptance.summary)}`,
@@ -1913,7 +1950,7 @@ function recentPrRisks(pr: PullRequestRecord): string[] {
     }
   }
   for (const test of pr.automated_test_history ?? []) {
-    if (test.status !== "passed" || hasGateCaveat(test.summary)) {
+    if (test.status !== "passed" || evidenceHasGateCaveat(test)) {
       risks.push({
         ts: test.ts,
         text: `automated ${test.status} @${shortHead(test.head)}: ${snippet(test.summary)}`,

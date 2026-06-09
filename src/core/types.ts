@@ -164,7 +164,16 @@ export interface IssueRecord {
   updated_at: string;
 }
 
-export interface ReviewRecord {
+export interface GateEvidenceRecord {
+  /**
+   * Structured gate signal. When true, caveats must be empty and summary text
+   * is not used as a blocker. When false, the evidence blocks merge.
+   */
+  clean?: boolean | null;
+  caveats?: string[];
+}
+
+export interface ReviewRecord extends GateEvidenceRecord {
   reviewer: string;
   decision: "approve" | "request_changes" | "comment";
   summary: string;
@@ -172,7 +181,7 @@ export interface ReviewRecord {
   ts: string;
 }
 
-export interface TestRecord {
+export interface TestRecord extends GateEvidenceRecord {
   tester: string;
   status: "pass" | "fail" | "blocked";
   summary: string;
@@ -180,7 +189,7 @@ export interface TestRecord {
   ts: string;
 }
 
-export interface AutomatedTestRecord {
+export interface AutomatedTestRecord extends GateEvidenceRecord {
   status: "passed" | "failed" | "blocked";
   command?: string | null;
   summary: string;
@@ -188,7 +197,7 @@ export interface AutomatedTestRecord {
   ts: string;
 }
 
-export interface AcceptanceRecord {
+export interface AcceptanceRecord extends GateEvidenceRecord {
   accepter: string;
   decision: "accept" | "request_changes" | "comment";
   summary: string;
