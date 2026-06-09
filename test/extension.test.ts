@@ -371,6 +371,48 @@ describe("pi-company extension", () => {
     expect(result.details.existing).toBe(true);
   });
 
+  it("does not mark a cmux launch successful when the new terminal never becomes readable", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-cmux-launch-health" });
+    const cmuxLog = path.join(root, "cmux.log");
+
+    await withFakeCmux({
+      callerSurface: "surface:lead",
+      surfaces: [
+        { ref: "surface:lead", title: "pi-company lead", screen: `${root}\npi-company extension-cmux-launch-health | lead (lead)\n` },
+      ],
+      newSurfaceReadable: false,
+      logPath: cmuxLog,
+    }, async () => {
+      const { handlers, pi, tools } = fakePi({
+        "company-root": root,
+        "company-agent": "lead",
+        "company-role": "lead",
+      });
+      const { ctx } = fakeContext(root);
+
+      companyExtension(pi);
+      await handlers.session_start?.({}, ctx);
+      const spawnTool = tools.find((tool) => tool.name === "company_spawn_agent");
+      if (!spawnTool) throw new Error("company_spawn_agent tool was not registered");
+      const result = await spawnTool.execute("tool-1", {
+        role: "pm",
+        name: "pm",
+        mission: "Shape product direction.",
+        launch_in_cmux: true,
+        force_launch: true,
+      }, undefined, undefined, ctx) as ToolResult;
+      await handlers.session_shutdown?.({}, ctx);
+
+      expect(result.details.cmux).toBeNull();
+      expect(loadState(root).agents.pm.cmux_surface ?? null).toBeNull();
+      const log = fs.readFileSync(cmuxLog, "utf8");
+      expect(log).toContain("new-pane");
+      expect(log).toContain("read-screen --surface surface:new");
+      expect(log).toContain("close-surface --surface surface:new");
+    });
+  });
+
   it("reuses an existing live cmux surface instead of opening a duplicate agent pane", async () => {
     const root = tempRoot();
     initCompany({ root, id: "extension-reuse-live-surface" });
@@ -589,6 +631,48 @@ describe("pi-company extension", () => {
     expect(result.content[0].text).toContain("Runtime smoke passed, but websocket reconnect was not exercised.");
   });
 
+  it("lets lead abandon a superseded PR through the Pi tool", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-abandon-pr" });
+    const coderPlan = requestAgentSpawn(root, "lead", "coder", "coder", "Implement the feature.");
+    registerAgent(root, {
+      ...coderPlan,
+      status: "online",
+    });
+    const pr = createPr(root, "coder", {
+      title: "Superseded feature",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: coderPlan.branch ?? "pi-company/coder",
+      worktree: coderPlan.worktree ?? root,
+      base: "main",
+    });
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate feature behavior.");
+    const { handlers, pi, tools } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx } = fakeContext(root);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const abandonTool = tools.find((tool) => tool.name === "company_abandon_pr");
+    if (!abandonTool) throw new Error("company_abandon_pr tool was not registered");
+    const result = await abandonTool.execute("tool-1", {
+      pr_id: pr.id,
+      reason: "Superseded by later integrated PR on the same branch.",
+      superseded_by: "PR-999",
+    }, undefined, undefined, ctx) as ToolResult;
+    await handlers.session_shutdown?.({ reason: "quit" }, ctx);
+
+    expect(result.content[0].text).toContain(`${pr.id} abandoned`);
+    expect(loadState(root).prs[pr.id]).toMatchObject({
+      status: "abandoned",
+      superseded_by: "PR-999",
+    });
+  });
+
   it("queues a launch briefing when an existing agent has assigned work", async () => {
     const root = tempRoot();
     initCompany({ root, id: "extension-launch-briefing" });
@@ -632,6 +716,47 @@ describe("pi-company extension", () => {
     expect(launchBriefings).toHaveLength(1);
     expect(assignmentNotices).toHaveLength(1);
     expect(launchBriefings[0].text).toContain(`${issue.id} assigned: Implement the draw flow`);
+  });
+
+  it("does not reuse a stale agent mission when briefing current assigned work", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-launch-briefing-current-work" });
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder-webui", "Old mission that has already been completed.");
+    registerAgent(root, {
+      ...plan,
+      name: "coder-webui",
+      role: "coder",
+      cwd: path.join(root, ".pi-company", "worktrees", "coder-webui"),
+      worktree: path.join(root, ".pi-company", "worktrees", "coder-webui"),
+      branch: "pi-company/coder-webui",
+      mission: "Old mission that has already been completed.",
+      status: "offline",
+    });
+    const issue = createIssue(root, "lead", "Fix production start flow", "Acceptance criteria.");
+    assignIssue(root, "lead", issue.id, "coder-webui");
+    const { handlers, pi, tools } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx } = fakeContext(root);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const spawnTool = tools.find((tool) => tool.name === "company_spawn_agent");
+    if (!spawnTool) throw new Error("company_spawn_agent tool was not registered");
+    const result = await spawnTool.execute("tool-1", {
+      role: "coder",
+      name: "coder-webui",
+      launch_in_cmux: false,
+    }, undefined, undefined, ctx) as ToolResult;
+    await handlers.session_shutdown?.({ reason: "quit" }, ctx);
+
+    const briefing = result.details.briefing as { text?: string } | null | undefined;
+    const briefingText = String(briefing?.text ?? "");
+    expect(briefingText).toContain(`${issue.id} assigned: Fix production start flow`);
+    expect(briefingText).toContain("(use the assigned work below)");
+    expect(briefingText).not.toContain("Old mission that has already been completed.");
   });
 
   it("configures role model policy through Pi UI model choices", async () => {
@@ -1151,6 +1276,18 @@ describe("pi-company extension", () => {
       toolName: "bash",
       input: { command: "mkdir -p site && touch site/index.html && git add site/index.html" },
     }, ctx);
+    const insideDevNullBash = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-1b",
+      toolName: "bash",
+      input: { command: "mkdir -p site 2>/dev/null && touch site/index.html" },
+    }, ctx);
+    const readDevNullBash = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-1c",
+      toolName: "bash",
+      input: { command: "cat package.json 2>/dev/null || true" },
+    }, ctx);
     const outsideBash = await handlers.tool_call?.({
       type: "tool_call",
       toolCallId: "tool-2",
@@ -1166,6 +1303,8 @@ describe("pi-company extension", () => {
     await handlers.session_shutdown?.({ reason: "quit" }, ctx);
 
     expect(insideBash).toBeUndefined();
+    expect(insideDevNullBash).toBeUndefined();
+    expect(readDevNullBash).toBeUndefined();
     expect(outsideBash).toMatchObject({ block: true });
     expect(parentBash).toMatchObject({ block: true });
     expect(String((outsideBash as { reason?: string } | undefined)?.reason)).toContain("only inside its assigned worktree");
@@ -1472,6 +1611,7 @@ function withWorkingDirectory<T>(cwd: string, fn: () => T): T {
 async function withFakeCmux<T>(options: {
   callerSurface: string;
   surfaces: Array<{ ref: string; title: string; screen?: string }>;
+  newSurfaceReadable?: boolean;
   logPath: string;
 }, fn: () => Promise<T>): Promise<T> {
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-company-extension-cmux-"));
@@ -1513,6 +1653,11 @@ async function withFakeCmux<T>(options: {
     fs.writeFileSync(screenPath, surface.screen ?? `${surface.title}\n`, "utf8");
     return `${shellCasePattern(surface.ref)}) cat ${shellSingleQuote(screenPath)}; exit 0 ;;`;
   }).join("\n");
+  const newSurfaceScreenPath = path.join(binDir, "screen-new.txt");
+  fs.writeFileSync(newSurfaceScreenPath, "pi-company launched surface\n", "utf8");
+  const newSurfaceCase = options.newSurfaceReadable === false
+    ? ""
+    : `${shellCasePattern("surface:new")}) cat ${shellSingleQuote(newSurfaceScreenPath)}; exit 0 ;;`;
   fs.writeFileSync(options.logPath, "", "utf8");
   fs.writeFileSync(cmuxPath, `#!/bin/sh
 printf '%s\\n' "$*" >> ${shellSingleQuote(options.logPath)}
@@ -1532,20 +1677,27 @@ if [ "$1" = "read-screen" ]; then
       *) shift ;;
     esac
   done
-  case "$surface" in
+	  case "$surface" in
 ${screenCases}
-  esac
-  exit 1
-fi
+${newSurfaceCase}
+	  esac
+	  exit 1
+	fi
 if [ "$1" = "--json" ] && [ "$2" = "new-pane" ]; then
   printf '{"surface_ref":"surface:new"}\\n'
   exit 0
 fi
-if [ "$1" = "send" ]; then
-  exit 0
-fi
-exit 1
-`, "utf8");
+	if [ "$1" = "send" ]; then
+	  exit 0
+	fi
+	if [ "$1" = "respawn-pane" ]; then
+	  exit 0
+	fi
+	if [ "$1" = "close-surface" ]; then
+	  exit 0
+	fi
+	exit 1
+	`, "utf8");
   fs.chmodSync(cmuxPath, 0o755);
   const previousPath = process.env.PATH;
   process.env.PATH = `${binDir}${path.delimiter}${previousPath ?? ""}`;

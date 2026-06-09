@@ -6,6 +6,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import {
   acknowledgeInbox,
+  abandonPr,
   agentRateLimitResumeAt,
   assignIssue,
   blockTask,
@@ -134,6 +135,11 @@ interface LiveCmuxSurface {
 interface CmuxLaunchResult {
   surface: string;
   reused: boolean;
+}
+
+interface CmuxContext {
+  window_ref?: string | null;
+  workspace_ref?: string | null;
 }
 
 export default function companyExtension(pi: ExtensionAPI): void {
@@ -784,9 +790,9 @@ function pathCandidateFromShellToken(token: string): string | null {
     .replace(/^\d*[<>]+/, "")
     .replace(/^["']|["']$/g, "")
     .trim();
-  if (!cleaned || cleaned === "." || cleaned === "-" || cleaned.startsWith("$")) return null;
+  if (!cleaned || cleaned === "." || cleaned === "-" || cleaned === "/dev/null" || cleaned.startsWith("$") || cleaned.startsWith("&")) return null;
   const value = cleaned.startsWith("--") && cleaned.includes("=") ? cleaned.slice(cleaned.indexOf("=") + 1) : cleaned;
-  if (!value || value.startsWith("$") || /^[a-z]+:\/\//i.test(value)) return null;
+  if (!value || value === "/dev/null" || value.startsWith("$") || value.startsWith("&") || /^[a-z]+:\/\//i.test(value)) return null;
   if (value === ".." || value.startsWith("../") || value.includes("/../")) return value;
   if (path.isAbsolute(value) || value.startsWith("./") || value.includes("/")) return value;
   return null;
@@ -982,11 +988,10 @@ function isMutatingLeadBashCommand(command: string): boolean {
     /(^|[;&|]\s*)(mkdir|touch|rm|mv|cp|install|chmod|chown|truncate)\b/i,
     /(^|[;&|]\s*)(npm|pnpm|yarn|bun)\s+(install|add|remove|update|upgrade|dlx)\b/i,
     /(^|[;&|]\s*)git\s+(init|add|commit|merge|rebase|checkout|switch|reset|clean|stash|restore|rm|mv|worktree\s+(add|remove|prune|move|repair))\b/i,
-    /(^|[;&|]\s*)(cat|printf|echo)\b[^;&|]*(>|>>)\s*\S+/i,
-    /(^|[;&|]\s*)tee\b/i,
-    /<<\s*['"]?\w+['"]?/,
   ];
-  return mutatingPatterns.some((pattern) => pattern.test(normalized));
+  return mutatingPatterns.some((pattern) => pattern.test(normalized))
+    || extractRedirectTargets(normalized).length > 0
+    || extractTeeTargets(normalized).length > 0;
 }
 
 function isAgentBusyError(error: unknown): boolean {
@@ -1572,6 +1577,28 @@ function registerTools(pi: ExtensionAPI, runtime: {
   });
 
   pi.registerTool({
+    name: "company_abandon_pr",
+    label: "Abandon PR",
+    description: "Abandon a stale or superseded local PR so it no longer blocks delivery.",
+    promptSnippet: "Abandon a stale, duplicate, or superseded local PR.",
+    promptGuidelines: [
+      "Lead should use company_abandon_pr when a PR is obsolete, duplicate, or already integrated through a later PR on the same branch.",
+      "Do not abandon active work to bypass review, testing, product acceptance, or known defects.",
+      "When abandoning because a later PR superseded it, set superseded_by to the later PR id and explain the integration evidence in reason.",
+    ],
+    parameters: Type.Object({
+      pr_id: Type.String(),
+      reason: Type.String(),
+      superseded_by: Type.Optional(Type.String()),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const state = abandonPr(root, agentName, params.pr_id, params.reason, params.superseded_by ?? null);
+      await refreshUi(ctx);
+      return toolResult(`${params.pr_id} abandoned`, { pr: state.prs[params.pr_id] });
+    },
+  });
+
+  pi.registerTool({
     name: "company_merge_pr",
     label: "Merge PR",
     description: "Request or execute a gated local PR merge.",
@@ -2101,7 +2128,9 @@ function inferSpawnIssue(state: CompanyState, agent: AgentRecord): IssueRecord |
 function sendLaunchBriefingIfNeeded(root: string, from: string, agent: AgentRecord, mission?: string | null): MailboxMessage | null {
   const state = loadState(root);
   const issues = outstandingIssuesForAgent(state, agent.name);
-  const missionText = (mission ?? agent.mission ?? "").trim();
+  const explicitMission = (mission ?? "").trim();
+  const fallbackMission = issues.length === 0 ? (agent.mission ?? "").trim() : "";
+  const missionText = explicitMission || fallbackMission;
   if (issues.length === 0 && !missionText) return null;
 
   const primary = issues[0] ?? null;
@@ -2158,14 +2187,76 @@ function launchInCmux(root: string, actor: string, agentName: string, command: s
     recordAgentLaunch(root, actor, agentName, liveSurface.ref);
     return { surface: liveSurface.ref, reused: true };
   }
-  const pane = runCmux(["--json", "new-pane", "--type", "terminal", "--direction", "right", "--focus", "false"]);
+  const context = currentCmuxContext();
+  const newPaneArgs = ["--json", "new-pane", "--type", "terminal", "--direction", "right", "--focus", "false"];
+  appendCmuxContextArgs(newPaneArgs, context);
+  const pane = runCmux(newPaneArgs);
   if (pane.status !== 0) return null;
   const surface = parseCmuxSurfaceRef(pane.stdout);
   if (!surface) return null;
-  const send = runCmux(["send", "--surface", surface, `${command}\n`]);
-  if (send.status !== 0) return null;
+  const launchArgs = ["respawn-pane", "--surface", surface];
+  appendCmuxContextArgs(launchArgs, context);
+  launchArgs.push("--command", command);
+  const launch = runCmux(launchArgs);
+  if (launch.status !== 0) {
+    const sendArgs = ["send", "--surface", surface];
+    appendCmuxContextArgs(sendArgs, context);
+    sendArgs.push(`${command}\n`);
+    const send = runCmux(sendArgs);
+    if (send.status !== 0) {
+      closeCmuxSurface(surface, context);
+      return null;
+    }
+  }
+  if (!waitForCmuxSurfaceReadable(surface, context)) {
+    closeCmuxSurface(surface, context);
+    return null;
+  }
   recordAgentLaunch(root, actor, agentName, surface);
   return { surface, reused: false };
+}
+
+function currentCmuxContext(): CmuxContext {
+  const identified = runCmux(["identify", "--json"]);
+  if (identified.status !== 0 || !identified.stdout.trim()) return {};
+  try {
+    const parsed = JSON.parse(identified.stdout) as Record<string, unknown>;
+    const caller = parsed.caller && typeof parsed.caller === "object" ? parsed.caller as Record<string, unknown> : null;
+    return {
+      window_ref: typeof caller?.window_ref === "string" ? caller.window_ref : null,
+      workspace_ref: typeof caller?.workspace_ref === "string" ? caller.workspace_ref : null,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function appendCmuxContextArgs(args: string[], context: CmuxContext): void {
+  if (context.workspace_ref) args.push("--workspace", context.workspace_ref);
+  if (context.window_ref) args.push("--window", context.window_ref);
+}
+
+function waitForCmuxSurfaceReadable(surface: string, context: CmuxContext): boolean {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const args = ["read-screen", "--surface", surface, "--lines", "20"];
+    appendCmuxContextArgs(args, context);
+    const read = runCmux(args);
+    if (read.status === 0) return true;
+    sleepSync(350);
+  }
+  return false;
+}
+
+function closeCmuxSurface(surface: string, context: CmuxContext): void {
+  const args = ["close-surface", "--surface", surface];
+  appendCmuxContextArgs(args, context);
+  runCmux(args);
+}
+
+function sleepSync(ms: number): void {
+  const buffer = new SharedArrayBuffer(4);
+  const view = new Int32Array(buffer);
+  Atomics.wait(view, 0, 0, ms);
 }
 
 function currentCmuxSurfaceRef(root: string, agentName: string): string | null {

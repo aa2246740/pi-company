@@ -624,9 +624,13 @@ function printStatus(root: string, state: ReturnType<typeof loadState>): void {
     const gates = getPrGateStatus(root, item.id);
     const hasCoderReadyEvidence = Boolean(item.self_test?.trim() && item.test_brief?.trim());
     const coderReady = hasCoderReadyEvidence ? " coder_ready=yes" : " coder_ready=no";
-    const blockers = gates.ready
-      ? " gates=green"
-      : ` gate_blockers=${gates.blockers.join("; ") || "unknown"}`;
+    const blockers = item.status === "merged"
+      ? " merged"
+      : item.status === "abandoned"
+        ? ` abandoned${item.superseded_by ? ` superseded_by=${item.superseded_by}` : ""}`
+        : gates.ready
+          ? " gates=green"
+          : ` gate_blockers=${gates.blockers.join("; ") || "unknown"}`;
     console.log(`- ${item.id} ${item.status}${coderReady}${pending} ${blockers} ${item.title}`);
   }
   const pendingMerges = pendingMergeRequests(state);
@@ -672,10 +676,35 @@ function launchInCmux(root: string, actor: string, agentName: string, command: s
   if (pane.status !== 0) throw new Error(pane.stderr || pane.stdout || "cmux new-pane failed");
   const surface = parseCmuxSurfaceRef(pane.stdout);
   if (!surface) throw new Error(`cmux new-pane did not return a surface ref: ${pane.stdout}`);
-  const send = spawnSync("cmux", ["send", "--surface", surface, `${command}\n`], { encoding: "utf8" });
-  if (send.status !== 0) throw new Error(send.stderr || send.stdout || "cmux send failed");
+  const launch = spawnSync("cmux", ["respawn-pane", "--surface", surface, "--command", command], { encoding: "utf8" });
+  if (launch.status !== 0) {
+    const send = spawnSync("cmux", ["send", "--surface", surface, `${command}\n`], { encoding: "utf8" });
+    if (send.status !== 0) {
+      spawnSync("cmux", ["close-surface", "--surface", surface], { encoding: "utf8" });
+      throw new Error(send.stderr || send.stdout || launch.stderr || launch.stdout || "cmux launch failed");
+    }
+  }
+  if (!waitForCmuxSurfaceReadable(surface)) {
+    spawnSync("cmux", ["close-surface", "--surface", surface], { encoding: "utf8" });
+    throw new Error(`cmux created ${surface}, but the terminal never became readable. The agent was not marked launched; retry after cmux can create live terminal surfaces.`);
+  }
   recordAgentLaunch(root, actor, agentName, surface);
   console.log(`Launched in ${surface}`);
+}
+
+function waitForCmuxSurfaceReadable(surface: string): boolean {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const read = spawnSync("cmux", ["read-screen", "--surface", surface, "--lines", "20"], { encoding: "utf8" });
+    if (read.status === 0) return true;
+    sleepSync(350);
+  }
+  return false;
+}
+
+function sleepSync(ms: number): void {
+  const buffer = new SharedArrayBuffer(4);
+  const view = new Int32Array(buffer);
+  Atomics.wait(view, 0, 0, ms);
 }
 
 function listCmuxPiCompanySurfaces(workspace?: string, window?: string): Array<{ surface: string; title: string }> {

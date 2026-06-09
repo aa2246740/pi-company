@@ -1063,7 +1063,9 @@ function expectedRoleForWorkType(workType: IssueWorkType): string {
 }
 
 export function startTask(root: string, actor: string, issueId: string, note?: string | null): CompanyState {
-  requireIssueOwner(root, actor, issueId, "start");
+  const state = loadState(root);
+  requireIssueOwnerFromState(state, actor, issueId, "start");
+  assertCoderHasNoOtherOpenPr(state, actor, issueId);
   return recordEvent(root, makeEvent("task.started", actor, {
     issue_id: issueId,
     note: note ?? null,
@@ -1541,7 +1543,7 @@ function buildLeadBriefNextActions(
     actions.push("Resolve tracked, staged, or untracked project-root changes before final delivery");
   }
   for (const pr of dirtyPrs) {
-    actions.push(`${pr.id}: ask ${pr.author} to commit or revert PR worktree changes deliberately`);
+    actions.push(`${pr.id}: ask ${pr.author} to pause later issue work in this worktree and restore or commit deliberately until the PR worktree is clean; do not start another issue on the same coder/worktree until this PR is merged or abandoned`);
   }
   for (const issue of incompleteIssues.filter((issue) => !nonMergedPrs.some((pr) => pr.issue_id === issue.id))) {
     const owner = issue.owner ?? null;
@@ -2331,6 +2333,16 @@ function issueHasUnmergedPr(state: CompanyState, issueId: string): boolean {
   return Object.values(state.prs).some((pr) => pr.issue_id === issueId && pr.status !== "merged" && pr.status !== "abandoned");
 }
 
+function assertCoderHasNoOtherOpenPr(state: CompanyState, actor: string, nextIssueId: string): void {
+  const agent = state.agents[actor];
+  if (agent?.role !== "coder") return;
+  const openPrs = Object.values(state.prs)
+    .filter((pr) => pr.author === actor && pr.status !== "merged" && pr.status !== "abandoned" && pr.issue_id !== nextIssueId)
+    .sort(compareIds);
+  if (openPrs.length === 0) return;
+  throw new Error(`Cannot start ${nextIssueId}; ${actor} already has open PR(s) ${openPrs.map((pr) => pr.id).join(", ")}. Merge or abandon the open PR first, or spawn a separate coder/worktree for parallel work.`);
+}
+
 function assertCleanPrWorktreeForEvidence(pr: PullRequestRecord, action: string): void {
   const status = prWorktreeStatus(pr);
   if (!status) return;
@@ -2375,7 +2387,9 @@ export function buildLeadBrief(root: string): LeadBrief {
       const gates = pr.status === "merged"
         ? { ready: true, blockers: [] }
         : evaluatePrGates(state.config, pr, state.agents);
-      const worktree = prWorktreeStatus(pr);
+      const worktree = pr.status === "merged" || pr.status === "abandoned"
+        ? null
+        : prWorktreeStatus(pr);
       return {
         id: pr.id,
         title: pr.title,
@@ -2394,7 +2408,7 @@ export function buildLeadBrief(root: string): LeadBrief {
       };
     });
   const nonMergedPrs = prs.filter((pr) => pr.status !== "merged" && pr.status !== "abandoned");
-  const dirtyPrs = prs.filter((pr) => pr.status !== "abandoned" && pr.worktree_dirty.length > 0);
+  const dirtyPrs = prs.filter((pr) => pr.status !== "merged" && pr.status !== "abandoned" && pr.worktree_dirty.length > 0);
   const rootWorktreeChanges = rootWorktreeStatus(root);
   const roleBoundaryFindings = [
     ...issueAssignmentBoundaryFindings(state),

@@ -673,6 +673,62 @@ Rate limit 已过期，可以恢复正常工作`);
     submitAcceptance(root, "pm", pr.id, "request_changes", "Dirty worktree blocks product acceptance.");
   }, 20_000);
 
+  it("does not let later dirty work in a reused coder worktree block merged PRs", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "merged-pr-reused-worktree-demo" });
+    const plan = registerCoder(root);
+    ensureCoderWorktree(root, plan, true);
+    commitFile(plan.worktree ?? root, "feature.txt", "committed\n", "feature");
+    const pr = createPr(root, "coder", {
+      title: "Completed feature",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    passPrGates(root, pr.id);
+    mergePr(root, "lead", pr.id, true);
+
+    fs.writeFileSync(path.join(plan.worktree ?? root, "next-feature.txt"), "uncommitted future work\n", "utf8");
+
+    const brief = buildLeadBrief(root);
+    const rendered = renderLeadBrief(brief);
+
+    expect(brief.prs.find((item) => item.id === pr.id)?.worktree_dirty).toEqual([]);
+    expect(brief.reasons_not_complete).not.toContain("1 PR worktree(s) have uncommitted changes");
+    expect(rendered).not.toContain(`${pr.id} merged merged dirty_worktree=`);
+    expect(rendered).not.toContain(`${pr.id}: ask coder to commit or revert PR worktree changes deliberately`);
+  }, 20_000);
+
+  it("blocks a coder from starting another issue while their previous PR is unmerged", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "open-pr-task-guard-demo" });
+    const plan = registerCoder(root);
+    ensureCoderWorktree(root, plan, true);
+    const firstIssue = createIssue(root, "lead", "Build tools", "Implement tools.");
+    const secondIssue = createIssue(root, "lead", "Build commands", "Implement commands.");
+    assignIssue(root, "lead", firstIssue.id, "coder");
+    assignIssue(root, "lead", secondIssue.id, "coder");
+    startTask(root, "coder", firstIssue.id);
+    commitFile(plan.worktree ?? root, "tools.txt", "tools\n", "tools");
+    const pr = createPr(root, "coder", {
+      title: "Tools",
+      issue_id: firstIssue.id,
+      summary: "Tools implementation.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+
+    expect(() => startTask(root, "coder", secondIssue.id)).toThrow(
+      new RegExp(`Cannot start ${secondIssue.id}; coder already has open PR\\(s\\) ${pr.id}`),
+    );
+    expect(() => startTask(root, "coder", firstIssue.id)).not.toThrow();
+  }, 20_000);
+
   it("keeps lead brief authoritative when worker prose claims completion", () => {
     const root = tempRoot();
     initGitRepo(root);
@@ -3085,7 +3141,7 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(state.prs[pr.id].status).toBe("merged");
     expect(state.prs[pr.id].merge_blockers).toBeNull();
     expect(fs.existsSync(path.join(root, "feature.txt"))).toBe(true);
-  });
+  }, 20_000);
 
   it("allows only lead to spawn persistent agents", () => {
     const root = tempRoot();
@@ -3169,7 +3225,7 @@ Rate limit 已过期，可以恢复正常工作`);
     const root = tempRoot();
     initCompany({ root, id: "cli-spawn-cmux-record-demo" });
 
-    withFakeCmuxLaunch("surface:cli-test", () => {
+    withFakeCmuxLaunch("surface:cli-test", {}, () => {
       const result = spawnSync(process.execPath, [
         "--import",
         "tsx",
@@ -3184,6 +3240,28 @@ Rate limit 已过期，可以恢复正常工作`);
       expect(result.status).toBe(0);
       expect(result.stdout).toContain("Launched in surface:cli-test");
       expect(loadState(root).agents.tester.cmux_surface).toBe("surface:cli-test");
+    });
+  });
+
+  it("does not record cmux surfaces when CLI spawn creates an unreadable terminal", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "cli-spawn-cmux-unreadable-demo" });
+
+    withFakeCmuxLaunch("surface:cli-dead", { readable: false }, () => {
+      const result = spawnSync(process.execPath, [
+        "--import",
+        "tsx",
+        path.join(process.cwd(), "src/cli.ts"),
+        "--root",
+        root,
+        "spawn",
+        "tester",
+        "--cmux",
+      ], { encoding: "utf8" });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr || result.stdout).toContain("terminal never became readable");
+      expect(loadState(root).agents.tester.cmux_surface ?? null).toBeNull();
     });
   });
 
@@ -3536,12 +3614,15 @@ function shellCasePattern(value: string): string {
   return value.replace(/([\\*?[\]])/g, "\\$1");
 }
 
-function withFakeCmuxLaunch<T>(surface: string, fn: () => T): T {
+function withFakeCmuxLaunch<T>(surface: string, options: { readable?: boolean }, fn: () => T): T {
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-company-cmux-launch-bin-"));
   tempRoots.add(binDir);
   const cmuxPath = path.join(binDir, "cmux");
   const tree = JSON.stringify({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ ref: surface, type: "terminal", title: "pi-company tester" }] }] }] }] });
-  fs.writeFileSync(cmuxPath, `#!/bin/sh\nif [ "$1" = "--json" ] && [ "$2" = "new-pane" ]; then\n  printf '{"surface_ref":"${surface}"}\\n'\n  exit 0\nfi\nif [ "$1" = "send" ]; then\n  exit 0\nfi\nif [ "$1" = "tree" ]; then\n  cat <<'JSON'\n${tree}\nJSON\n  exit 0\nfi\nexit 1\n`, "utf8");
+  const readableCase = options.readable === false
+    ? ""
+    : `if [ "$1" = "read-screen" ]; then\n  printf 'pi-company tester\\n'\n  exit 0\nfi\n`;
+  fs.writeFileSync(cmuxPath, `#!/bin/sh\nif [ "$1" = "--json" ] && [ "$2" = "new-pane" ]; then\n  printf '{"surface_ref":"${surface}"}\\n'\n  exit 0\nfi\nif [ "$1" = "send" ]; then\n  exit 0\nfi\nif [ "$1" = "respawn-pane" ]; then\n  exit 0\nfi\nif [ "$1" = "close-surface" ]; then\n  exit 0\nfi\n${readableCase}if [ "$1" = "tree" ]; then\n  cat <<'JSON'\n${tree}\nJSON\n  exit 0\nfi\nexit 1\n`, "utf8");
   fs.chmodSync(cmuxPath, 0o755);
   const previousPath = process.env.PATH;
   process.env.PATH = `${binDir}${path.delimiter}${previousPath ?? ""}`;
