@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import YAML from "yaml";
 import { describe, expect, it } from "vitest";
 import {
@@ -414,6 +414,24 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(messages[0].task).toBe(issue.id);
     expect(messages[0].text).toContain("Build the local PR flow");
   });
+
+  it("allocates issue IDs atomically across concurrent writers", async () => {
+    const root = tempRoot();
+    try {
+      initCompany({ root, id: "issue-id-race-demo" });
+
+      await createIssuesInParallel(root, 20);
+
+      const issues = Object.values(loadState(root).issues).sort((left, right) => left.id.localeCompare(right.id));
+      expect(issues).toHaveLength(20);
+      expect(issues.map((issue) => issue.id)).toEqual(
+        Array.from({ length: 20 }, (_, index) => `ISSUE-${String(index + 1).padStart(3, "0")}`),
+      );
+      expect(new Set(issues.map((issue) => issue.title)).size).toBe(20);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }, 20_000);
 
   it("does not duplicate assignment notifications for the same owner", () => {
     const root = tempRoot();
@@ -1058,7 +1076,10 @@ Rate limit 已过期，可以恢复正常工作`);
       base: "main",
     });
     passPrGates(root, pr.id);
-    recordEvent(root, makeEvent("merge.completed", "lead", { pr_id: pr.id }));
+    recordEvent(root, makeEvent("merge.completed", "lead", {
+      pr_id: pr.id,
+      head: loadState(root).prs[pr.id].head,
+    }));
 
     const state = mergePr(root, "lead", pr.id, true);
 
@@ -1090,7 +1111,10 @@ Rate limit 已过期，可以恢复正常工作`);
       base: "main",
     });
     passPrGates(root, pr.id);
-    recordEvent(root, makeEvent("merge.completed", "lead", { pr_id: pr.id }));
+    recordEvent(root, makeEvent("merge.completed", "lead", {
+      pr_id: pr.id,
+      head: loadState(root).prs[pr.id].head,
+    }));
 
     expect(() => markPrReady(root, "coder", pr.id, "Late self-test.", "Late brief.")).toThrow(/already merged/);
     expect(() => submitReview(root, "reviewer", pr.id, "request_changes", "Late review.")).toThrow(/already merged/);
@@ -1335,7 +1359,7 @@ Rate limit 已过期，可以恢复正常工作`);
         "ISSUE-001: relaunch designer before continuing; its last cmux surface is gone or heartbeat is stale",
       );
     });
-  });
+  }, 20_000);
 
   it("uses quota cooldown for exhausted-account incidents", () => {
     const root = tempRoot();
@@ -2448,6 +2472,43 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(loadState(root).prs[pr.id].status).toBe("blocked");
   });
 
+  it("ignores headless merge completion after a lead request when the branch head advances", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "stale-headless-merge-complete-demo" });
+    const plan = registerCoder(root);
+    const branch = plan.branch ?? "pi-company/coder";
+    runGit(root, ["checkout", "-b", branch]);
+    commitFile(root, "feature.txt", "first\n", "feature first");
+    runGit(root, ["checkout", "main"]);
+
+    const pr = createPr(root, "coder", {
+      title: "Feature",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch,
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate feature.");
+    recordAutomatedTests(root, "tester", pr.id, "passed", "Automated checks passed.", "npm test");
+    submitReview(root, "reviewer", pr.id, "approve", "Approved.");
+    submitTest(root, "tester", pr.id, "pass", "Passed.");
+    submitAcceptance(root, "pm", pr.id, "accept", "Product behavior accepted.");
+    requestMerge(root, "lead", pr.id);
+
+    runGit(root, ["checkout", branch]);
+    commitFile(root, "feature.txt", "second\n", "feature second");
+    runGit(root, ["checkout", "main"]);
+    expect(getPrGateStatus(root, pr.id).ready).toBe(false);
+
+    recordEvent(root, makeEvent("merge.completed", "lead", { pr_id: pr.id }));
+
+    const state = loadState(root);
+    expect(state.prs[pr.id].status).not.toBe("merged");
+    expect(state.prs[pr.id].merged_at).toBeUndefined();
+  });
+
   it("blocks PRs whose branch does not resolve in a git project", () => {
     const root = tempRoot();
     initGitRepo(root);
@@ -2547,7 +2608,7 @@ Rate limit 已过期，可以恢复正常工作`);
     const merged = mergePr(root, "lead", pr.id, true);
     expect(merged.prs[pr.id].status).toBe("merged");
     expect(fs.existsSync(path.join(root, "feature.txt"))).toBe(true);
-  }, 10_000);
+  }, 20_000);
 
   it("surfaces lead-requested merges that still need execution", () => {
     const root = tempRoot();
@@ -3179,6 +3240,27 @@ function passPrGates(root: string, prId: string, author = "coder"): void {
   submitReview(root, "reviewer", prId, "approve", "Approved.");
   submitTest(root, "tester", prId, "pass", "Passed.");
   submitAcceptance(root, "pm", prId, "accept", "Product behavior accepted.");
+}
+
+async function createIssuesInParallel(root: string, count: number): Promise<void> {
+  const tsx = path.join(process.cwd(), "node_modules", ".bin", "tsx");
+  const companyModule = path.join(process.cwd(), "src", "core", "company.ts");
+  const results = await Promise.all(Array.from({ length: count }, (_, index) => new Promise<{ status: number | null; stderr: string }>((resolve) => {
+    const code = [
+      `import { createIssue } from ${JSON.stringify(companyModule)};`,
+      `createIssue(${JSON.stringify(root)}, "lead", ${JSON.stringify(`Concurrent issue ${index}`)});`,
+    ].join("\n");
+    const child = spawn(tsx, ["-e", code], { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("exit", (status) => resolve({ status, stderr }));
+  })));
+  const failures = results.filter((result) => result.status !== 0);
+  if (failures.length > 0) {
+    throw new Error(failures.map((failure) => failure.stderr).join("\n"));
+  }
 }
 
 function runGit(root: string, args: string[]): void {

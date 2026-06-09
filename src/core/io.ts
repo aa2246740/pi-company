@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import YAML from "yaml";
 import type { CompanyEvent, CompanyPaths, MailboxMessage } from "./types.js";
 import { mailboxPath } from "./paths.js";
@@ -10,7 +11,7 @@ export function ensureDir(dir: string): void {
 
 export function atomicWriteText(file: string, text: string): void {
   ensureDir(path.dirname(file));
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  const tmp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
   fs.writeFileSync(tmp, text, "utf8");
   fs.renameSync(tmp, file);
 }

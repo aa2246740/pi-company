@@ -72,8 +72,6 @@ export function reduceEvents(events: CompanyEvent[]): CompanyState {
   const state = emptyState();
   const messageRecipients = new Map<string, string>();
   const deliveredMessages = new Set<string>();
-  const leadMergeRequests = new Set<string>();
-
   for (const event of events) {
     state.updated_at = event.ts;
     switch (event.type) {
@@ -338,7 +336,7 @@ export function reduceEvents(events: CompanyEvent[]): CompanyState {
       case "merge.completed": {
         const id = String(event.data.pr_id);
         const pr = state.prs[id];
-        if (pr && pr.status !== "abandoned" && event.actor === (state.config?.lead ?? "lead") && mergeCompletionIsValid(state.config, pr, state.agents, event, leadMergeRequests)) {
+        if (pr && pr.status !== "abandoned" && event.actor === (state.config?.lead ?? "lead") && mergeCompletionIsValid(state.config, pr, state.agents, event)) {
           pr.status = "merged";
           pr.merge_blockers = null;
           pr.merge_blocked_at = null;
@@ -362,7 +360,6 @@ export function reduceEvents(events: CompanyEvent[]): CompanyState {
         const gates = pr && pr.status !== "merged" && pr.status !== "abandoned" && state.agents[event.actor]
           ? evaluatePrGates(state.config, pr, state.agents)
           : null;
-        if (pr && event.actor === (state.config?.lead ?? "lead") && gates?.ready) leadMergeRequests.add(id);
         if (pr && pr.status !== "merged" && pr.status !== "abandoned" && state.agents[event.actor] && gates?.ready) {
           pr.merge_requested_at = event.ts;
           pr.merge_blockers = null;
@@ -636,15 +633,12 @@ function mergeCompletionIsValid(
   pr: PullRequestRecord,
   agents: Record<string, AgentRecord>,
   event: CompanyEvent,
-  leadMergeRequests: Set<string>,
 ): boolean {
   const fullGates = evaluatePrGates(config, pr, agents);
   const nonDiffGates = evaluatePrGates(withoutDiffCheck(config), pr, agents);
   if (!fullGates.ready && !nonDiffGates.ready) return false;
   if (typeof event.data.head === "string" && event.data.head === pr.head) return true;
-  if (leadMergeRequests.has(pr.id)) return true;
-  if (typeof event.data.note === "string" && /manual git merge completed/i.test(event.data.note)) return true;
-  return fullGates.ready;
+  return !pr.head && fullGates.ready;
 }
 
 function withoutDiffCheck(config: CompanyConfig | null): CompanyConfig | null {

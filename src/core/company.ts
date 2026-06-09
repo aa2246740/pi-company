@@ -29,6 +29,7 @@ import { companyPaths, issuePath, prPath } from "./paths.js";
 import { defaultCoderWorktree, defaultConfig, DEFAULT_MESSAGE_POLICY, DEFAULT_RATE_LIMIT_POLICY, DEFAULT_ROLES, defaultRoster } from "./defaults.js";
 import { makeEvent } from "./events.js";
 import { newId, nowIso, slug } from "./id.js";
+import { withCompanyLock } from "./lock.js";
 import { evaluatePrGates, hasGateCaveat, reduceEvents } from "./reducer.js";
 
 const AGENT_STALE_MS = 5 * 60_000;
@@ -182,11 +183,24 @@ export function rebuildState(root = process.cwd()): CompanyState {
 
 export function recordEvent(root: string, event: CompanyEvent): CompanyState {
   const paths = companyPaths(root);
-  ensureCompanyDirs(paths);
-  appendEvent(paths, event);
-  const state = rebuildState(root);
+  const state = withCompanyLock(root, () => {
+    ensureCompanyDirs(paths);
+    appendEvent(paths, event);
+    return rebuildState(root);
+  });
   syncRenderedRecordsForEvent(root, state, event);
   return state;
+}
+
+function stateForWrite(root: string, paths = companyPaths(root)): CompanyState {
+  const state = reduceEvents(readEvents(paths));
+  state.config = loadConfig(root) ?? state.config;
+  return state;
+}
+
+function appendEventForWrite(root: string, paths: ReturnType<typeof companyPaths>, event: CompanyEvent): CompanyState {
+  appendEvent(paths, event);
+  return rebuildState(root);
 }
 
 export function syncRenderedRecords(root: string, state: CompanyState = loadState(root)): void {
@@ -363,47 +377,46 @@ export function sendCompanyMessage(
   options: { bypassTargetCooldown?: boolean } = {},
 ): MailboxMessage {
   const paths = companyPaths(root);
-  ensureCompanyDirs(paths);
-  const events = readEvents(paths);
-  const state = reduceEvents(events);
-  // Message wake decisions must honor the current editable company.yaml,
-  // not only the historical config captured by the initialization event.
-  // This keeps operator-tuned wake policy changes effective immediately.
-  state.config = loadConfig(root) ?? state.config;
-  if (message.from !== "system" && !state.agents[message.from]) {
-    throw new Error(`Unknown message sender ${message.from}.`);
-  }
-  if (!state.agents[message.to]) {
-    throw new Error(`Unknown message recipient ${message.to}.`);
-  }
-  if (!isMailboxMessageType(message.type)) {
-    throw new Error(`Invalid message type ${String(message.type)}.`);
-  }
-  if (message.priority !== undefined && !isMessagePriority(message.priority)) {
-    throw new Error(`Invalid message priority ${String(message.priority)}.`);
-  }
-  const ts = nowIso();
-  const priority = message.priority ?? defaultPriorityForMessage(message.type);
-  const rateLimitWake = message.type === "human_steering" ? null : rateLimitWakeDecision(state, message.to, ts);
-  const wake = rateLimitWake ?? decideMessageWake(events, normalizeMessagePolicy(state.config?.message_policy), {
-    ...message,
-    priority,
-  }, ts, options);
-  const text = appendPrGateSnapshot(state, message);
-  const full: MailboxMessage = {
-    id: newId("msg"),
-    ts,
-    ...message,
-    text,
-    priority,
-    wake,
-  };
-  appendMailbox(paths, full);
-  const event = makeEvent("message.sent", message.from, {
-    ...full,
+  let full: MailboxMessage | null = null;
+  withCompanyLock(root, () => {
+    ensureCompanyDirs(paths);
+    const events = readEvents(paths);
+    const state = stateForWrite(root, paths);
+    if (message.from !== "system" && !state.agents[message.from]) {
+      throw new Error(`Unknown message sender ${message.from}.`);
+    }
+    if (!state.agents[message.to]) {
+      throw new Error(`Unknown message recipient ${message.to}.`);
+    }
+    if (!isMailboxMessageType(message.type)) {
+      throw new Error(`Invalid message type ${String(message.type)}.`);
+    }
+    if (message.priority !== undefined && !isMessagePriority(message.priority)) {
+      throw new Error(`Invalid message priority ${String(message.priority)}.`);
+    }
+    const ts = nowIso();
+    const priority = message.priority ?? defaultPriorityForMessage(message.type);
+    const rateLimitWake = message.type === "human_steering" ? null : rateLimitWakeDecision(state, message.to, ts);
+    const wake = rateLimitWake ?? decideMessageWake(events, normalizeMessagePolicy(state.config?.message_policy), {
+      ...message,
+      priority,
+    }, ts, options);
+    const text = appendPrGateSnapshot(state, message);
+    full = {
+      id: newId("msg"),
+      ts,
+      ...message,
+      text,
+      priority,
+      wake,
+    };
+    appendMailbox(paths, full);
+    appendEvent(paths, makeEvent("message.sent", message.from, {
+      ...full,
+    }));
+    rebuildState(root);
   });
-  appendEvent(paths, event);
-  rebuildState(root);
+  if (!full) throw new Error("Failed to send message.");
   return full;
 }
 
@@ -720,24 +733,27 @@ function normalizeStoredMailboxMessage(message: MailboxMessage, agent: string): 
 }
 
 export function markMessageDelivered(root: string, agent: string, messageId: string): CompanyState {
-  if (!loadState(root).agents[agent]) throw new Error(`Unknown agent ${agent}.`);
   const paths = companyPaths(root);
-  ensureCompanyDirs(paths);
-  const messages = readInboxMessages(paths, agent);
-  if (!messages.some((message) => message.id === messageId)) {
-    throw new Error(`Unknown message ${messageId} in ${agent}'s inbox.`);
-  }
-  const alreadyDelivered = readEvents(paths).some((event) =>
-    event.type === "message.delivered" &&
-    event.actor === agent &&
-    event.data.to === agent &&
-    event.data.message_id === messageId
-  );
-  if (alreadyDelivered) return loadState(root);
-  return recordEvent(root, makeEvent("message.delivered", agent, {
-    to: agent,
-    message_id: messageId,
-  }));
+  return withCompanyLock(root, () => {
+    ensureCompanyDirs(paths);
+    const state = stateForWrite(root, paths);
+    if (!state.agents[agent]) throw new Error(`Unknown agent ${agent}.`);
+    const messages = readInboxMessages(paths, agent);
+    if (!messages.some((message) => message.id === messageId)) {
+      throw new Error(`Unknown message ${messageId} in ${agent}'s inbox.`);
+    }
+    const alreadyDelivered = readEvents(paths).some((event) =>
+      event.type === "message.delivered" &&
+      event.actor === agent &&
+      event.data.to === agent &&
+      event.data.message_id === messageId
+    );
+    if (alreadyDelivered) return rebuildState(root);
+    return appendEventForWrite(root, paths, makeEvent("message.delivered", agent, {
+      to: agent,
+      message_id: messageId,
+    }));
+  });
 }
 
 export function listInbox(root: string, agent: string, includeDelivered = false): MailboxMessage[] {
@@ -831,24 +847,34 @@ export function createIssue(
   body = "",
   options: { work_type?: IssueWorkType | null } = {},
 ): IssueRecord {
-  requireLead(root, actor, "create issues");
   const workType = options.work_type ?? null;
   const paths = companyPaths(root);
-  const id = `ISSUE-${String(Object.keys(loadState(root).issues).length + 1).padStart(3, "0")}`;
-  const now = nowIso();
-  const issue: IssueRecord = {
-    id,
-    title,
-    body,
-    work_type: workType,
-    status: "open",
-    owner: null,
-    created_by: actor,
-    created_at: now,
-    updated_at: now,
-  };
-  atomicWriteText(issuePath(paths, id), renderIssue(issue));
-  recordEvent(root, makeEvent("issue.created", actor, { issue }));
+  let issue: IssueRecord | null = null;
+  let event: CompanyEvent | null = null;
+  let state: CompanyState | null = null;
+  withCompanyLock(root, () => {
+    ensureCompanyDirs(paths);
+    const current = stateForWrite(root, paths);
+    const lead = current.config?.lead ?? "lead";
+    if (actor !== lead) throw new Error(`Only ${lead} can create issues.`);
+    const id = nextRecordId(Object.keys(current.issues), "ISSUE");
+    const now = nowIso();
+    issue = {
+      id,
+      title,
+      body,
+      work_type: workType,
+      status: "open",
+      owner: null,
+      created_by: actor,
+      created_at: now,
+      updated_at: now,
+    };
+    event = makeEvent("issue.created", actor, { issue });
+    state = appendEventForWrite(root, paths, event);
+  });
+  if (!issue || !event || !state) throw new Error("Failed to create issue.");
+  syncRenderedRecordsForEvent(root, state, event);
   return issue;
 }
 
@@ -1066,50 +1092,58 @@ export function createPr(root: string, actor: string, params: {
   base?: string;
 }): PullRequestRecord {
   const paths = companyPaths(root);
-  const state = loadState(root);
-  const author = state.agents[actor];
-  if (!author) throw new Error(`Unknown PR author ${actor}. Spawn or register the agent before creating PRs.`);
-  if (author.role !== "coder") {
-    throw new Error(`Only coder agents can create PRs. ${actor} has role ${author.role}.`);
-  }
-  if (params.issue_id) requirePrIssueOwner(state, actor, params.issue_id);
-  const id = `PR-${String(Object.keys(state.prs).length + 1).padStart(3, "0")}`;
-  const now = nowIso();
-  const branch = normalizePrBranch(root, actor, params.branch, state.agents[actor]?.branch ?? null);
-  if (author.branch && branch !== author.branch) {
-    throw new Error(`PR branch ${branch} does not match ${actor}'s registered branch ${author.branch}.`);
-  }
-  if (author.worktree && path.resolve(params.worktree) !== path.resolve(author.worktree)) {
-    throw new Error(`PR worktree ${path.resolve(params.worktree)} does not match ${actor}'s registered worktree ${path.resolve(author.worktree)}.`);
-  }
-  const head = resolveGitHead(root, branch);
-  const baseHead = resolveGitHead(root, params.base ?? "main");
-  const pr: PullRequestRecord = {
-    id,
-    title: params.title,
-    issue_id: params.issue_id ?? null,
-    author: actor,
-    branch,
-    head,
-    base_head: baseHead,
-    mergeable: checkPrMergeability(root, params.base ?? "main", branch),
-    worktree: params.worktree,
-    base: params.base ?? "main",
-    status: "draft",
-    summary: params.summary,
-    self_test: null,
-    test_brief: null,
-    ready_head: null,
-    reviews: [],
-    tests: [],
-    acceptances: [],
-    automated_tests: null,
-    automated_test_history: [],
-    created_at: now,
-    updated_at: now,
-  };
-  atomicWriteText(prPath(paths, id), renderPr(pr));
-  recordEvent(root, makeEvent("pr.created", actor, { pr }));
+  let pr: PullRequestRecord | null = null;
+  let event: CompanyEvent | null = null;
+  let state: CompanyState | null = null;
+  withCompanyLock(root, () => {
+    ensureCompanyDirs(paths);
+    const current = stateForWrite(root, paths);
+    const author = current.agents[actor];
+    if (!author) throw new Error(`Unknown PR author ${actor}. Spawn or register the agent before creating PRs.`);
+    if (author.role !== "coder") {
+      throw new Error(`Only coder agents can create PRs. ${actor} has role ${author.role}.`);
+    }
+    if (params.issue_id) requirePrIssueOwner(current, actor, params.issue_id);
+    const id = nextRecordId(Object.keys(current.prs), "PR");
+    const now = nowIso();
+    const branch = normalizePrBranch(root, actor, params.branch, author.branch ?? null);
+    if (author.branch && branch !== author.branch) {
+      throw new Error(`PR branch ${branch} does not match ${actor}'s registered branch ${author.branch}.`);
+    }
+    if (author.worktree && path.resolve(params.worktree) !== path.resolve(author.worktree)) {
+      throw new Error(`PR worktree ${path.resolve(params.worktree)} does not match ${actor}'s registered worktree ${path.resolve(author.worktree)}.`);
+    }
+    const head = resolveGitHead(root, branch);
+    const baseHead = resolveGitHead(root, params.base ?? "main");
+    pr = {
+      id,
+      title: params.title,
+      issue_id: params.issue_id ?? null,
+      author: actor,
+      branch,
+      head,
+      base_head: baseHead,
+      mergeable: checkPrMergeability(root, params.base ?? "main", branch),
+      worktree: params.worktree,
+      base: params.base ?? "main",
+      status: "draft",
+      summary: params.summary,
+      self_test: null,
+      test_brief: null,
+      ready_head: null,
+      reviews: [],
+      tests: [],
+      acceptances: [],
+      automated_tests: null,
+      automated_test_history: [],
+      created_at: now,
+      updated_at: now,
+    };
+    event = makeEvent("pr.created", actor, { pr });
+    state = appendEventForWrite(root, paths, event);
+  });
+  if (!pr || !event || !state) throw new Error("Failed to create PR.");
+  syncRenderedRecordsForEvent(root, state, event);
   return pr;
 }
 
@@ -1139,59 +1173,67 @@ export function adoptIntegratedPr(root: string, actor: string, params: {
   base?: string;
 }): PullRequestRecord {
   const paths = companyPaths(root);
-  const state = loadState(root);
-  const author = state.agents[params.author];
-  if (!author) throw new Error(`Unknown PR author ${params.author}. Spawn or register the agent before creating PRs.`);
-  if (author.role !== "coder") throw new Error(`Only coder agents can author PRs. ${params.author} has role ${author.role}.`);
-  const lead = state.config?.lead ?? "lead";
-  if (actor !== lead && actor !== params.author) {
-    throw new Error(`Only ${lead} or ${params.author} can adopt an integrated PR.`);
-  }
-  if (params.issue_id) requirePrIssueOwner(state, params.author, params.issue_id);
-  const base = params.base ?? "main";
-  const baseHead = resolveGitHead(root, base);
-  if (!baseHead) throw new Error(`Base branch ${base} does not resolve to a git commit.`);
-  const branch = params.branch.trim();
-  if (!branch) throw new Error("Adopted PR branch is required.");
-  if (branch === base) throw new Error("Adopted PR branch must differ from base branch.");
-  if (gitRefExists(root, branch)) {
-    const branchHead = resolveGitHead(root, branch);
-    if (branchHead !== baseHead) {
-      throw new Error(`Branch ${branch} already exists at ${shortHead(branchHead)}, expected current ${base} ${shortHead(baseHead)}.`);
+  let pr: PullRequestRecord | null = null;
+  let event: CompanyEvent | null = null;
+  let state: CompanyState | null = null;
+  withCompanyLock(root, () => {
+    ensureCompanyDirs(paths);
+    const current = stateForWrite(root, paths);
+    const author = current.agents[params.author];
+    if (!author) throw new Error(`Unknown PR author ${params.author}. Spawn or register the agent before creating PRs.`);
+    if (author.role !== "coder") throw new Error(`Only coder agents can author PRs. ${params.author} has role ${author.role}.`);
+    const lead = current.config?.lead ?? "lead";
+    if (actor !== lead && actor !== params.author) {
+      throw new Error(`Only ${lead} or ${params.author} can adopt an integrated PR.`);
     }
-  } else {
-    const created = spawnSync("git", ["-C", root, "branch", branch, baseHead], { encoding: "utf8" });
-    if (created.status !== 0) throw new Error(created.stderr || created.stdout || `git branch ${branch} failed`);
-  }
-  const id = `PR-${String(Object.keys(state.prs).length + 1).padStart(3, "0")}`;
-  const now = nowIso();
-  const pr: PullRequestRecord = {
-    id,
-    title: params.title,
-    issue_id: params.issue_id ?? null,
-    author: params.author,
-    branch,
-    head: baseHead,
-    base_head: baseHead,
-    mergeable: checkPrMergeability(root, base, branch),
-    worktree: "",
-    base,
-    status: "draft",
-    summary: params.summary,
-    self_test: null,
-    test_brief: null,
-    ready_head: null,
-    reviews: [],
-    tests: [],
-    acceptances: [],
-    automated_tests: null,
-    automated_test_history: [],
-    created_at: now,
-    updated_at: now,
-    adopted_from_base: true,
-  };
-  atomicWriteText(prPath(paths, id), renderPr(pr));
-  recordEvent(root, makeEvent("pr.created", params.author, { pr, adopted_by: actor }));
+    if (params.issue_id) requirePrIssueOwner(current, params.author, params.issue_id);
+    const base = params.base ?? "main";
+    const baseHead = resolveGitHead(root, base);
+    if (!baseHead) throw new Error(`Base branch ${base} does not resolve to a git commit.`);
+    const branch = params.branch.trim();
+    if (!branch) throw new Error("Adopted PR branch is required.");
+    if (branch === base) throw new Error("Adopted PR branch must differ from base branch.");
+    if (gitRefExists(root, branch)) {
+      const branchHead = resolveGitHead(root, branch);
+      if (branchHead !== baseHead) {
+        throw new Error(`Branch ${branch} already exists at ${shortHead(branchHead)}, expected current ${base} ${shortHead(baseHead)}.`);
+      }
+    } else {
+      const created = spawnSync("git", ["-C", root, "branch", branch, baseHead], { encoding: "utf8" });
+      if (created.status !== 0) throw new Error(created.stderr || created.stdout || `git branch ${branch} failed`);
+    }
+    const id = nextRecordId(Object.keys(current.prs), "PR");
+    const now = nowIso();
+    pr = {
+      id,
+      title: params.title,
+      issue_id: params.issue_id ?? null,
+      author: params.author,
+      branch,
+      head: baseHead,
+      base_head: baseHead,
+      mergeable: checkPrMergeability(root, base, branch),
+      worktree: "",
+      base,
+      status: "draft",
+      summary: params.summary,
+      self_test: null,
+      test_brief: null,
+      ready_head: null,
+      reviews: [],
+      tests: [],
+      acceptances: [],
+      automated_tests: null,
+      automated_test_history: [],
+      created_at: now,
+      updated_at: now,
+      adopted_from_base: true,
+    };
+    event = makeEvent("pr.created", params.author, { pr, adopted_by: actor });
+    state = appendEventForWrite(root, paths, event);
+  });
+  if (!pr || !event || !state) throw new Error("Failed to adopt integrated PR.");
+  syncRenderedRecordsForEvent(root, state, event);
   return pr;
 }
 
@@ -1201,6 +1243,16 @@ function requirePrIssueOwner(state: CompanyState, actor: string, issueId: string
   if (!issue.owner) throw new Error(`Issue ${issueId} is unassigned.`);
   if (issue.owner !== actor) throw new Error(`Only ${issue.owner} can create PRs for ${issueId}.`);
   if (issue.status === "done") throw new Error(`Issue ${issueId} is already done.`);
+}
+
+function nextRecordId(existingIds: string[], prefix: "ISSUE" | "PR"): string {
+  const pattern = new RegExp(`^${prefix}-(\\d+)$`);
+  const max = existingIds.reduce((highest, id) => {
+    const match = id.match(pattern);
+    if (!match) return highest;
+    return Math.max(highest, Number(match[1]));
+  }, 0);
+  return `${prefix}-${String(max + 1).padStart(3, "0")}`;
 }
 
 export function normalizePrBranch(root: string, actor: string, requestedBranch: string, agentBranch?: string | null): string {

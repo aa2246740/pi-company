@@ -354,13 +354,13 @@ export default function companyExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("after_provider_response", async (event, ctx) => {
-    if (event.status !== 429) return;
     if (!isCompanyActive()) return;
+    await releaseOldestProviderLease();
+    if (event.status !== 429) return;
     const retryAfter = typeof event.headers?.["retry-after"] === "string"
       ? ` retry-after=${event.headers["retry-after"]}`
       : "";
     const state = reportAutomaticRateLimit("provider_429", `Provider HTTP 429.${retryAfter}`.trim());
-    await releaseOldestProviderLease();
     await refreshUi(ctx);
     if (ctx.hasUI) {
       ctx.ui.setStatus("pi-company", `rate-limit: paused until ${state.rate_limit?.paused_until ?? "unknown"}`);
@@ -369,7 +369,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
 
   pi.on("turn_end", async (_event, ctx) => {
     if (!isCompanyActive()) return;
-    await releaseOldestProviderLease();
+    await releaseAllProviderLeases();
     await refreshUi(ctx);
   });
 

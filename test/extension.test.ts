@@ -20,6 +20,8 @@ import {
   sendCompanyMessage,
   startTask,
 } from "../src/core/company.js";
+import { writeYaml } from "../src/core/io.js";
+import { companyPaths } from "../src/core/paths.js";
 import { providerQueueSnapshot } from "../src/core/provider-queue.js";
 
 describe("pi-company extension", () => {
@@ -941,6 +943,43 @@ describe("pi-company extension", () => {
     expect(providerQueueSnapshot(root, "openai-codex").leases.map((lease) => lease.agent)).toEqual(["tester"]);
     expect(ui.setStatus).toHaveBeenCalledWith("pi-company", expect.stringContaining("provider gate: openai-codex"));
 
+    await handlers.turn_end?.({}, ctx);
+    await handlers.session_shutdown?.({}, ctx);
+
+    expect(providerQueueSnapshot(root, "openai-codex").leases).toHaveLength(0);
+  });
+
+  it("releases each provider lease after responses and clears leftovers at turn end", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-provider-multi-request-release" });
+    const config = loadConfig(root);
+    if (!config) throw new Error("Missing company config");
+    writeYaml(companyPaths(root).config, {
+      ...config,
+      provider_request_policy: {
+        ...(config.provider_request_policy ?? {}),
+        min_start_interval_ms: 0,
+      },
+    });
+    const { handlers, pi } = fakePi({
+      "company-root": root,
+      "company-agent": "tester",
+      "company-role": "tester",
+    });
+    const { ctx } = fakeContext(root);
+    (ctx as unknown as { model: unknown }).model = { provider: "openai-codex", id: "gpt-5.4-mini" };
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    await handlers.before_provider_request?.({}, ctx);
+    await handlers.before_provider_request?.({}, ctx);
+    expect(providerQueueSnapshot(root, "openai-codex").leases).toHaveLength(2);
+
+    await handlers.after_provider_response?.({ status: 200, headers: {} }, ctx);
+    expect(providerQueueSnapshot(root, "openai-codex").leases).toHaveLength(1);
+
+    await handlers.before_provider_request?.({}, ctx);
+    expect(providerQueueSnapshot(root, "openai-codex").leases).toHaveLength(2);
     await handlers.turn_end?.({}, ctx);
     await handlers.session_shutdown?.({}, ctx);
 
