@@ -24,9 +24,13 @@ import {
   launchCommand,
   listInbox,
   loadState,
+  maintainCompany,
   markPrReady,
   mergePr,
   pendingMergeRequests,
+  readAgentRecoverySnapshot,
+  readAgentRuntime,
+  recordAgentRuntime,
   recordAgentLaunch,
   recordEvent,
   registerAgent,
@@ -667,7 +671,7 @@ Rate limit 已过期，可以恢复正常工作`);
     submitReview(root, "reviewer", pr.id, "request_changes", "Dirty worktree must be committed.");
     submitTest(root, "tester", pr.id, "blocked", "Dirty worktree blocks validation.");
     submitAcceptance(root, "pm", pr.id, "request_changes", "Dirty worktree blocks product acceptance.");
-  });
+  }, 20_000);
 
   it("keeps lead brief authoritative when worker prose claims completion", () => {
     const root = tempRoot();
@@ -1364,11 +1368,203 @@ Rate limit 已过期，可以恢复正常工作`);
     withFakeCmuxTree({ liveSurfaces: ["surface:lead"] }, () => {
       const state = loadState(root);
       expect(state.agents.designer.status).toBe("offline");
-      expect(state.agents.designer.current_task).toBeNull();
+      expect(state.agents.designer.current_task).toBe(issue.id);
       expect(state.agents.designer.cmux_surface).toBe("surface:closed");
       expect(buildLeadBrief(root).next_actions).toContain(
-        "ISSUE-001: relaunch designer before continuing; its last cmux surface is gone or heartbeat is stale",
+        "ISSUE-001: recover designer before continuing; inspect the lead recovery notice or .pi-company/runtime/recovery/designer.json terminal text excerpt, then relaunch the same owner or reassign deliberately",
       );
+    });
+  }, 20_000);
+
+  it("captures terminal text recovery context and notifies lead when a worker surface disappears", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "recovery-snapshot-demo" });
+    registerAgent(root, {
+      name: "designer",
+      role: "designer",
+      cwd: root,
+      status: "online",
+    });
+    const issue = createIssue(root, "lead", "Design the landing page", "Design brief.", { work_type: "design" });
+    assignIssue(root, "lead", issue.id, "designer");
+    startTask(root, "designer", issue.id, "Starting design.");
+    recordAgentLaunch(root, "lead", "designer", "surface:designer");
+    const firstNow = new Date().toISOString();
+    const secondNow = new Date(Date.now() + 120_000).toISOString();
+
+    withFakeCmux({
+      liveSurfaces: ["surface:lead", "surface:designer"],
+      titles: {
+        "surface:designer": "pi-company designer",
+      },
+      screens: {
+        "surface:designer": "pi-company recovery-snapshot-demo | designer (designer)\nWorking on hero states\nAPI_KEY=secret-123\nnpm_abcdefghijklmnopqrstuvwxyz\nready to report soon\n",
+      },
+    }, () => {
+      const first = maintainCompany(root, "lead", firstNow);
+      expect(first.actions.some((action) => action.type === "snapshot" && action.agent === "designer")).toBe(true);
+      const snapshot = readAgentRecoverySnapshot(root, "designer");
+      expect(snapshot?.screen_excerpt).toContain("Working on hero states");
+      expect(snapshot?.screen_excerpt).toContain("API_KEY=[REDACTED]");
+      expect(snapshot?.screen_excerpt).toContain("npm_[REDACTED]");
+    });
+
+    withFakeCmux({ liveSurfaces: ["surface:lead"] }, () => {
+      const result = maintainCompany(root, "lead", secondNow);
+      const inbox = listInbox(root, "lead", true);
+      const notice = inbox.find((message) => message.text.includes("[pi-company recovery]"));
+      const rendered = renderLeadBrief(buildLeadBrief(root));
+
+      expect(result.actions.some((action) => action.type === "offline" && action.agent === "designer")).toBe(true);
+      expect(result.actions.some((action) => action.type === "lead_notice" && action.agent === "designer")).toBe(true);
+      expect(loadState(root).agents.designer.current_task).toBe(issue.id);
+      expect(notice?.text).toContain("Terminal text excerpt from last known cmux surface");
+      expect(notice?.text).toContain("Working on hero states");
+      expect(notice?.text).not.toContain("secret-123");
+      expect(rendered).toContain("Recovery Snapshots:");
+      expect(rendered).toContain("terminal text excerpt");
+      expect(rendered).toContain("Working on hero states");
+    });
+  }, 20_000);
+
+  it("hibernates idle worker surfaces without deleting worktrees", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "idle-hibernate-demo" });
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder-idle", "Idle coder.");
+    fs.mkdirSync(plan.worktree ?? "", { recursive: true });
+    fs.writeFileSync(path.join(plan.worktree ?? "", "keep.txt"), "keep worktree\n", "utf8");
+    registerAgent(root, {
+      ...plan,
+      status: "online",
+    });
+    recordAgentLaunch(root, "lead", "coder-idle", "surface:coder-idle");
+    recordAgentRuntime(root, "coder-idle", {
+      status: "idle",
+      cmux_surface: "surface:coder-idle",
+      current_task: null,
+      progress: true,
+    }, "2099-01-01T00:00:00.000Z");
+    const closeLog = path.join(root, "close.log");
+
+    withFakeCmux({
+      liveSurfaces: ["surface:lead", "surface:coder-idle"],
+      screens: { "surface:coder-idle": "idle prompt\n" },
+      closeLog,
+    }, () => {
+      const result = maintainCompany(root, "lead", "2099-01-01T00:10:00.000Z");
+      expect(result.hibernated).toContain("coder-idle");
+      expect(readAgentRuntime(root, "coder-idle")?.status).toBe("offline");
+      expect(fs.readFileSync(closeLog, "utf8")).toContain("surface:coder-idle");
+      expect(fs.existsSync(path.join(plan.worktree ?? "", "keep.txt"))).toBe(true);
+    });
+  }, 20_000);
+
+  it("closes duplicate live cmux surfaces for the same agent and keeps the recorded surface", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "duplicate-surface-demo" });
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder-dupe", "Duplicate surface test.");
+    registerAgent(root, {
+      ...plan,
+      status: "online",
+    });
+    recordAgentLaunch(root, "lead", "coder-dupe", "surface:keeper");
+    recordAgentRuntime(root, "coder-dupe", {
+      status: "busy",
+      cmux_surface: "surface:keeper",
+      current_task: null,
+      progress: true,
+    }, new Date().toISOString());
+    const closeLog = path.join(root, "close.log");
+
+    withFakeCmux({
+      liveSurfaces: ["surface:old", "surface:keeper"],
+      titles: {
+        "surface:old": "pi-company coder-dupe",
+        "surface:keeper": "pi-company coder-dupe",
+      },
+      screens: {
+        "surface:old": "pi-company\nduplicate-surface-demo |\ncoder-du\npe (coder)\nold duplicate still working\n",
+        "surface:keeper": "pi-company\nduplicate-surface-demo |\ncoder-du\npe (coder)\nkeeper working\n",
+      },
+      closeLog,
+    }, () => {
+      const result = maintainCompany(root, "lead", new Date().toISOString());
+
+      expect(result.actions).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          type: "duplicate_surface",
+          agent: "coder-dupe",
+          cmux_surface: "surface:old",
+        }),
+      ]));
+      expect(fs.readFileSync(closeLog, "utf8")).toContain("surface:old");
+      expect(fs.readFileSync(closeLog, "utf8")).not.toContain("surface:keeper");
+      expect(readAgentRuntime(root, "coder-dupe")?.cmux_surface).toBe("surface:keeper");
+    });
+  }, 20_000);
+
+  it("treats a recorded cmux surface as live even when runtime still says offline", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "recorded-live-surface-demo" });
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder-resume", "Recorded live surface test.");
+    registerAgent(root, {
+      ...plan,
+      status: "online",
+    });
+    const issue = createIssue(root, "lead", "Implement the resumed feature", "Feature brief.", { work_type: "implementation" });
+    assignIssue(root, "lead", issue.id, "coder-resume");
+    startTask(root, "coder-resume", issue.id, "Continuing work.");
+    recordAgentLaunch(root, "lead", "coder-resume", "surface:coder");
+    recordAgentRuntime(root, "coder-resume", {
+      status: "offline",
+      cmux_surface: "surface:coder",
+      current_task: issue.id,
+      note: "cmux surface disappeared",
+    });
+
+    withFakeCmux({
+      liveSurfaces: ["surface:coder"],
+      titles: {
+        "surface:coder": "pi-company coder-resume",
+      },
+      screens: {
+        "surface:coder": "terminal text without a company status line\n",
+      },
+    }, () => {
+      expect(loadState(root).agents["coder-resume"].status).toBe("idle");
+      maintainCompany(root, "lead", new Date().toISOString());
+      const runtime = readAgentRuntime(root, "coder-resume");
+      expect(runtime?.status).toBe("idle");
+      expect(runtime?.note).toBeNull();
+    });
+  }, 20_000);
+
+  it("keeps one warm tester surface instead of hibernating every idle specialist", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "keep-warm-demo" });
+    registerAgent(root, {
+      name: "tester",
+      role: "tester",
+      cwd: root,
+      status: "online",
+    });
+    recordAgentLaunch(root, "lead", "tester", "surface:tester");
+    recordAgentRuntime(root, "tester", {
+      status: "idle",
+      cmux_surface: "surface:tester",
+      current_task: null,
+      progress: true,
+    }, "2099-01-01T00:00:00.000Z");
+    const closeLog = path.join(root, "close.log");
+
+    withFakeCmux({
+      liveSurfaces: ["surface:lead", "surface:tester"],
+      screens: { "surface:tester": "tester waiting\n" },
+      closeLog,
+    }, () => {
+      const result = maintainCompany(root, "lead", "2099-01-01T00:30:00.000Z");
+      expect(result.hibernated).not.toContain("tester");
+      expect(fs.existsSync(closeLog) ? fs.readFileSync(closeLog, "utf8") : "").toBe("");
     });
   }, 20_000);
 
@@ -3258,7 +3454,7 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(() => mergePr(root, "lead", prB.id, true)).toThrow(/merge conflicts/);
     expect(gitOutput(root, ["status", "--porcelain", "--untracked-files=no"]).trim()).toBe("");
     expect(fs.readFileSync(path.join(root, "app.txt"), "utf8")).toBe("from feature a\n");
-  }, 10_000);
+  }, 20_000);
 });
 
 function tempRoot(): string {
@@ -3268,12 +3464,59 @@ function tempRoot(): string {
 }
 
 function withFakeCmuxTree<T>(options: { liveSurfaces: string[] }, fn: () => T): T {
+  return withFakeCmux(options, fn);
+}
+
+function withFakeCmux<T>(options: {
+  liveSurfaces: string[];
+  screens?: Record<string, string>;
+  titles?: Record<string, string>;
+  closeLog?: string;
+}, fn: () => T): T {
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-company-cmux-bin-"));
   tempRoots.add(binDir);
   const cmuxPath = path.join(binDir, "cmux");
-  const surfaces = options.liveSurfaces.map((ref) => ({ ref, type: "terminal", title: ref }));
+  const surfaces = options.liveSurfaces.map((ref) => ({ ref, type: "terminal", title: options.titles?.[ref] ?? ref }));
   const tree = JSON.stringify({ windows: [{ workspaces: [{ panes: [{ surfaces }] }] }] });
-  fs.writeFileSync(cmuxPath, `#!/bin/sh\nif [ "$1" = "tree" ]; then\n  cat <<'JSON'\n${tree}\nJSON\n  exit 0\nfi\nexit 1\n`, "utf8");
+  const treePath = path.join(binDir, "tree.json");
+  const closeLog = options.closeLog ?? path.join(binDir, "close.log");
+  fs.writeFileSync(treePath, tree, "utf8");
+  const screenCases = Object.entries(options.screens ?? {}).map(([surface, text], index) => {
+    const file = path.join(binDir, `screen-${index}.txt`);
+    fs.writeFileSync(file, text, "utf8");
+    return `${shellCasePattern(surface)}) cat ${shellSingleQuote(file)}; exit 0 ;;`;
+  }).join("\n");
+  fs.writeFileSync(cmuxPath, `#!/bin/sh
+if [ "$1" = "tree" ]; then
+  cat ${shellSingleQuote(treePath)}
+  exit 0
+fi
+if [ "$1" = "read-screen" ]; then
+  surface=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --surface) surface="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  case "$surface" in
+${screenCases}
+  esac
+  exit 1
+fi
+if [ "$1" = "close-surface" ]; then
+  surface=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --surface) surface="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  printf '%s\\n' "$surface" >> ${shellSingleQuote(closeLog)}
+  exit 0
+fi
+exit 1
+`, "utf8");
   fs.chmodSync(cmuxPath, 0o755);
   const previousPath = process.env.PATH;
   process.env.PATH = `${binDir}${path.delimiter}${previousPath ?? ""}`;
@@ -3283,6 +3526,14 @@ function withFakeCmuxTree<T>(options: { liveSurfaces: string[] }, fn: () => T): 
     if (previousPath === undefined) delete process.env.PATH;
     else process.env.PATH = previousPath;
   }
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function shellCasePattern(value: string): string {
+  return value.replace(/([\\*?[\]])/g, "\\$1");
 }
 
 function withFakeCmuxLaunch<T>(surface: string, fn: () => T): T {

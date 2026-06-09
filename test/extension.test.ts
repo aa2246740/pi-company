@@ -14,11 +14,13 @@ import {
   loadConfig,
   loadState,
   markPrReady,
+  readAgentRuntime,
   registerAgent,
   reportRateLimit,
   requestAgentSpawn,
   sendCompanyMessage,
   startTask,
+  submitTest,
 } from "../src/core/company.js";
 import { writeYaml } from "../src/core/io.js";
 import { companyPaths } from "../src/core/paths.js";
@@ -50,6 +52,7 @@ describe("pi-company extension", () => {
     expect(commands.some((command) => command.name === "company-init")).toBe(true);
     expect(commands.some((command) => command.name === "company-start")).toBe(true);
     expect(commands.some((command) => command.name === "company-resume")).toBe(true);
+    expect(commands.some((command) => command.name === "company-pause")).toBe(true);
     expect(ui.setTitle).not.toHaveBeenCalled();
     expect(ui.setStatus).not.toHaveBeenCalledWith("pi-company", expect.any(String));
     expect(ui.setWidget).not.toHaveBeenCalled();
@@ -69,6 +72,50 @@ describe("pi-company extension", () => {
     expect(fs.existsSync(path.join(root, ".pi-company"))).toBe(false);
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
     expect(ui.notify).toHaveBeenCalledWith(expect.stringContaining("run /company-init"), "info");
+  });
+
+  it("pauses and resumes pi-company guards in the current Pi session", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-session-pause" });
+    const { handlers, pi, commands } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx, ui } = fakeContext(root);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const pause = commands.find((command) => command.name === "company-pause");
+    const resume = commands.find((command) => command.name === "company-resume");
+    if (!pause || !resume) throw new Error("pause/resume command was not registered");
+
+    await pause.handler("", ctx);
+    const pausedWrite = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-1",
+      toolName: "write",
+      input: { path: path.join(root, "index.html"), content: "<html></html>" },
+    }, ctx);
+    const pausedInput = await handlers.input?.({ source: "interactive", text: "ordinary pi steering" }, ctx);
+    const pausedPrompt = await handlers.before_agent_start?.({ systemPrompt: "base" }, ctx);
+
+    await resume.handler("", ctx);
+    const resumedWrite = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-2",
+      toolName: "write",
+      input: { path: path.join(root, "index.html"), content: "<html></html>" },
+    }, ctx);
+    const resumedPrompt = await handlers.before_agent_start?.({ systemPrompt: "base" }, ctx);
+    await handlers.session_shutdown?.({ reason: "quit" }, ctx);
+
+    expect(ui.setStatus).toHaveBeenCalledWith("pi-company", "lead/lead paused");
+    expect(pausedWrite).toBeUndefined();
+    expect(pausedInput).toEqual({ action: "continue" });
+    expect(pausedPrompt).toBeUndefined();
+    expect(resumedWrite).toMatchObject({ block: true });
+    expect(resumedPrompt).toMatchObject({ systemPrompt: expect.stringContaining("[pi-company context]") });
   });
 
   it("initializes and attaches a company from inside an ordinary Pi session", async () => {
@@ -240,6 +287,62 @@ describe("pi-company extension", () => {
     await handlers.session_shutdown?.({ reason: "quit" }, ctx);
 
     expect(loadState(root).agents.tester.status).toBe("offline");
+    expect(readAgentRuntime(root, "tester")?.status).toBe("offline");
+  });
+
+  it("records runtime busy and idle state around provider requests without durable heartbeat spam", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-runtime-provider-state" });
+    const { handlers, pi } = fakePi({
+      "company-root": root,
+      "company-agent": "tester",
+      "company-role": "tester",
+    });
+    const { ctx } = fakeContext(root);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    await handlers.before_provider_request?.({}, ctx);
+    expect(readAgentRuntime(root, "tester")?.status).toBe("busy");
+    await handlers.after_provider_response?.({ status: 200, headers: {} }, ctx);
+    await handlers.session_shutdown?.({}, ctx);
+
+    expect(readAgentRuntime(root, "tester")?.status).toBe("offline");
+    const heartbeatEvents = fs.readFileSync(companyPaths(root).events, "utf8")
+      .split(/\r?\n/)
+      .filter((line) => line.includes('"agent.heartbeat"'));
+    expect(heartbeatEvents).toHaveLength(0);
+  });
+
+  it("registers a lead lifecycle maintenance tool", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-maintenance-tool" });
+    await withFakeCmux({
+      callerSurface: "surface:lead",
+      surfaces: [
+        { ref: "surface:lead", title: "pi-company lead", screen: `${root}\npi-company extension-maintenance-tool | lead (lead)\n` },
+      ],
+      logPath: path.join(root, "cmux.log"),
+    }, async () => {
+      const { handlers, pi, tools } = fakePi({
+        "company-root": root,
+        "company-agent": "lead",
+        "company-role": "lead",
+      });
+      const { ctx } = fakeContext(root);
+
+      companyExtension(pi);
+      await handlers.session_start?.({}, ctx);
+      const tool = tools.find((item) => item.name === "company_maintain");
+      expect(tool).toBeTruthy();
+      const result = await tool?.execute("tool-1", {}, undefined, undefined, ctx) as ToolResult;
+      await handlers.session_shutdown?.({}, ctx);
+
+      expect(result.content[0].text).toContain("Maintenance checked");
+      expect(result.details.maintenance).toMatchObject({
+        actions: [expect.objectContaining({ type: "snapshot", agent: "lead", cmux_surface: "surface:lead" })],
+      });
+    });
   });
 
   it("can launch an existing planned roster agent from the spawn tool", async () => {
@@ -266,6 +369,47 @@ describe("pi-company extension", () => {
 
     expect(result.content[0].text).toContain("PI_COMPANY_AGENT='pm'");
     expect(result.details.existing).toBe(true);
+  });
+
+  it("reuses an existing live cmux surface instead of opening a duplicate agent pane", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-reuse-live-surface" });
+    const cmuxLog = path.join(root, "cmux.log");
+
+    await withFakeCmux({
+      callerSurface: "surface:lead",
+      surfaces: [
+        { ref: "surface:lead", title: "pi-company lead", screen: `${root}\npi-company extension-reuse-live-surface | lead (lead)\n` },
+        { ref: "surface:pm", title: "pi-company pm", screen: "pi-company\nextension-reuse-live-surface |\np\nm (pm)\n" },
+      ],
+      logPath: cmuxLog,
+    }, async () => {
+      const { handlers, pi, tools } = fakePi({
+        "company-root": root,
+        "company-agent": "lead",
+        "company-role": "lead",
+      });
+      const { ctx } = fakeContext(root);
+
+      companyExtension(pi);
+      await handlers.session_start?.({}, ctx);
+      const spawnTool = tools.find((tool) => tool.name === "company_spawn_agent");
+      if (!spawnTool) throw new Error("company_spawn_agent tool was not registered");
+      const result = await spawnTool.execute("tool-1", {
+        role: "pm",
+        name: "pm",
+        mission: "Shape product direction.",
+        launch_in_cmux: true,
+        force_launch: true,
+      }, undefined, undefined, ctx) as ToolResult;
+      await handlers.session_shutdown?.({}, ctx);
+
+      expect(result.content[0].text).toContain("Reused live pm in surface:pm");
+      expect(result.details.cmux_reused).toBe(true);
+      expect(loadState(root).agents.pm.cmux_surface).toBe("surface:pm");
+      expect(loadState(root).agents.lead.cmux_surface).toBe("surface:lead");
+      expect(fs.readFileSync(cmuxLog, "utf8")).not.toContain("new-pane");
+    });
   });
 
   it("queues a mission briefing when launching an existing planned agent without assigned work", async () => {
@@ -397,6 +541,52 @@ describe("pi-company extension", () => {
 
     expect(result.content[0].text).toContain(`${pr.id} blocked coder_ready=yes`);
     expect(result.content[0].text).toContain("gate_blockers=Needs 1 reviewer approval(s); Missing tester validation; Missing automated test result; Missing PM/lead product acceptance");
+  });
+
+  it("includes full gate evidence details in PR gate output", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-pr-gate-evidence-details" });
+    const coderPlan = requestAgentSpawn(root, "lead", "coder", "coder", "Implement the feature.");
+    registerAgent(root, {
+      ...coderPlan,
+      status: "online",
+    });
+    const testerPlan = requestAgentSpawn(root, "lead", "tester", "tester-gate", "Validate the feature.");
+    registerAgent(root, {
+      ...testerPlan,
+      status: "online",
+    });
+    const pr = createPr(root, "coder", {
+      title: "Gate evidence details",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: coderPlan.branch ?? "pi-company/coder",
+      worktree: coderPlan.worktree ?? root,
+      base: "main",
+    });
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate feature behavior.");
+    submitTest(root, "tester-gate", pr.id, "pass", "Runtime smoke passed, but websocket reconnect was not exercised.", {
+      clean: false,
+      caveats: ["WebSocket reconnect path was not exercised in this run."],
+    });
+    const { handlers, pi, tools } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx } = fakeContext(root);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const gatesTool = tools.find((tool) => tool.name === "company_pr_gates");
+    if (!gatesTool) throw new Error("company_pr_gates tool was not registered");
+    const result = await gatesTool.execute("tool-1", { pr_id: pr.id }, undefined, undefined, ctx) as ToolResult;
+    await handlers.session_shutdown?.({ reason: "quit" }, ctx);
+
+    expect(result.content[0].text).toContain("Tester pass contains caveat");
+    expect(result.content[0].text).toContain("Gate evidence:");
+    expect(result.content[0].text).toContain("WebSocket reconnect path was not exercised in this run.");
+    expect(result.content[0].text).toContain("Runtime smoke passed, but websocket reconnect was not exercised.");
   });
 
   it("queues a launch briefing when an existing agent has assigned work", async () => {
@@ -676,6 +866,34 @@ describe("pi-company extension", () => {
     expect(ui.setStatus).not.toHaveBeenCalledWith("pi-company", expect.stringContaining("mailbox error"));
   });
 
+  it("backs off repeated automatic inbox delivery after Pi rejects a busy follow-up", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-busy-backoff-delivery" });
+    sendCompanyMessage(root, {
+      from: "lead",
+      to: "tester",
+      type: "assignment",
+      priority: "high",
+      text: "Please validate PR-123.",
+    });
+    const { handlers, pi } = fakePi({
+      "company-root": root,
+      "company-agent": "tester",
+      "company-role": "tester",
+    });
+    const sendUserMessage = pi.sendUserMessage as unknown as ReturnType<typeof vi.fn>;
+    sendUserMessage.mockRejectedValue(new Error("Agent is already processing a prompt. Use steer() or followUp() to queue messages."));
+    const { ctx } = fakeContext(root);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    await handlers.session_start?.({}, ctx);
+    await handlers.session_shutdown?.({}, ctx);
+
+    expect(sendUserMessage).toHaveBeenCalledTimes(1);
+    expect(listInbox(root, "tester")).toHaveLength(1);
+  });
+
   it("blocks lead from writing deliverables directly through built-in tools", async () => {
     const root = tempRoot();
     initCompany({ root, id: "extension-lead-tool-guard" });
@@ -693,6 +911,18 @@ describe("pi-company extension", () => {
       toolCallId: "tool-1",
       toolName: "write",
       input: { path: path.join(root, "index.html"), content: "<html></html>" },
+    }, ctx);
+    const governanceDoc = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-1b",
+      toolName: "write",
+      input: { path: path.join(root, "AGENTS.md"), content: "## Agent skills" },
+    }, ctx);
+    const docsBash = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-1c",
+      toolName: "bash",
+      input: { command: "mkdir -p docs/agents && tee docs/agents/issue-tracker.md <<'EOF'\n# Issue Tracker\nEOF" },
     }, ctx);
     const editResult = await handlers.tool_call?.({
       type: "tool_call",
@@ -715,6 +945,8 @@ describe("pi-company extension", () => {
     await handlers.session_shutdown?.({ reason: "quit" }, ctx);
 
     expect(writeResult).toMatchObject({ block: true });
+    expect(governanceDoc).toBeUndefined();
+    expect(docsBash).toBeUndefined();
     expect(editResult).toMatchObject({ block: true });
     expect(bashResult).toMatchObject({ block: true });
     expect(readOnlyBash).toBeUndefined();
@@ -758,7 +990,7 @@ describe("pi-company extension", () => {
     expect(bashResult).toBeUndefined();
   });
 
-  it("allows PM product specs but blocks PM business-code writes", async () => {
+  it("allows PM product and setup docs but blocks runnable PM writes", async () => {
     const root = tempRoot();
     initCompany({ root, id: "extension-pm-write-boundary" });
     const { handlers, pi } = fakePi({
@@ -774,19 +1006,31 @@ describe("pi-company extension", () => {
       type: "tool_call",
       toolCallId: "tool-1",
       toolName: "write",
-      input: { path: "PRODUCT_SPEC_HEADPHONE_3D.md", content: "# Product" },
+      input: { path: "PRD.md", content: "# Product" },
     }, ctx);
     const docsMkdir = await handlers.tool_call?.({
       type: "tool_call",
       toolCallId: "tool-1b",
       toolName: "bash",
-      input: { command: "mkdir -p docs/product" },
+      input: { command: "mkdir -p docs/agents && cat > docs/agents/domain.md <<'EOF'\n# Domain\nEOF" },
+    }, ctx);
+    const governanceDoc = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-1c",
+      toolName: "write",
+      input: { path: "AGENTS.md", content: "## Agent skills" },
     }, ctx);
     const implementation = await handlers.tool_call?.({
       type: "tool_call",
       toolCallId: "tool-2",
       toolName: "write",
       input: { path: path.join(root, "index.html"), content: "<html></html>" },
+    }, ctx);
+    const configWrite = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-2b",
+      toolName: "write",
+      input: { path: path.join(root, "package.json"), content: "{}" },
     }, ctx);
     const mutatingBash = await handlers.tool_call?.({
       type: "tool_call",
@@ -798,8 +1042,10 @@ describe("pi-company extension", () => {
 
     expect(productSpec).toBeUndefined();
     expect(docsMkdir).toBeUndefined();
+    expect(governanceDoc).toBeUndefined();
     expect(implementation).toMatchObject({ block: true });
-    expect(String((implementation as { reason?: string } | undefined)?.reason)).toContain("Business code and runnable deliverables must be assigned to coder");
+    expect(String((implementation as { reason?: string } | undefined)?.reason)).toContain("looks runnable or behavior-changing");
+    expect(configWrite).toMatchObject({ block: true });
     expect(mutatingBash).toMatchObject({ block: true });
   });
 
@@ -825,7 +1071,7 @@ describe("pi-company extension", () => {
       type: "tool_call",
       toolCallId: "tool-1b",
       toolName: "bash",
-      input: { command: "mkdir -p docs/design" },
+      input: { command: "mkdir -p docs/design && printf '# Design\\n' > docs/design/homepage.md" },
     }, ctx);
     const cssWrite = await handlers.tool_call?.({
       type: "tool_call",
@@ -838,7 +1084,45 @@ describe("pi-company extension", () => {
     expect(designSpec).toBeUndefined();
     expect(docsMkdir).toBeUndefined();
     expect(cssWrite).toMatchObject({ block: true });
-    expect(String((cssWrite as { reason?: string } | undefined)?.reason)).toContain("Runnable UI, styles, assets, and code must be assigned to coder");
+    expect(String((cssWrite as { reason?: string } | undefined)?.reason)).toContain("looks runnable or behavior-changing");
+  });
+
+  it("allows non-coder role-owned markdown evidence without making coder the document secretary", async () => {
+    const cases = [
+      { agent: "tester", role: "tester", path: "docs/test/report.md" },
+      { agent: "reviewer", role: "reviewer", path: "docs/review/PR-001.md" },
+      { agent: "researcher", role: "researcher", path: "docs/research/options.md" },
+    ];
+
+    for (const item of cases) {
+      const root = tempRoot();
+      initCompany({ root, id: `extension-${item.role}-docs` });
+      const { handlers, pi } = fakePi({
+        "company-root": root,
+        "company-agent": item.agent,
+        "company-role": item.role,
+      });
+      const { ctx } = fakeContext(root);
+
+      companyExtension(pi);
+      await handlers.session_start?.({}, ctx);
+      const docWrite = await handlers.tool_call?.({
+        type: "tool_call",
+        toolCallId: "tool-1",
+        toolName: "write",
+        input: { path: item.path, content: "# Evidence" },
+      }, ctx);
+      const srcWrite = await handlers.tool_call?.({
+        type: "tool_call",
+        toolCallId: "tool-2",
+        toolName: "write",
+        input: { path: "src/generated.ts", content: "export {};" },
+      }, ctx);
+      await handlers.session_shutdown?.({ reason: "quit" }, ctx);
+
+      expect(docWrite).toBeUndefined();
+      expect(srcWrite).toMatchObject({ block: true });
+    }
   });
 
   it("blocks coder bash mutations that reference paths outside the assigned worktree", async () => {
@@ -1045,7 +1329,10 @@ describe("pi-company extension", () => {
         "provider gate: paused until 2099-01-01T00:03:30.000Z",
       );
 
-      await vi.advanceTimersByTimeAsync(210_000);
+      for (let index = 0; index < 8; index += 1) {
+        await vi.advanceTimersByTimeAsync(30_000);
+      }
+      await vi.advanceTimersByTimeAsync(5_000);
       await request;
 
       expect(providerQueueSnapshot(root, "openai-codex").leases.map((lease) => lease.agent)).toEqual(["tester"]);
@@ -1053,7 +1340,7 @@ describe("pi-company extension", () => {
     } finally {
       vi.useRealTimers();
     }
-  });
+  }, 20_000);
 
   it("deduplicates bursty automatic provider 429 reports in one Pi session", async () => {
     const root = tempRoot();
@@ -1180,6 +1467,102 @@ function withWorkingDirectory<T>(cwd: string, fn: () => T): T {
   } finally {
     process.chdir(previous);
   }
+}
+
+async function withFakeCmux<T>(options: {
+  callerSurface: string;
+  surfaces: Array<{ ref: string; title: string; screen?: string }>;
+  logPath: string;
+}, fn: () => Promise<T>): Promise<T> {
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-company-extension-cmux-"));
+  tempRoots.add(binDir);
+  const cmuxPath = path.join(binDir, "cmux");
+  const identifyPath = path.join(binDir, "identify.json");
+  const treePath = path.join(binDir, "tree.json");
+  const tree = {
+    windows: [
+      {
+        ref: "window:1",
+        workspaces: [
+          {
+            ref: "workspace:1",
+            panes: [
+              {
+                ref: "pane:1",
+                surfaces: options.surfaces.map((surface) => ({
+                  ref: surface.ref,
+                  type: "terminal",
+                  title: surface.title,
+                })),
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  fs.writeFileSync(identifyPath, JSON.stringify({
+    caller: {
+      surface_ref: options.callerSurface,
+      surface_type: "terminal",
+    },
+  }), "utf8");
+  fs.writeFileSync(treePath, JSON.stringify(tree), "utf8");
+  const screenCases = options.surfaces.map((surface, index) => {
+    const screenPath = path.join(binDir, `screen-${index}.txt`);
+    fs.writeFileSync(screenPath, surface.screen ?? `${surface.title}\n`, "utf8");
+    return `${shellCasePattern(surface.ref)}) cat ${shellSingleQuote(screenPath)}; exit 0 ;;`;
+  }).join("\n");
+  fs.writeFileSync(options.logPath, "", "utf8");
+  fs.writeFileSync(cmuxPath, `#!/bin/sh
+printf '%s\\n' "$*" >> ${shellSingleQuote(options.logPath)}
+if [ "$1" = "identify" ]; then
+  cat ${shellSingleQuote(identifyPath)}
+  exit 0
+fi
+if [ "$1" = "tree" ]; then
+  cat ${shellSingleQuote(treePath)}
+  exit 0
+fi
+if [ "$1" = "read-screen" ]; then
+  surface=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --surface) surface="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  case "$surface" in
+${screenCases}
+  esac
+  exit 1
+fi
+if [ "$1" = "--json" ] && [ "$2" = "new-pane" ]; then
+  printf '{"surface_ref":"surface:new"}\\n'
+  exit 0
+fi
+if [ "$1" = "send" ]; then
+  exit 0
+fi
+exit 1
+`, "utf8");
+  fs.chmodSync(cmuxPath, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${binDir}${path.delimiter}${previousPath ?? ""}`;
+  try {
+    return await fn();
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+  }
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function shellCasePattern(value: string): string {
+  return value.replace(/([\\*?[\]])/g, "\\$1");
 }
 
 function restoreEnv(name: string, value: string | undefined): void {

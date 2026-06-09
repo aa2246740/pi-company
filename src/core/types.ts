@@ -59,6 +59,7 @@ export interface CompanyConfig {
   message_policy?: MessagePolicy;
   rate_limit_policy?: RateLimitPolicy;
   provider_request_policy?: ProviderRequestPolicy;
+  lifecycle_policy?: LifecyclePolicy;
   model_policy?: ModelPolicy;
 }
 
@@ -128,6 +129,19 @@ export interface ProviderRequestPolicy {
   poll_interval_ms: number;
 }
 
+export interface LifecyclePolicy {
+  max_active_surfaces: number;
+  coder_idle_ttl_ms: number;
+  worker_idle_ttl_ms: number;
+  keep_warm_roles: string[];
+  stale_task_ms: number;
+  watchdog_interval_ms: number;
+  recovery_snapshot_lines: number;
+  auto_hibernate: boolean;
+  auto_relaunch: boolean;
+  relaunch_cooldown_ms: number;
+}
+
 export interface RateLimitState {
   kind: RateLimitKind;
   reason: string;
@@ -150,6 +164,52 @@ export interface AgentRecord {
   last_seen_at?: string | null;
   last_launch_at?: string | null;
   cmux_surface?: string | null;
+}
+
+export type AgentRuntimeStatus = "online" | "busy" | "idle" | "offline" | "paused" | "unknown";
+
+export interface AgentRuntimeState {
+  name: string;
+  status: AgentRuntimeStatus;
+  updated_at: string;
+  last_seen_at?: string | null;
+  last_progress_at?: string | null;
+  turn_started_at?: string | null;
+  cmux_surface?: string | null;
+  current_task?: string | null;
+  note?: string | null;
+}
+
+export interface AgentRecoverySnapshot {
+  agent: string;
+  captured_at: string;
+  reason: string;
+  cmux_surface?: string | null;
+  current_task?: string | null;
+  issue?: {
+    id: string;
+    title: string;
+    status: IssueRecord["status"];
+    owner?: string | null;
+  } | null;
+  last_progress_at?: string | null;
+  screen_excerpt?: string | null;
+}
+
+export interface CompanyMaintenanceAction {
+  type: "snapshot" | "hibernate" | "duplicate_surface" | "offline" | "stale_task" | "lead_notice";
+  agent: string;
+  reason: string;
+  issue_id?: string | null;
+  cmux_surface?: string | null;
+}
+
+export interface CompanyMaintenanceResult {
+  checked_at: string;
+  actions: CompanyMaintenanceAction[];
+  active_surfaces: string[];
+  hibernated: string[];
+  stale_agents: string[];
 }
 
 export interface IssueRecord {
@@ -285,4 +345,7 @@ export interface CompanyPaths {
   issuesDir: string;
   prsDir: string;
   worktreesDir: string;
+  runtimeDir: string;
+  runtimeAgentsDir: string;
+  runtimeRecoveryDir: string;
 }

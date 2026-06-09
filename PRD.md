@@ -152,18 +152,24 @@ The MVP is local-only. It does not require GitHub, Linear, remote servers, A2A, 
 - Formal project direction, merge decisions, and project-level scope changes belong to lead.
 - Non-lead agents may ask lead for more role context, but only lead can activate or spawn persistent agents.
 - Spawning creates new agents only. Existing agent identities must be launched or resumed without rewriting their planned role, branch, worktree, or status.
-- Agent sessions may register or heartbeat only after the agent exists in the roster or lead-created spawn plan, and registration must match the planned role, branch, and worktree.
-- Agent permissions are role-based, not name-based. A non-coder role with a coder-like name must not receive coder branch/worktree privileges or create PRs.
+- Agent sessions may register or update runtime state only after the agent exists in the roster or lead-created spawn plan, and registration must match the planned role, branch, and worktree.
+- Periodic liveness must be runtime state, not durable event-log spam. Durable events represent project facts; `.pi-company/runtime/` represents volatile session facts.
+- Lifecycle maintenance should use cmux plain terminal text (`read-screen`) for recovery context. It must not depend on screenshots, OCR, or vision-capable models.
+- When a company-owned cmux surface disappears, the assigned issue/current task must remain attached to the worker so lead can recover or reassign deliberately.
+- Idle worker surfaces may be hibernated to protect the user's machine, but hibernation must preserve worktrees, branches, issues, PRs, and the latest terminal-text recovery snapshot.
+- Agent permissions are role-based and file-impact-based, not name-based. A non-coder role with a coder-like name must not receive coder branch/worktree privileges or create implementation PRs.
+- Non-coder roles may write non-runnable Markdown/docs within the project for their own responsibility or repo-governance setup. They must not write runnable or behavior-changing files such as source, HTML/CSS/JS, configs, package files, scripts, CI, tests, assets, or generated app files.
+- The lead may write non-runnable coordination or repo-governance Markdown only for explicit setup/admin work. Lead must not absorb role-owned product, design, test, review, or research documents as ordinary execution.
 - Non-lead agents may report follow-up work or blockers, but only lead can create or assign formal local issues.
 - Issue assignees must already exist in the company roster, so typos or unspawned roles cannot silently own work.
 - Assigned issue owners are the only agents that can start, block, report on, or complete their issue.
 - Coder agents may work in parallel.
-- Every writer must use a dedicated git worktree and branch.
+- Every runnable implementation writer must use a dedicated git worktree and branch.
 - The CLI automatically creates worktrees and branches for coder agents.
 - New coder branches should start from the configured integration branch, defaulting to `main` when it exists, not from whatever branch the project root currently has checked out.
 - The default branch naming and worktree naming scheme should be deterministic and derived from company id, agent name, and task identity.
 - Existing worktrees may be reused only if they match the expected branch and ownership metadata.
-- Writers must not write in the project root during normal company operation.
+- Runnable implementation writers must not write in the project root during normal company operation. Non-runnable Markdown/docs may be written in the root or docs areas when they match the current role or explicit setup task.
 - Support local issues managed by lead. The user does not manually create issues in the normal workflow.
 - Support local PRs as first-class review units before any external GitHub integration.
 - Local PR authors must be existing coder agents, so ghost authors and non-writer roles cannot create mergeable PRs.

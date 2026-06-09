@@ -4,13 +4,19 @@ import { spawnSync } from "node:child_process";
 import type {
   AgentRecord,
   AgentRole,
+  AgentRecoverySnapshot,
+  AgentRuntimeState,
+  AgentRuntimeStatus,
   AcceptanceRecord,
   AutomatedTestRecord,
+  CompanyMaintenanceAction,
+  CompanyMaintenanceResult,
   CompanyConfig,
   CompanyEvent,
   CompanyState,
   IssueRecord,
   IssueWorkType,
+  LifecyclePolicy,
   MailboxMessage,
   MailboxMessageType,
   MergeabilityRecord,
@@ -24,9 +30,9 @@ import type {
   ReviewRecord,
   TestRecord,
 } from "./types.js";
-import { appendEvent, appendMailbox, ensureCompanyDirs, readEvents, readMailbox, readYaml, writeJson, writeYaml, atomicWriteText } from "./io.js";
+import { appendEvent, appendMailbox, ensureCompanyDirs, readEvents, readJson, readMailbox, readYaml, writeJson, writeYaml, atomicWriteText } from "./io.js";
 import { companyPaths, issuePath, prPath } from "./paths.js";
-import { defaultCoderWorktree, defaultConfig, DEFAULT_MESSAGE_POLICY, DEFAULT_RATE_LIMIT_POLICY, DEFAULT_ROLES, defaultRoster } from "./defaults.js";
+import { defaultCoderWorktree, defaultConfig, DEFAULT_LIFECYCLE_POLICY, DEFAULT_MESSAGE_POLICY, DEFAULT_RATE_LIMIT_POLICY, DEFAULT_ROLES, defaultRoster } from "./defaults.js";
 import { makeEvent } from "./events.js";
 import { newId, nowIso, slug } from "./id.js";
 import { withCompanyLock } from "./lock.js";
@@ -34,6 +40,19 @@ import { evaluatePrGates, evidenceHasGateCaveat, reduceEvents } from "./reducer.
 
 const AGENT_STALE_MS = 5 * 60_000;
 const PENDING_MERGE_REMINDER_PREFIX = "[pi-company pending merge]";
+const RECOVERY_NOTICE_PREFIX = "[pi-company recovery]";
+const MAX_RECOVERY_EXCERPT_CHARS = 8_000;
+
+interface CmuxSurfaceInfo {
+  ref: string;
+  title: string | null;
+  type: string | null;
+  window_ref?: string | null;
+  workspace_ref?: string | null;
+  pane_ref?: string | null;
+  active?: boolean;
+  focused?: boolean;
+}
 
 export interface GateEvidenceInput {
   clean?: boolean | null;
@@ -81,6 +100,7 @@ export interface LeadBrief {
   incomplete_issues: IssueRecord[];
   prs: LeadBriefPr[];
   root_worktree_changes: string[];
+  recovery_snapshots: AgentRecoverySnapshot[];
   next_actions: string[];
 }
 
@@ -186,7 +206,7 @@ export function rebuildState(root = process.cwd()): CompanyState {
 function applyLiveStateOverlay(root: string, state: CompanyState): CompanyState {
   refreshPrGitState(root, state);
   refreshPrStatuses(root, state);
-  refreshAgentLiveness(state);
+  refreshAgentLiveness(root, state);
   return state;
 }
 
@@ -380,6 +400,59 @@ export function heartbeatAgent(root: string, agent: {
   }));
 }
 
+export function recordAgentRuntime(root: string, agentName: string, patch: {
+  status?: AgentRuntimeStatus;
+  current_task?: string | null;
+  cmux_surface?: string | null;
+  note?: string | null;
+  progress?: boolean;
+  turn_started?: boolean;
+  turn_ended?: boolean;
+}, now = nowIso()): AgentRuntimeState {
+  const state = loadState(root);
+  const agent = state.agents[agentName];
+  if (!agent) throw new Error(`Unknown runtime agent ${agentName}.`);
+  const previous = readAgentRuntime(root, agentName);
+  const next: AgentRuntimeState = {
+    name: agentName,
+    status: patch.status ?? previous?.status ?? (agent.status === "offline" ? "offline" : "online"),
+    updated_at: now,
+    last_seen_at: patch.status === "offline" ? previous?.last_seen_at ?? null : now,
+    last_progress_at: patch.progress ? now : previous?.last_progress_at ?? agent.last_seen_at ?? null,
+    turn_started_at: patch.turn_started ? now : patch.turn_ended ? null : previous?.turn_started_at ?? null,
+    cmux_surface: patch.cmux_surface ?? previous?.cmux_surface ?? agent.cmux_surface ?? null,
+    current_task: patch.current_task !== undefined ? patch.current_task : previous?.current_task ?? agent.current_task ?? null,
+    note: patch.note !== undefined ? patch.note : previous?.note ?? null,
+  };
+  if (patch.status === "offline") {
+    next.last_seen_at = previous?.last_seen_at ?? agent.last_seen_at ?? null;
+    next.turn_started_at = null;
+  }
+  writeJson(runtimeAgentPath(root, agentName), next);
+  return next;
+}
+
+export function readAgentRuntime(root: string, agentName: string): AgentRuntimeState | null {
+  return readJson<AgentRuntimeState | null>(runtimeAgentPath(root, agentName), null);
+}
+
+export function readAgentRecoverySnapshot(root: string, agentName: string): AgentRecoverySnapshot | null {
+  return readJson<AgentRecoverySnapshot | null>(runtimeRecoveryPath(root, agentName), null);
+}
+
+function writeAgentRecoverySnapshot(root: string, snapshot: AgentRecoverySnapshot): AgentRecoverySnapshot {
+  writeJson(runtimeRecoveryPath(root, snapshot.agent), snapshot);
+  return snapshot;
+}
+
+function runtimeAgentPath(root: string, agentName: string): string {
+  return path.join(companyPaths(root).runtimeAgentsDir, `${slug(agentName)}.json`);
+}
+
+function runtimeRecoveryPath(root: string, agentName: string): string {
+  return path.join(companyPaths(root).runtimeRecoveryDir, `${slug(agentName)}.json`);
+}
+
 function requireAgentCurrentTask(state: CompanyState, agent: string, issueId: string | null): void {
   if (issueId === null) return;
   const issue = state.issues[issueId];
@@ -465,6 +538,24 @@ export function normalizeRateLimitPolicy(policy?: Partial<RateLimitPolicy> | nul
     max_backoff_ms: finitePositiveNumber(policy?.max_backoff_ms, DEFAULT_RATE_LIMIT_POLICY.max_backoff_ms),
     quota_backoff_ms: finitePositiveNumber(policy?.quota_backoff_ms, DEFAULT_RATE_LIMIT_POLICY.quota_backoff_ms),
     recovery_stagger_ms: finiteNonNegativeNumber(policy?.recovery_stagger_ms, DEFAULT_RATE_LIMIT_POLICY.recovery_stagger_ms),
+  };
+}
+
+export function normalizeLifecyclePolicy(policy?: Partial<LifecyclePolicy> | null): LifecyclePolicy {
+  const keepWarmRoles = Array.isArray(policy?.keep_warm_roles)
+    ? policy.keep_warm_roles.map((role) => String(role).trim()).filter((role) => role.length > 0)
+    : DEFAULT_LIFECYCLE_POLICY.keep_warm_roles;
+  return {
+    max_active_surfaces: Math.max(1, Math.floor(finitePositiveNumber(policy?.max_active_surfaces, DEFAULT_LIFECYCLE_POLICY.max_active_surfaces))),
+    coder_idle_ttl_ms: finitePositiveNumber(policy?.coder_idle_ttl_ms, DEFAULT_LIFECYCLE_POLICY.coder_idle_ttl_ms),
+    worker_idle_ttl_ms: finitePositiveNumber(policy?.worker_idle_ttl_ms, DEFAULT_LIFECYCLE_POLICY.worker_idle_ttl_ms),
+    keep_warm_roles: keepWarmRoles,
+    stale_task_ms: finitePositiveNumber(policy?.stale_task_ms, DEFAULT_LIFECYCLE_POLICY.stale_task_ms),
+    watchdog_interval_ms: finitePositiveNumber(policy?.watchdog_interval_ms, DEFAULT_LIFECYCLE_POLICY.watchdog_interval_ms),
+    recovery_snapshot_lines: Math.max(20, Math.floor(finitePositiveNumber(policy?.recovery_snapshot_lines, DEFAULT_LIFECYCLE_POLICY.recovery_snapshot_lines))),
+    auto_hibernate: typeof policy?.auto_hibernate === "boolean" ? policy.auto_hibernate : DEFAULT_LIFECYCLE_POLICY.auto_hibernate,
+    auto_relaunch: typeof policy?.auto_relaunch === "boolean" ? policy.auto_relaunch : DEFAULT_LIFECYCLE_POLICY.auto_relaunch,
+    relaunch_cooldown_ms: finiteNonNegativeNumber(policy?.relaunch_cooldown_ms, DEFAULT_LIFECYCLE_POLICY.relaunch_cooldown_ms),
   };
 }
 
@@ -1455,7 +1546,7 @@ function buildLeadBriefNextActions(
   for (const issue of incompleteIssues.filter((issue) => !nonMergedPrs.some((pr) => pr.issue_id === issue.id))) {
     const owner = issue.owner ?? null;
     if (owner && agents[owner]?.status === "offline") {
-      actions.push(`${issue.id}: relaunch ${owner} before continuing; its last cmux surface is gone or heartbeat is stale`);
+      actions.push(`${issue.id}: recover ${owner} before continuing; inspect the lead recovery notice or .pi-company/runtime/recovery/${slug(owner)}.json terminal text excerpt, then relaunch the same owner or reassign deliberately`);
     } else {
       actions.push(`${issue.id}: continue assigned work with ${owner ?? "an owner"}`);
     }
@@ -1493,34 +1584,79 @@ function markPrIntegrated(state: CompanyState, pr: PullRequestRecord, ts: string
   }
 }
 
-function refreshAgentLiveness(state: CompanyState, now = nowIso()): void {
-  const liveCmuxSurfaces = currentCmuxSurfacesIfNeeded(state);
+function refreshAgentLiveness(root: string, state: CompanyState, now = nowIso()): void {
+  const liveCmuxSurfaceInfos = currentCmuxSurfaceInfosIfNeeded(state);
+  const liveCmuxSurfaceByRef = cmuxSurfaceInfosByRef(liveCmuxSurfaceInfos);
+  const companyId = state.config?.id ?? "not initialized";
   const current = Date.parse(now);
   if (!Number.isFinite(current)) return;
   for (const agent of Object.values(state.agents)) {
-    if (agent.cmux_surface && liveCmuxSurfaces && !liveCmuxSurfaces.has(agent.cmux_surface)) {
+    const runtime = readAgentRuntime(root, agent.name);
+    if (agent.cmux_surface && liveCmuxSurfaceInfos) {
+      const surface = liveCmuxSurfaceByRef.get(agent.cmux_surface);
+      if (!surface) {
+        agent.status = "offline";
+        continue;
+      }
+      if (surfaceBelongsToRecordedAgent(root, companyId, agent, surface)) {
+        if (agent.status !== "planned") {
+          agent.status = liveSurfaceAgentStatus(runtime?.status, agent);
+          continue;
+        }
+      } else {
+        agent.status = "offline";
+        continue;
+      }
+    }
+    if (runtime?.status === "offline" || runtime?.status === "paused") {
       agent.status = "offline";
-      agent.current_task = null;
       continue;
     }
+    if (agent.cmux_surface && liveCmuxSurfaceInfos) {
+      if (agent.status !== "planned") {
+        agent.status = agentRuntimeStatusToAgentStatus(runtime?.status, agent.status);
+        continue;
+      }
+    }
     if (agent.status === "planned" || agent.status === "offline") continue;
-    const lastSeen = agent.last_seen_at ? Date.parse(agent.last_seen_at) : Number.NaN;
+    const lastSeenValue = runtime?.last_seen_at ?? agent.last_seen_at ?? null;
+    const lastSeen = lastSeenValue ? Date.parse(lastSeenValue) : Number.NaN;
     if (!Number.isFinite(lastSeen)) continue;
     if (current - lastSeen > AGENT_STALE_MS) {
       agent.status = "offline";
-      agent.current_task = null;
+    } else {
+      agent.status = agentRuntimeStatusToAgentStatus(runtime?.status, agent.status);
     }
   }
 }
 
-function currentCmuxSurfacesIfNeeded(state: CompanyState): Set<string> | null {
+function liveSurfaceAgentStatus(runtimeStatus: AgentRuntimeStatus | undefined, agent: AgentRecord): AgentRecord["status"] {
+  if (runtimeStatus !== "offline" && runtimeStatus !== "paused" && runtimeStatus !== "unknown") {
+    return agentRuntimeStatusToAgentStatus(runtimeStatus, agent.status === "offline" ? "online" : agent.status);
+  }
+  if (agent.status === "blocked") return "blocked";
+  return agent.current_task ? "idle" : "online";
+}
+
+function agentRuntimeStatusToAgentStatus(runtimeStatus: AgentRuntimeStatus | undefined, fallback: AgentRecord["status"]): AgentRecord["status"] {
+  if (runtimeStatus === "busy") return "running";
+  if (runtimeStatus === "idle") return "idle";
+  if (runtimeStatus === "online") return fallback === "blocked" ? "blocked" : "online";
+  return fallback;
+}
+
+function currentCmuxSurfaceInfosIfNeeded(state: CompanyState): CmuxSurfaceInfo[] | null {
   if (!Object.values(state.agents).some((agent) => agent.cmux_surface)) return null;
+  return currentCmuxSurfaceInfos();
+}
+
+function currentCmuxSurfaceInfos(): CmuxSurfaceInfo[] | null {
   const result = runCmuxTreeJson();
   if (result.status !== 0 || !result.stdout.trim()) return null;
   try {
     const parsed = JSON.parse(result.stdout) as unknown;
-    const surfaces = new Set<string>();
-    collectCmuxSurfaceRefs(parsed, surfaces);
+    const surfaces: CmuxSurfaceInfo[] = [];
+    collectCmuxSurfaceInfos(parsed, surfaces, {});
     return surfaces;
   } catch {
     return null;
@@ -1528,10 +1664,14 @@ function currentCmuxSurfacesIfNeeded(state: CompanyState): Set<string> | null {
 }
 
 function runCmuxTreeJson(): { status: number; stdout: string; stderr: string } {
+  return runCmuxCommand(["tree", "--all", "--json"]);
+}
+
+function runCmuxCommand(args: string[]): { status: number; stdout: string; stderr: string } {
   const candidates = ["cmux", "/Applications/cmux.app/Contents/Resources/bin/cmux"];
   let last = { status: 127, stdout: "", stderr: "cmux not found" };
   for (const command of candidates) {
-    const result = spawnSync(command, ["tree", "--json"], { encoding: "utf8" });
+    const result = spawnSync(command, args, { encoding: "utf8" });
     if (result.error && "code" in result.error && result.error.code === "ENOENT") {
       last = { status: 127, stdout: "", stderr: result.error.message };
       continue;
@@ -1545,19 +1685,474 @@ function runCmuxTreeJson(): { status: number; stdout: string; stderr: string } {
   return last;
 }
 
-function collectCmuxSurfaceRefs(value: unknown, surfaces: Set<string>): void {
+function readCmuxScreen(surface: string | CmuxSurfaceInfo, lines: number): string | null {
+  const info: Pick<CmuxSurfaceInfo, "ref" | "workspace_ref" | "window_ref"> = typeof surface === "string" ? { ref: surface } : surface;
+  const args = ["read-screen", "--surface", info.ref, "--scrollback", "--lines", String(lines)];
+  if (info.workspace_ref) args.push("--workspace", info.workspace_ref);
+  if (info.window_ref) args.push("--window", info.window_ref);
+  const result = runCmuxCommand(args);
+  if (result.status !== 0) return null;
+  return sanitizeRecoveryText(result.stdout);
+}
+
+function closeCmuxSurface(surface: string | CmuxSurfaceInfo): boolean {
+  const info: Pick<CmuxSurfaceInfo, "ref" | "workspace_ref" | "window_ref"> = typeof surface === "string" ? { ref: surface } : surface;
+  const args = ["close-surface", "--surface", info.ref];
+  if (info.workspace_ref) args.push("--workspace", info.workspace_ref);
+  if (info.window_ref) args.push("--window", info.window_ref);
+  return runCmuxCommand(args).status === 0;
+}
+
+function sanitizeRecoveryText(text: string): string {
+  const redacted = text
+    .replace(/\bnpm_[A-Za-z0-9]{8,}\b/g, "npm_[REDACTED]")
+    .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "sk-[REDACTED]")
+    .replace(/\b([A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD))\s*=\s*("[^"]*"|'[^']*'|[^\s]+)/gi, "$1=[REDACTED]");
+  return redacted.length > MAX_RECOVERY_EXCERPT_CHARS
+    ? redacted.slice(redacted.length - MAX_RECOVERY_EXCERPT_CHARS)
+    : redacted;
+}
+
+function collectCmuxOwnedLiveSurfaces(state: CompanyState, liveSurfaces: Set<string> | null): string[] {
+  if (!liveSurfaces) return [];
+  return Object.values(state.agents)
+    .map((agent) => agent.cmux_surface ?? null)
+    .filter((surface): surface is string => typeof surface === "string" && liveSurfaces.has(surface));
+}
+
+function cmuxSurfaceInfosByRef(infos: CmuxSurfaceInfo[] | null): Map<string, CmuxSurfaceInfo> {
+  return new Map((infos ?? []).map((info) => [info.ref, info]));
+}
+
+function cmuxAgentTitle(agentName: string): string {
+  return `pi-company ${agentName}`;
+}
+
+function liveCmuxSurfacesForAgent(root: string, companyId: string, agent: AgentRecord, infos: CmuxSurfaceInfo[]): CmuxSurfaceInfo[] {
+  const title = cmuxAgentTitle(agent.name);
+  const byRef = new Map<string, CmuxSurfaceInfo>();
+  for (const info of infos) {
+    if (info.ref === agent.cmux_surface) {
+      if (surfaceBelongsToRecordedAgent(root, companyId, agent, info)) {
+        byRef.set(info.ref, info);
+      }
+      continue;
+    }
+    if (info.title === title && cmuxSurfaceBelongsToCompany(info, root, companyId, agent.name)) {
+      byRef.set(info.ref, info);
+    }
+  }
+  return [...byRef.values()];
+}
+
+function surfaceBelongsToRecordedAgent(root: string, companyId: string, agent: AgentRecord, info: CmuxSurfaceInfo): boolean {
+  const title = cmuxAgentTitle(agent.name);
+  return info.title === title || cmuxSurfaceBelongsToCompany(info, root, companyId, agent.name);
+}
+
+function cmuxSurfaceBelongsToCompany(info: CmuxSurfaceInfo, root: string, companyId: string, agentName: string): boolean {
+  const excerpt = readCmuxScreen(info, 200);
+  if (!excerpt) return false;
+  const resolvedRoot = path.resolve(root);
+  const normalized = excerpt.replace(/\s+/g, " ");
+  const compact = excerpt.replace(/\s+/g, "");
+  const compactRoot = resolvedRoot.replace(/\s+/g, "");
+  const compactCompanyAgent = `pi-company${companyId}|${agentName}`;
+  return compact.includes(compactCompanyAgent) ||
+    compact.includes(compactRoot) ||
+    normalized.includes(`PI_COMPANY_ROOT='${resolvedRoot}'`) ||
+    normalized.includes(`--company-root '${resolvedRoot}'`) ||
+    normalized.includes(`--company-root ${resolvedRoot}`);
+}
+
+function preferredLiveSurfaceForAgent(agent: AgentRecord, runtime: AgentRuntimeState | null, matches: CmuxSurfaceInfo[]): CmuxSurfaceInfo | null {
+  if (matches.length === 0) return null;
+  const preferredRef = runtime?.cmux_surface ?? agent.cmux_surface ?? null;
+  if (preferredRef) {
+    const preferred = matches.find((surface) => surface.ref === preferredRef);
+    if (preferred) return preferred;
+  }
+  return matches.find((surface) => surface.active || surface.focused) ?? matches.at(-1) ?? null;
+}
+
+function issueForAgent(state: CompanyState, agentName: string): IssueRecord | null {
+  const currentTask = state.agents[agentName]?.current_task ?? null;
+  if (currentTask && state.issues[currentTask]) return state.issues[currentTask];
+  return Object.values(state.issues)
+    .filter((issue) => issue.owner === agentName && issue.status !== "done")
+    .sort(compareIds)[0] ?? null;
+}
+
+function incompleteIssuesForAgent(state: CompanyState, agentName: string): IssueRecord[] {
+  return Object.values(state.issues)
+    .filter((issue) => issue.owner === agentName && issue.status !== "done")
+    .sort(compareIds);
+}
+
+function captureAgentRecoverySnapshot(
+  root: string,
+  state: CompanyState,
+  agent: AgentRecord,
+  reason: string,
+  screenExcerpt: string | null,
+  now: string,
+): AgentRecoverySnapshot {
+  const issue = issueForAgent(state, agent.name);
+  const runtime = readAgentRuntime(root, agent.name);
+  return writeAgentRecoverySnapshot(root, {
+    agent: agent.name,
+    captured_at: now,
+    reason,
+    cmux_surface: agent.cmux_surface ?? runtime?.cmux_surface ?? null,
+    current_task: agent.current_task ?? runtime?.current_task ?? issue?.id ?? null,
+    issue: issue
+      ? {
+        id: issue.id,
+        title: issue.title,
+        status: issue.status,
+        owner: issue.owner ?? null,
+      }
+      : null,
+    last_progress_at: runtime?.last_progress_at ?? agent.last_seen_at ?? null,
+    screen_excerpt: screenExcerpt,
+  });
+}
+
+function agentHasOpenPr(state: CompanyState, agentName: string): boolean {
+  return Object.values(state.prs).some((pr) =>
+    pr.author === agentName &&
+    pr.status !== "merged" &&
+    pr.status !== "abandoned"
+  );
+}
+
+function runtimeIdleTime(root: string, agent: AgentRecord): number {
+  const runtime = readAgentRuntime(root, agent.name);
+  const candidates = [
+    runtime?.last_progress_at,
+    runtime?.last_seen_at,
+    agent.last_seen_at,
+    agent.last_launch_at,
+  ];
+  for (const candidate of candidates) {
+    const parsed = candidate ? Date.parse(candidate) : Number.NaN;
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
+}
+
+function keepWarmAgents(state: CompanyState, liveSurfaces: Set<string>, policy: LifecyclePolicy): Set<string> {
+  const keep = new Set<string>();
+  for (const role of policy.keep_warm_roles) {
+    const candidate = Object.values(state.agents)
+      .filter((agent) =>
+        agent.role === role &&
+        agent.cmux_surface &&
+        liveSurfaces.has(agent.cmux_surface) &&
+        !agent.current_task &&
+        incompleteIssuesForAgent(state, agent.name).length === 0 &&
+        !agentHasOpenPr(state, agent.name)
+      )
+      .sort((left, right) => {
+        const canonical = Number(right.name === role) - Number(left.name === role);
+        return canonical || left.name.localeCompare(right.name);
+      })[0];
+    if (candidate) keep.add(candidate.name);
+  }
+  return keep;
+}
+
+function maintenanceNoticeAlreadyQueued(root: string, lead: string, agent: AgentRecord, issue: IssueRecord | null): boolean {
+  try {
+    return listInbox(root, lead, true).some((message) =>
+      message.to === lead &&
+      message.type === "system" &&
+      message.text.includes(RECOVERY_NOTICE_PREFIX) &&
+      message.text.includes(`agent: ${agent.name}`) &&
+      (issue ? message.text.includes(`issue: ${issue.id}`) : message.task === null)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function sendLeadRecoveryNotice(
+  root: string,
+  state: CompanyState,
+  agent: AgentRecord,
+  issue: IssueRecord | null,
+  reason: string,
+  snapshot: AgentRecoverySnapshot | null,
+): MailboxMessage | null {
+  const lead = state.config?.lead ?? "lead";
+  if (!state.agents[lead] || agent.name === lead) return null;
+  if (maintenanceNoticeAlreadyQueued(root, lead, agent, issue)) return null;
+  const runtime = readAgentRuntime(root, agent.name);
+  const excerpt = snapshot?.screen_excerpt?.trim()
+    ? `\n\nTerminal text excerpt from last known cmux surface:\n${snapshot.screen_excerpt.trim()}`
+    : "";
+  return sendCompanyMessage(root, {
+    from: "system",
+    to: lead,
+    type: "system",
+    task: issue?.id ?? agent.current_task ?? runtime?.current_task ?? null,
+    priority: "high",
+    text: `${RECOVERY_NOTICE_PREFIX}
+agent: ${agent.name}
+role: ${agent.role}
+issue: ${issue ? `${issue.id} ${issue.status} ${issue.title}` : "none"}
+surface: ${agent.cmux_surface ?? runtime?.cmux_surface ?? "none"}
+reason: ${reason}
+last_seen_at: ${runtime?.last_seen_at ?? agent.last_seen_at ?? "unknown"}
+last_progress_at: ${runtime?.last_progress_at ?? "unknown"}
+
+Recommended lead action: inspect this terminal text, then relaunch the same agent or reassign the issue deliberately. Do not wait silently for a closed or stale worker.${excerpt}`,
+  }, { bypassTargetCooldown: true });
+}
+
+function taskIsStale(root: string, issue: IssueRecord, agent: AgentRecord, policy: LifecyclePolicy, nowMs: number): boolean {
+  if (!["assigned", "in_progress", "blocked"].includes(issue.status)) return false;
+  const runtime = readAgentRuntime(root, agent.name);
+  const candidates = [
+    runtime?.last_progress_at,
+    issue.updated_at,
+    agent.last_seen_at,
+  ];
+  const latest = candidates
+    .map((value) => value ? Date.parse(value) : Number.NaN)
+    .filter(Number.isFinite)
+    .sort((left, right) => right - left)[0];
+  return Number.isFinite(latest) && nowMs - latest > policy.stale_task_ms;
+}
+
+export function maintainCompany(root: string, actor = "system", now = nowIso()): CompanyMaintenanceResult {
+  const state = loadState(root);
+  const lead = state.config?.lead ?? "lead";
+  if (actor !== "system" && actor !== lead) {
+    throw new Error(`Only ${lead} can run company maintenance.`);
+  }
+  const policy = normalizeLifecyclePolicy(state.config?.lifecycle_policy);
+  const liveSurfaceInfos = currentCmuxSurfaceInfos();
+  const liveSurfaceByRef = cmuxSurfaceInfosByRef(liveSurfaceInfos);
+  const liveSurfaces = liveSurfaceInfos ? new Set(liveSurfaceInfos.map((info) => info.ref)) : null;
+  const activeSurfaces = collectCmuxOwnedLiveSurfaces(state, liveSurfaces);
+  const actions: CompanyMaintenanceAction[] = [];
+  const hibernated: string[] = [];
+  const staleAgents = new Set<string>();
+  const nowMs = Date.parse(now);
+
+  if (liveSurfaces && liveSurfaceInfos) {
+    for (const agent of Object.values(state.agents)) {
+      const runtime = readAgentRuntime(root, agent.name);
+      const matches = liveCmuxSurfacesForAgent(root, state.config?.id ?? "not initialized", agent, liveSurfaceInfos);
+      const preferred = preferredLiveSurfaceForAgent(agent, runtime, matches);
+
+      if (matches.length > 1 && preferred) {
+        for (const duplicate of matches.filter((surface) => surface.ref !== preferred.ref)) {
+          const excerpt = readCmuxScreen(duplicate, policy.recovery_snapshot_lines);
+          captureAgentRecoverySnapshot(root, state, agent, "duplicate-surface", excerpt, now);
+          if (closeCmuxSurface(duplicate)) {
+            hibernated.push(agent.name);
+            actions.push({
+              type: "duplicate_surface",
+              agent: agent.name,
+              reason: `closed duplicate live cmux surface; kept ${preferred.ref}`,
+              issue_id: agent.current_task ?? runtime?.current_task ?? null,
+              cmux_surface: duplicate.ref,
+            });
+          }
+        }
+      }
+
+      if (preferred) {
+        const excerpt = readCmuxScreen(preferred, policy.recovery_snapshot_lines);
+        captureAgentRecoverySnapshot(root, state, agent, "watchdog", excerpt, now);
+        const liveStatus = runtime?.status && runtime.status !== "offline" && runtime.status !== "paused" && runtime.status !== "unknown"
+          ? runtime.status
+          : agent.current_task
+            ? "idle"
+            : "online";
+        recordAgentRuntime(root, agent.name, {
+          status: liveStatus,
+          cmux_surface: preferred.ref,
+          current_task: agent.current_task ?? null,
+          note: null,
+        }, now);
+        actions.push({
+          type: "snapshot",
+          agent: agent.name,
+          reason: "captured terminal text via cmux read-screen",
+          issue_id: agent.current_task ?? null,
+          cmux_surface: preferred.ref,
+        });
+        continue;
+      }
+
+      if (!agent.cmux_surface) continue;
+      recordAgentRuntime(root, agent.name, {
+        status: "offline",
+        cmux_surface: agent.cmux_surface,
+        current_task: agent.current_task ?? null,
+        note: "cmux surface disappeared",
+      }, now);
+      const snapshot = readAgentRecoverySnapshot(root, agent.name) ??
+        captureAgentRecoverySnapshot(root, state, agent, "surface-missing", null, now);
+      actions.push({
+        type: "offline",
+        agent: agent.name,
+        reason: "cmux surface disappeared",
+        issue_id: agent.current_task ?? null,
+        cmux_surface: agent.cmux_surface,
+      });
+      staleAgents.add(agent.name);
+      for (const issue of incompleteIssuesForAgent(state, agent.name)) {
+        const notice = sendLeadRecoveryNotice(root, state, agent, issue, "assigned worker cmux surface disappeared", snapshot);
+        if (notice) {
+          actions.push({
+            type: "lead_notice",
+            agent: agent.name,
+            reason: "notified lead about disappeared worker surface",
+            issue_id: issue.id,
+            cmux_surface: agent.cmux_surface,
+          });
+        }
+      }
+    }
+  }
+
+  if (Number.isFinite(nowMs)) {
+    for (const issue of Object.values(state.issues).filter((item) => item.status !== "done")) {
+      const owner = issue.owner ? state.agents[issue.owner] : null;
+      if (!owner) continue;
+      const runtime = readAgentRuntime(root, owner.name);
+      const offline = owner.status === "offline" || runtime?.status === "offline";
+      if (offline) {
+        staleAgents.add(owner.name);
+        const snapshot = readAgentRecoverySnapshot(root, owner.name);
+        const notice = sendLeadRecoveryNotice(root, state, owner, issue, "assigned worker is offline", snapshot);
+        if (notice) {
+          actions.push({
+            type: "lead_notice",
+            agent: owner.name,
+            reason: "notified lead about offline assigned worker",
+            issue_id: issue.id,
+            cmux_surface: owner.cmux_surface ?? null,
+          });
+        }
+        continue;
+      }
+      if (taskIsStale(root, issue, owner, policy, nowMs)) {
+        staleAgents.add(owner.name);
+        const snapshot = readAgentRecoverySnapshot(root, owner.name);
+        const notice = sendLeadRecoveryNotice(root, state, owner, issue, "assigned work has not reported progress within the lifecycle stale-task window", snapshot);
+        actions.push({
+          type: "stale_task",
+          agent: owner.name,
+          reason: "assigned work has not reported progress within the lifecycle stale-task window",
+          issue_id: issue.id,
+          cmux_surface: owner.cmux_surface ?? null,
+        });
+        if (notice) {
+          actions.push({
+            type: "lead_notice",
+            agent: owner.name,
+            reason: "notified lead about stale assigned work",
+            issue_id: issue.id,
+            cmux_surface: owner.cmux_surface ?? null,
+          });
+        }
+      }
+    }
+  }
+
+  if (policy.auto_hibernate && liveSurfaces) {
+    const warm = keepWarmAgents(state, liveSurfaces, policy);
+    const candidates = Object.values(state.agents)
+      .filter((agent) =>
+        agent.name !== lead &&
+        agent.cmux_surface &&
+        liveSurfaces.has(agent.cmux_surface) &&
+        !agent.current_task &&
+        incompleteIssuesForAgent(state, agent.name).length === 0 &&
+        !agentHasOpenPr(state, agent.name)
+      )
+      .sort((left, right) => {
+        const warmRank = Number(warm.has(left.name)) - Number(warm.has(right.name));
+        return warmRank || runtimeIdleTime(root, left) - runtimeIdleTime(root, right);
+      });
+    let activeCount = activeSurfaces.length;
+    for (const agent of candidates) {
+      const ttl = agent.role === "coder" || agent.name.startsWith("coder") ? policy.coder_idle_ttl_ms : policy.worker_idle_ttl_ms;
+      const idleFor = Number.isFinite(nowMs) ? nowMs - runtimeIdleTime(root, agent) : 0;
+      const overLimit = activeCount > policy.max_active_surfaces;
+      if (!overLimit && warm.has(agent.name)) continue;
+      if (!overLimit && idleFor < ttl) continue;
+      const surfaceInfo = agent.cmux_surface ? liveSurfaceByRef.get(agent.cmux_surface) ?? agent.cmux_surface : null;
+      const excerpt = surfaceInfo ? readCmuxScreen(surfaceInfo, policy.recovery_snapshot_lines) : null;
+      captureAgentRecoverySnapshot(root, state, agent, "hibernate", excerpt, now);
+      if (surfaceInfo && closeCmuxSurface(surfaceInfo)) {
+        recordAgentRuntime(root, agent.name, {
+          status: "offline",
+          cmux_surface: agent.cmux_surface,
+          current_task: null,
+          note: "idle surface hibernated by pi-company lifecycle manager",
+        }, now);
+        hibernated.push(agent.name);
+        activeCount -= 1;
+        actions.push({
+          type: "hibernate",
+          agent: agent.name,
+          reason: overLimit
+            ? `active company surfaces exceeded ${policy.max_active_surfaces}`
+            : `idle for ${Math.max(0, Math.round(idleFor / 1000))}s`,
+          issue_id: null,
+          cmux_surface: agent.cmux_surface,
+        });
+      }
+    }
+  }
+
+  return {
+    checked_at: now,
+    actions,
+    active_surfaces: activeSurfaces,
+    hibernated,
+    stale_agents: [...staleAgents].sort(),
+  };
+}
+
+function collectCmuxSurfaceInfos(
+  value: unknown,
+  surfaces: CmuxSurfaceInfo[],
+  context: { window_ref?: string | null; workspace_ref?: string | null; pane_ref?: string | null },
+): void {
   if (Array.isArray(value)) {
-    for (const item of value) collectCmuxSurfaceRefs(item, surfaces);
+    for (const item of value) collectCmuxSurfaceInfos(item, surfaces, context);
     return;
   }
   if (!value || typeof value !== "object") return;
   const record = value as Record<string, unknown>;
   const ref = record.ref;
   const type = record.type;
-  if (typeof ref === "string" && ref.startsWith("surface:") && (type === undefined || typeof type === "string")) {
-    surfaces.add(ref);
+  const nextContext = { ...context };
+  if (typeof ref === "string") {
+    if (ref.startsWith("window:")) nextContext.window_ref = ref;
+    if (ref.startsWith("workspace:")) nextContext.workspace_ref = ref;
+    if (ref.startsWith("pane:")) nextContext.pane_ref = ref;
+    if (ref.startsWith("surface:")) {
+      surfaces.push({
+        ref,
+        title: typeof record.title === "string" ? record.title : null,
+        type: typeof type === "string" ? type : null,
+        window_ref: nextContext.window_ref ?? null,
+        workspace_ref: nextContext.workspace_ref ?? null,
+        pane_ref: typeof record.pane_ref === "string" ? record.pane_ref : nextContext.pane_ref ?? null,
+        active: typeof record.active === "boolean" ? record.active : undefined,
+        focused: typeof record.focused === "boolean" ? record.focused : undefined,
+      });
+    }
   }
-  for (const item of Object.values(record)) collectCmuxSurfaceRefs(item, surfaces);
+  for (const item of Object.values(record)) collectCmuxSurfaceInfos(item, surfaces, nextContext);
 }
 
 export function markPrReady(root: string, actor: string, prId: string, selfTest: string, testBrief: string): CompanyState {
@@ -1824,6 +2419,7 @@ export function buildLeadBrief(root: string): LeadBrief {
   const blockedPrs = nonMergedPrs.filter((pr) => pr.blockers.length > 0);
   const canClaimComplete = reasons.length === 0;
   const nextActions = buildLeadBriefNextActions(incompleteIssues, state.agents, nonMergedPrs, blockedPrs, dirtyPrs, rootWorktreeChanges, roleBoundaryFindings);
+  const recoverySnapshots = recoverySnapshotsForBrief(root, state, incompleteIssues);
 
   return {
     company: state.config?.id ?? "not initialized",
@@ -1834,8 +2430,33 @@ export function buildLeadBrief(root: string): LeadBrief {
     incomplete_issues: incompleteIssues,
     prs,
     root_worktree_changes: rootWorktreeChanges,
+    recovery_snapshots: recoverySnapshots,
     next_actions: nextActions,
   };
+}
+
+function recoverySnapshotsForBrief(root: string, state: CompanyState, incompleteIssues: IssueRecord[]): AgentRecoverySnapshot[] {
+  const snapshots: AgentRecoverySnapshot[] = [];
+  const seen = new Set<string>();
+  for (const issue of incompleteIssues) {
+    const owner = issue.owner ?? null;
+    if (!owner || seen.has(owner)) continue;
+    const agent = state.agents[owner];
+    const runtime = readAgentRuntime(root, owner);
+    const snapshot = readAgentRecoverySnapshot(root, owner);
+    if (!agent || !snapshot) continue;
+    const relevant =
+      agent.status === "offline" ||
+      runtime?.status === "offline" ||
+      snapshot.current_task === issue.id ||
+      snapshot.issue?.id === issue.id;
+    if (!relevant) continue;
+    snapshots.push(snapshot);
+    seen.add(owner);
+  }
+  return snapshots
+    .sort((left, right) => Date.parse(right.captured_at) - Date.parse(left.captured_at))
+    .slice(0, 5);
 }
 
 function buildPrEvidence(
@@ -2017,6 +2638,9 @@ export function renderLeadBrief(brief: LeadBrief): string {
   const nextActions = brief.next_actions.length
     ? brief.next_actions.map((action) => `- ${action}`).join("\n")
     : "- none";
+  const recovery = brief.recovery_snapshots.length
+    ? brief.recovery_snapshots.map(renderBriefRecoverySnapshot).join("\n")
+    : "- none";
 
   return `Lead Brief: ${brief.company}
 Updated: ${brief.updated_at ?? "never"}
@@ -2037,8 +2661,20 @@ ${evidence}
 Root Worktree Changes:
 ${rootChanges}
 
+Recovery Snapshots:
+${recovery}
+
 Next Actions:
 ${nextActions}`;
+}
+
+function renderBriefRecoverySnapshot(snapshot: AgentRecoverySnapshot): string {
+  const excerpt = snapshot.screen_excerpt?.trim()
+    ? snapshot.screen_excerpt.trim().split(/\r?\n/).slice(-16).join("\n")
+    : "(no terminal text captured)";
+  return `- ${snapshot.agent} reason=${snapshot.reason} captured=${snapshot.captured_at} task=${snapshot.current_task ?? "none"} surface=${snapshot.cmux_surface ?? "none"}
+  terminal text excerpt:
+${excerpt.split(/\r?\n/).map((line) => `  | ${line}`).join("\n")}`;
 }
 
 export function pendingMergeRequests(state: CompanyState): PullRequestRecord[] {

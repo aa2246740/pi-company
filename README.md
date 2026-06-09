@@ -82,6 +82,12 @@ If you prefer shell-first setup, `pi-company init` does the same initialization 
 
 If you want to manually push the current role instructions and lead brief into the visible chat, run `/company-start` inside Pi. It is a refresh command, not a required resume step.
 
+If a one-off skill or maintenance task needs ordinary Pi behavior, run
+`/company-pause` in that Pi session. It pauses company tool guards, inbox
+delivery, provider gates, and company prompt injection for that session only.
+Run `/company-resume` to restore company context. Use this as an escape hatch,
+not as the normal way to bypass role ownership.
+
 Installing the Pi package does not make every `pi` session a company session. In ordinary directories without `.pi-company/`, Pi stays ordinary: pi-company does not create files, register company tools, mirror human input, gate provider requests, or show the company desk panel.
 
 Then talk to lead in natural language:
@@ -127,6 +133,19 @@ Running `init` again in an existing company is idempotent. It loads the existing
 event log instead of resetting roster, issues, PRs, or agent status.
 `init` also keeps `.pi-company/` in `.gitignore` so local company state and
 managed worktrees do not get committed by `git add .`.
+
+## Role File Boundaries
+
+Pi-company separates files by their impact, not by whether they are written
+with a `write` tool. Non-coder roles can write non-runnable Markdown/docs in
+their responsibility area: PRDs, product specs, design notes, test reports,
+review notes, research reports, repo-governance docs such as `AGENTS.md` /
+`CLAUDE.md`, and `docs/agents/**`.
+
+Runnable or behavior-changing files still belong to coder worktrees and PR
+gates: source files, HTML/CSS/JS, configs, package files, scripts, CI, tests,
+assets, generated app files, and other implementation artifacts. Coder agents
+can mutate only inside their assigned worktree.
 
 For source development:
 
@@ -248,14 +267,35 @@ The extension registers:
 - UI: status line and desk panel for the current agent
 - input hook: mirrors interactive human steering to lead
 - mailbox poller: reads local messages; wake metadata tells future launchers whether a message should wake immediately or wait for digest
-- commands: `/company-init`, `/company-start` (manual brief refresh), `/company-resume` (compatibility alias), `/company-status`, `/company-brief`, `/company-inbox`, `/company-ack`, `/company-send`, `/company-configure-models`
-- tools: status, lead/global brief, inbox, send message, issues, task updates, spawn agent, local PR gates, review, test, product acceptance, automated-test evidence, merge request, rate-limit report, model policy configuration
+- commands: `/company-init`, `/company-start` (manual brief refresh), `/company-resume`, `/company-pause`, `/company-maintain`, `/company-status`, `/company-brief`, `/company-inbox`, `/company-ack`, `/company-send`, `/company-configure-models`
+- tools: status, lead/global brief, lifecycle maintenance, inbox, send message, issues, task updates, spawn agent, local PR gates, review, test, product acceptance, automated-test evidence, merge request, rate-limit report, model policy configuration
 
 `company_lead_brief` is the lead's authoritative global delivery view. Lead
 must use it before telling the human that work, a feature, a PR, or the project
 is complete or merged. Worker prose such as "done", "merged", "tested", or
 "basically complete" is not delivery truth until the brief shows the related
 issues done, PRs merged, and no dirty tracked worktree blockers.
+
+## Lifecycle Maintenance
+
+Pi-company keeps volatile agent liveness under `.pi-company/runtime/` instead
+of appending periodic heartbeat events forever. Lead runs a lightweight watchdog
+that can:
+
+- read live cmux terminal text with `cmux read-screen`
+- write bounded recovery snapshots under `.pi-company/runtime/recovery/`
+- notify lead when an assigned worker is offline or stale
+- hibernate idle worker surfaces with `cmux close-surface` while preserving
+  worktrees, branches, issues, and PR records
+
+The default policy keeps at most six active company-owned surfaces, hibernates
+idle coder panes after five minutes, hibernates idle non-coder workers after
+fifteen minutes, and keeps one warm `pm`, `tester`, and `reviewer` when idle.
+It does not auto-relaunch closed workers by default; lead decides whether to
+relaunch the same owner or reassign after reading the terminal-text excerpt.
+
+Lead can run the same pass manually with `/company-maintain` or the
+`company_maintain` tool.
 
 ## Message Backpressure
 
@@ -294,7 +334,7 @@ pi-company rate-limit --actor tester --reason "Retry failed after 3 attempts: 42
 ```
 
 For cmux-based companies, an external supervisor can scan visible pi-company
-surfaces and report screen-visible provider failures:
+surfaces and report terminal-text-visible provider failures:
 
 ```bash
 pi-company cmux-rate-limit-scan --workspace workspace:16

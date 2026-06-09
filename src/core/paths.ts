@@ -22,6 +22,9 @@ export function companyPaths(root = process.cwd()): CompanyPaths {
     issuesDir: path.join(dir, "issues"),
     prsDir: path.join(dir, "prs"),
     worktreesDir: path.join(dir, "worktrees"),
+    runtimeDir: path.join(dir, "runtime"),
+    runtimeAgentsDir: path.join(dir, "runtime", "agents"),
+    runtimeRecoveryDir: path.join(dir, "runtime", "recovery"),
   };
 }
 

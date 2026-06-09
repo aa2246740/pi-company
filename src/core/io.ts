@@ -63,6 +63,9 @@ export function ensureCompanyDirs(paths: CompanyPaths): void {
     paths.issuesDir,
     paths.prsDir,
     paths.worktreesDir,
+    paths.runtimeDir,
+    paths.runtimeAgentsDir,
+    paths.runtimeRecoveryDir,
   ]) {
     ensureDir(dir);
   }

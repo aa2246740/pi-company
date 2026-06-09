@@ -17,7 +17,6 @@ import {
   ensureCoderWorktree,
   ensurePendingMergeReminder,
   getPrGateStatus,
-  heartbeatAgent,
   inferIssueWorkType,
   initCompany,
   launchCommand,
@@ -25,11 +24,14 @@ import {
   loadConfig,
   loadState,
   markPrReady,
+  maintainCompany,
   mergePr,
+  normalizeLifecyclePolicy,
   pendingMergeRequests,
   planAgentSpawn,
   reportRateLimit,
   recordAgentLaunch,
+  recordAgentRuntime,
   recordAutomatedTests,
   recordHumanSteering,
   registerAgent,
@@ -55,7 +57,7 @@ import {
 import { classifyRateLimitText } from "../src/core/rate-limit.js";
 import { DEFAULT_ROLES } from "../src/core/defaults.js";
 import { companyPaths } from "../src/core/paths.js";
-import type { AgentRecord, CompanyState, IssueRecord, IssueWorkType, MailboxMessage, PiModelConfig } from "../src/core/types.js";
+import type { AgentRecord, CompanyState, GateEvidenceRecord, IssueRecord, IssueWorkType, MailboxMessage, PiModelConfig, PullRequestRecord } from "../src/core/types.js";
 
 const currentExtensionPath = fileURLToPath(import.meta.url);
 
@@ -116,7 +118,23 @@ const rateLimitKindSchema = Type.Union([
 ]);
 
 const AUTOMATIC_RATE_LIMIT_DEDUPE_MS = 15_000;
-const HEARTBEAT_MS = 30_000;
+const BUSY_DELIVERY_BACKOFF_MS = 15_000;
+const WATCHDOG_FALLBACK_MS = 60_000;
+
+interface LiveCmuxSurface {
+  ref: string;
+  title: string | null;
+  window_ref?: string | null;
+  workspace_ref?: string | null;
+  pane_ref?: string | null;
+  active?: boolean;
+  focused?: boolean;
+}
+
+interface CmuxLaunchResult {
+  surface: string;
+  reused: boolean;
+}
 
 export default function companyExtension(pi: ExtensionAPI): void {
   pi.registerFlag("company-root", {
@@ -153,12 +171,14 @@ export default function companyExtension(pi: ExtensionAPI): void {
   const pollMs = Math.max(1000, Number(configString(pi, "company-poll-ms", "PI_COMPANY_POLL_MS", "3000")) || 3000);
   const deliveredThisSession = new Set<string>();
   let pollTimer: NodeJS.Timeout | null = null;
-  let heartbeatTimer: NodeJS.Timeout | null = null;
+  let watchdogTimer: NodeJS.Timeout | null = null;
   let delivering = false;
   let manuallyRefreshedThisSession = false;
   let lastAutomaticRateLimitReportAt = 0;
   const activeProviderLeases: ProviderRequestLease[] = [];
   let toolsRegistered = false;
+  let companyPaused = false;
+  let busyDeliveryBackoffUntil = 0;
 
   function isCompanyActive(): boolean {
     return loadConfig(root) !== null;
@@ -186,6 +206,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
   function registerCurrentAgent(ctx: ExtensionContext): void {
     const state = loadState(root);
     const existing = state.agents[agentName];
+    const currentSurface = currentCmuxSurfaceRef(root, agentName);
     registerAgent(root, {
       name: agentName,
       role: existing?.role ?? role,
@@ -195,12 +216,25 @@ export default function companyExtension(pi: ExtensionAPI): void {
       mission: existing?.mission ?? null,
       status: "online",
     });
+    if (currentSurface && existing) {
+      recordAgentLaunch(root, "system", agentName, currentSurface);
+    }
+    recordLiveRuntime({ status: "online", cmux_surface: currentSurface ?? existing?.cmux_surface ?? null });
   }
 
-  function recordLiveHeartbeat(): void {
+  function recordLiveRuntime(patch: Parameters<typeof recordAgentRuntime>[2] = {}): void {
     const current = loadState(root).agents[agentName];
-    const status = current?.status && current.status !== "offline" ? current.status : "online";
-    heartbeatAgent(root, { name: agentName, status });
+    if (!current) return;
+    const currentSurface = currentCmuxSurfaceRef(root, agentName);
+    recordAgentRuntime(root, agentName, {
+      status: patch.status ?? (current?.status === "offline" ? "online" : undefined),
+      cmux_surface: patch.cmux_surface ?? currentSurface ?? current?.cmux_surface ?? null,
+      current_task: patch.current_task !== undefined ? patch.current_task : current?.current_task ?? null,
+      note: patch.note,
+      progress: patch.progress,
+      turn_started: patch.turn_started,
+      turn_ended: patch.turn_ended,
+    });
   }
 
   function reportAutomaticRateLimit(kind: "provider_429" | "quota_exhausted", reason: string) {
@@ -232,14 +266,24 @@ export default function companyExtension(pi: ExtensionAPI): void {
     const inbox = state.inbox_counts[agentName] ?? 0;
     const displayRole = current?.role ?? role;
     ctx.ui.setTitle(`pi-company ${agentName}`);
+    if (companyPaused) {
+      ctx.ui.setStatus("pi-company", `${agentName}/${displayRole} paused`);
+      ctx.ui.setWidget("pi-company", renderPausedDeskPanel(state, agentName), { placement: "belowEditor" });
+      return;
+    }
     const contextHint = manuallyRefreshedThisSession ? "brief refreshed" : "active";
     ctx.ui.setStatus("pi-company", `${agentName}/${displayRole} inbox:${inbox} · ${contextHint}`);
     ctx.ui.setWidget("pi-company", renderDeskPanel(state, agentName, manuallyRefreshedThisSession), { placement: "belowEditor" });
   }
 
   async function deliverInbox(ctx: ExtensionContext, mode: "auto" | "manual" = "auto"): Promise<void> {
+    if (companyPaused) return;
     if (!isCompanyActive()) return;
     if (delivering) return;
+    if (mode === "auto" && Date.now() < busyDeliveryBackoffUntil) {
+      await refreshUi(ctx);
+      return;
+    }
     if (mode === "auto" && !canAutoDeliverFollowUp(ctx)) {
       await refreshUi(ctx);
       return;
@@ -256,10 +300,14 @@ export default function companyExtension(pi: ExtensionAPI): void {
       for (const message of messages) {
         try {
           await pi.sendUserMessage(formatMailboxMessage(message), { deliverAs: "followUp" });
+          busyDeliveryBackoffUntil = 0;
           deliveredThisSession.add(message.id);
           acknowledgeInbox(root, agentName, [message.id]);
         } catch (error) {
-          if (isAgentBusyError(error)) break;
+          if (isAgentBusyError(error)) {
+            busyDeliveryBackoffUntil = Date.now() + BUSY_DELIVERY_BACKOFF_MS;
+            break;
+          }
           const classification = classifyRateLimitError(error);
           if (!classification) throw error;
           const reported = reportAutomaticRateLimit(classification.kind, classification.reason);
@@ -284,6 +332,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
   }
 
   function startPolling(ctx: ExtensionContext): void {
+    if (companyPaused) return;
     if (!isCompanyActive()) return;
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = setInterval(() => {
@@ -293,17 +342,24 @@ export default function companyExtension(pi: ExtensionAPI): void {
     }, pollMs);
   }
 
-  function startHeartbeat(): void {
+  function startWatchdog(ctx: ExtensionContext): void {
+    if (companyPaused) return;
     if (!isCompanyActive()) return;
-    if (heartbeatTimer) clearInterval(heartbeatTimer);
-    heartbeatTimer = setInterval(() => {
+    if (agentName !== lead) return;
+    if (watchdogTimer) clearInterval(watchdogTimer);
+    const interval = normalizeLifecyclePolicy(loadState(root).config?.lifecycle_policy).watchdog_interval_ms || WATCHDOG_FALLBACK_MS;
+    watchdogTimer = setInterval(() => {
       try {
         requireCompany();
-        recordLiveHeartbeat();
+        const result = maintainCompany(root, agentName);
+        if (result.actions.length > 0 && ctx.hasUI) {
+          ctx.ui.setStatus("pi-company", `watchdog: ${result.actions.length} action(s)`);
+        }
+        void deliverInbox(ctx, "auto").catch(() => undefined);
       } catch {
-        // Heartbeat should not interrupt an agent turn.
+        // Watchdog should not interrupt an agent turn.
       }
-    }, HEARTBEAT_MS);
+    }, interval);
   }
 
   pi.on("session_start", async (_event, ctx) => {
@@ -313,7 +369,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
       ensureCompanyToolsRegistered();
       await refreshUi(ctx);
       startPolling(ctx);
-      startHeartbeat();
+      startWatchdog(ctx);
       await deliverInbox(ctx, "auto");
     } catch (error) {
       if (ctx.hasUI) {
@@ -328,12 +384,12 @@ export default function companyExtension(pi: ExtensionAPI): void {
   pi.on("session_shutdown", async () => {
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = null;
-    if (heartbeatTimer) clearInterval(heartbeatTimer);
-    heartbeatTimer = null;
+    if (watchdogTimer) clearInterval(watchdogTimer);
+    watchdogTimer = null;
     await releaseAllProviderLeases();
     try {
       if (!isCompanyActive()) return;
-      heartbeatAgent(root, { name: agentName, status: "offline" });
+      recordAgentRuntime(root, agentName, { status: "offline", note: "Pi session shutdown" });
     } catch {
       // Shutdown must not fail because state cleanup failed.
     }
@@ -341,7 +397,9 @@ export default function companyExtension(pi: ExtensionAPI): void {
 
   pi.on("before_provider_request", async (event, ctx) => {
     if (!isCompanyActive()) return undefined;
+    if (companyPaused) return undefined;
     await waitForProviderBackoff(ctx);
+    recordLiveRuntime({ status: "busy", turn_started: true });
     const state = loadState(root);
     const provider = providerNameFromRequest(event, ctx);
     const lease = await acquireProviderRequestLease(root, provider, agentName, state.config?.provider_request_policy);
@@ -355,7 +413,9 @@ export default function companyExtension(pi: ExtensionAPI): void {
 
   pi.on("after_provider_response", async (event, ctx) => {
     if (!isCompanyActive()) return;
+    if (companyPaused) return;
     await releaseOldestProviderLease();
+    recordLiveRuntime({ status: "idle", turn_ended: true });
     if (event.status !== 429) return;
     const retryAfter = typeof event.headers?.["retry-after"] === "string"
       ? ` retry-after=${event.headers["retry-after"]}`
@@ -370,18 +430,21 @@ export default function companyExtension(pi: ExtensionAPI): void {
   pi.on("turn_end", async (_event, ctx) => {
     if (!isCompanyActive()) return;
     await releaseAllProviderLeases();
+    if (!companyPaused) recordLiveRuntime({ status: "idle", turn_ended: true });
     await refreshUi(ctx);
   });
 
   pi.on("agent_end", async (_event, ctx) => {
     if (!isCompanyActive()) return;
     await releaseAllProviderLeases();
+    if (!companyPaused) recordLiveRuntime({ status: "idle", turn_ended: true });
     await refreshUi(ctx);
   });
 
   pi.on("input", async (event, ctx) => {
     if (event.source !== "interactive") return { action: "continue" };
     if (!isCompanyActive()) return { action: "continue" };
+    if (companyPaused) return { action: "continue" };
     recordHumanSteering(root, agentName, event.text, event.streamingBehavior ?? null);
     await refreshUi(ctx);
     if (agentName !== lead) {
@@ -397,16 +460,18 @@ export default function companyExtension(pi: ExtensionAPI): void {
 
   pi.on("tool_call", async (event) => {
     if (!isCompanyActive()) return undefined;
+    if (companyPaused) return undefined;
     const state = loadState(root);
     const agent = state.agents[agentName];
     const blockReason = agentName === lead
-      ? leadToolBlockReason(event)
-      : workerToolBlockReason(event, agent);
+      ? leadToolBlockReason(event, root)
+      : workerToolBlockReason(event, agent, root);
     return blockReason ? { block: true, reason: blockReason } : undefined;
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
     if (!isCompanyActive()) return undefined;
+    if (companyPaused) return undefined;
     await refreshUi(ctx);
     return {
       systemPrompt: `${event.systemPrompt}
@@ -454,7 +519,7 @@ ${renderCompanySystemPrompt(root, agentName, role, lead)}`,
       registerCurrentAgent(ctx);
       ensureCompanyToolsRegistered();
       startPolling(ctx);
-      startHeartbeat();
+      startWatchdog(ctx);
       await refreshUi(ctx);
       if (ctx.hasUI) {
         ctx.ui.notify(`Initialized pi-company at ${root}. Tell lead what you want to build next.`, "info");
@@ -467,8 +532,11 @@ ${renderCompanySystemPrompt(root, agentName, role, lead)}`,
       notifyNoCompany(ctx);
       return;
     }
+    companyPaused = false;
     manuallyRefreshedThisSession = true;
-    recordLiveHeartbeat();
+    recordLiveRuntime({ status: "online" });
+    startPolling(ctx);
+    startWatchdog(ctx);
     await refreshUi(ctx);
     await pi.sendUserMessage(renderManualBriefRefreshPrompt(root, agentName, role, lead), { deliverAs: "followUp" });
     if (ctx.hasUI) ctx.ui.notify(`pi-company brief refreshed for ${agentName}`, "info");
@@ -482,9 +550,28 @@ ${renderCompanySystemPrompt(root, agentName, role, lead)}`,
   });
 
   pi.registerCommand("company-resume", {
-    description: "Compatibility alias for /company-start",
+    description: "Resume pi-company in this Pi session and refresh role instructions",
     handler: async (_args, ctx) => {
       await startCompanyContext(ctx);
+    },
+  });
+
+  pi.registerCommand("company-pause", {
+    description: "Pause pi-company guards and automation in this Pi session",
+    handler: async (_args, ctx) => {
+      if (!isCompanyActive()) {
+        notifyNoCompany(ctx);
+        return;
+      }
+      companyPaused = true;
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = null;
+      if (watchdogTimer) clearInterval(watchdogTimer);
+      watchdogTimer = null;
+      recordAgentRuntime(root, agentName, { status: "paused", note: "company automation paused in this Pi session" });
+      await releaseAllProviderLeases();
+      await refreshUi(ctx);
+      if (ctx.hasUI) ctx.ui.notify("pi-company paused for this Pi session. Run /company-resume to restore company guards and context.", "info");
     },
   });
 
@@ -497,6 +584,19 @@ ${renderCompanySystemPrompt(root, agentName, role, lead)}`,
       }
       await pi.sendUserMessage(renderLeadBrief(buildLeadBrief(root)), { deliverAs: "followUp" });
       await refreshUi(ctx);
+    },
+  });
+
+  pi.registerCommand("company-maintain", {
+    description: "Run pi-company lifecycle maintenance now (lead only)",
+    handler: async (_args, ctx) => {
+      if (!isCompanyActive()) {
+        notifyNoCompany(ctx);
+        return;
+      }
+      const result = maintainCompany(root, agentName);
+      await refreshUi(ctx);
+      if (ctx.hasUI) ctx.ui.notify(`pi-company maintenance: ${result.actions.length} action(s)`, "info");
     },
   });
 
@@ -581,20 +681,26 @@ function noCompanyMessage(root: string): string {
   return `This is an ordinary Pi session. To create a pi-company project here, run /company-init. You can also exit Pi and run: pi-company init. Checked: ${root}`;
 }
 
-function leadToolBlockReason(event: { toolName: string; input: Record<string, unknown> }): string | null {
+function leadToolBlockReason(event: { toolName: string; input: Record<string, unknown> }, root: string): string | null {
   if (event.toolName === "write" || event.toolName === "edit") {
-    return "pi-company lead cannot write or edit deliverable files directly. Create/assign an issue and delegate implementation to the owning worker.";
+    const target = typeof event.input.path === "string" ? resolveToolPath(event.input.path, root) : "";
+    if (target) {
+      const rel = projectRelativePath(root, target);
+      if (rel && isNonRunnableDocumentationPath(rel)) return null;
+    }
+    return "pi-company lead cannot write runnable or behavior-changing project files directly. Delegate implementation/config/test/assets to the responsible worker, or run /company-pause for an explicit ordinary-Pi maintenance escape hatch.";
   }
   if (event.toolName === "bash") {
     const command = typeof event.input.command === "string" ? event.input.command : "";
+    if (isAllowedNonCoderDocBashCommand(command)) return null;
     if (isMutatingLeadBashCommand(command)) {
-      return "pi-company lead cannot mutate the project through raw bash. Use pi-company issue/spawn/PR/merge tools and delegate implementation to workers.";
+      return "pi-company lead cannot mutate runnable or behavior-changing project files through raw bash. Use pi-company issue/spawn/PR/merge tools, delegate implementation to workers, or run /company-pause for explicit ordinary-Pi maintenance.";
     }
   }
   return null;
 }
 
-function workerToolBlockReason(event: { toolName: string; input: Record<string, unknown> }, agent: AgentRecord | undefined): string | null {
+function workerToolBlockReason(event: { toolName: string; input: Record<string, unknown> }, agent: AgentRecord | undefined, root: string): string | null {
   if (!agent) return null;
   if (event.toolName === "write" || event.toolName === "edit") {
     const target = typeof event.input.path === "string" ? resolveToolPath(event.input.path, agent.cwd) : "";
@@ -605,7 +711,7 @@ function workerToolBlockReason(event: { toolName: string; input: Record<string, 
       if (isPathInside(target, worktree)) return null;
       return `pi-company coder ${agent.name} must write inside its assigned worktree (${worktree}). Use the same relative output path inside the worktree, not the project root.`;
     }
-    const allowed = nonCoderAllowedWriteReason(agent, target);
+    const allowed = nonCoderAllowedWriteReason(agent, target, root);
     if (!allowed.allowed) return allowed.reason;
   }
   if (event.toolName === "bash") {
@@ -613,9 +719,9 @@ function workerToolBlockReason(event: { toolName: string; input: Record<string, 
     if (agent.role === "coder" || agent.name.startsWith("coder")) {
       return coderBashBlockReason(command, agent);
     }
-    if (isAllowedNonCoderMkdir(command, agent)) return null;
+    if (isAllowedNonCoderDocBashCommand(command)) return null;
     if (isMutatingLeadBashCommand(command)) {
-      return `pi-company ${agent.role} ${agent.name} cannot mutate project files or git state through raw bash. Report the need to lead so coder can implement through worktree and PR.`;
+      return `pi-company ${agent.role} ${agent.name} cannot mutate runnable or behavior-changing project files through raw bash. Non-runnable Markdown/docs are allowed; implementation/config/test/assets must go to coder, or use /company-pause for explicit ordinary-Pi maintenance.`;
     }
   }
   return null;
@@ -691,58 +797,179 @@ function isPathInside(target: string, parent: string): boolean {
   return relative === "" || Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
-function nonCoderAllowedWriteReason(agent: AgentRecord, target: string): { allowed: true } | { allowed: false; reason: string } {
-  const rel = path.relative(path.resolve(agent.cwd), target).replace(/\\/g, "/");
-  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+function nonCoderAllowedWriteReason(agent: AgentRecord, target: string, root: string): { allowed: true } | { allowed: false; reason: string } {
+  const rel = projectRelativePath(root, target);
+  if (!rel) {
     return { allowed: false, reason: `pi-company ${agent.role} ${agent.name} cannot write outside its project. Ask lead to route the work deliberately.` };
   }
-  const role = agent.role;
-  if (role === "pm" || agent.name.startsWith("pm")) {
-    if (isProductSpecPath(rel)) return { allowed: true };
-    return { allowed: false, reason: `pi-company PM can write product/requirements/acceptance Markdown only. Business code and runnable deliverables must be assigned to coder.` };
-  }
-  if (role === "designer" || agent.name.startsWith("designer")) {
-    if (isDesignSpecPath(rel)) return { allowed: true };
-    return { allowed: false, reason: `pi-company designer can write design/UX Markdown only. Runnable UI, styles, assets, and code must be assigned to coder.` };
-  }
-  return { allowed: false, reason: `pi-company ${role} ${agent.name} cannot write project files. Only coder writes implementation; this role should report evidence or findings through pi-company tools.` };
+  if (isNonRunnableDocumentationPath(rel)) return { allowed: true };
+  return {
+    allowed: false,
+    reason: `pi-company ${agent.role} ${agent.name} can write non-runnable Markdown/docs, but ${rel} looks runnable or behavior-changing. Assign implementation/config/test/assets to coder, or run /company-pause for an explicit ordinary-Pi maintenance escape hatch.`,
+  };
 }
 
-function isProductSpecPath(rel: string): boolean {
-  const base = path.basename(rel);
-  return /\.md$/i.test(rel) && (
-    /^(PRODUCT|REQUIREMENTS|ACCEPTANCE)\.md$/i.test(base) ||
-    /(product|requirements|acceptance|scope|criteria)/i.test(base) ||
-    /^docs\/(product|requirements|acceptance)(\/|[^/]*\.md$)/i.test(rel)
-  );
+function projectRelativePath(root: string, target: string): string | null {
+  const rel = path.relative(path.resolve(root), path.resolve(target)).replace(/\\/g, "/");
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return null;
+  return rel;
 }
 
-function isDesignSpecPath(rel: string): boolean {
-  const base = path.basename(rel);
-  return /\.md$/i.test(rel) && (
-    /^(DESIGN|UX)\.md$/i.test(base) ||
-    /(design|ux|prototype|interaction|visual)/i.test(base) ||
-    /^docs\/(design|ux|prototype)(\/|[^/]*\.md$)/i.test(rel)
-  );
+function isNonRunnableDocumentationPath(rel: string): boolean {
+  const normalized = normalizeRelativePath(rel);
+  if (!normalized || isRunnableOrBehaviorChangingPath(normalized)) return false;
+  const base = path.posix.basename(normalized);
+  if (!isDocumentationExtension(base)) return false;
+  if (!normalized.includes("/")) return true;
+  if (/^(docs|\.scratch|notes)(\/|$)/i.test(normalized)) return true;
+  if (/^\.github\/(ISSUE_TEMPLATE|PULL_REQUEST_TEMPLATE)(\/|$)/i.test(normalized)) return true;
+  return false;
+}
+
+function isDocumentationExtension(fileName: string): boolean {
+  return /\.(md|mdx|txt|rst|adoc)$/i.test(fileName);
+}
+
+function normalizeRelativePath(rel: string): string {
+  return rel.replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+function isRunnableOrBehaviorChangingPath(rel: string): boolean {
+  const normalized = normalizeRelativePath(rel);
+  const segments = normalized.split("/");
+  const first = segments[0]?.toLowerCase() ?? "";
+  const base = path.posix.basename(normalized);
+  if (!normalized) return false;
+  if (first === ".pi-company" || first === ".git") return true;
+  if (first === ".github" && segments[1]?.toLowerCase() === "workflows") return true;
+  const behaviorDirs = new Set([
+    "src",
+    "app",
+    "pages",
+    "components",
+    "server",
+    "lib",
+    "scripts",
+    "bin",
+    "test",
+    "tests",
+    "__tests__",
+    "cypress",
+    "playwright",
+    "public",
+    "static",
+    "assets",
+    "styles",
+  ]);
+  if (behaviorDirs.has(first)) return true;
+  if (/\.(html?|css|scss|sass|less|js|jsx|mjs|cjs|ts|tsx|vue|svelte|astro|py|rb|go|rs|java|kt|swift|php|sh|bash|zsh|fish|ps1|sql|ya?ml|toml|json|jsonc|lock|env|png|jpe?g|gif|webp|svg|ico|pdf|wasm)$/i.test(base)) {
+    return true;
+  }
+  if (/^(package(-lock)?|pnpm-lock|yarn\.lock|bun\.lockb|tsconfig|vite\.config|webpack\.config|rollup\.config|eslint\.config|prettier\.config|tailwind\.config|postcss\.config|dockerfile|compose|makefile|justfile|procfile|\.env|\.gitignore|\.npmrc)/i.test(base)) {
+    return true;
+  }
+  return false;
 }
 
 function resolveToolPath(inputPath: string, cwd: string): string {
   return path.isAbsolute(inputPath) ? path.resolve(inputPath) : path.resolve(cwd, inputPath);
 }
 
-function isAllowedNonCoderMkdir(command: string, agent: AgentRecord): boolean {
+function isAllowedNonCoderDocBashCommand(command: string): boolean {
   const normalized = command.replace(/\\\n/g, " ").replace(/\s+/g, " ").trim();
-  const match = normalized.match(/^mkdir\s+-p\s+(.+)$/);
-  if (!match) return false;
-  const parts = match[1].split(/\s+/).map((part) => part.replace(/^['"]|['"]$/g, ""));
-  if (parts.length === 0) return false;
-  if (agent.role === "pm" || agent.name.startsWith("pm")) {
-    return parts.every((part) => /^docs\/(product|requirements|acceptance)(\/.*)?$/i.test(part));
+  if (!normalized || !isMutatingLeadBashCommand(normalized)) return false;
+  if (hasDangerousNonCoderMutation(normalized)) return false;
+  const writtenFiles = [
+    ...extractRedirectTargets(normalized),
+    ...extractTeeTargets(normalized),
+    ...extractTouchTargets(normalized),
+  ];
+  const writtenDirs = extractMkdirTargets(normalized);
+  if (writtenFiles.length === 0 && writtenDirs.length === 0) return false;
+  return writtenFiles.every(isSafeRelativeDocumentationFile) && writtenDirs.every(isSafeRelativeDocumentationDirectory);
+}
+
+function hasDangerousNonCoderMutation(command: string): boolean {
+  const dangerousPatterns = [
+    /(^|[;&|]\s*)(rm|mv|cp|install|chmod|chown|truncate)\b/i,
+    /(^|[;&|]\s*)(npm|pnpm|yarn|bun)\s+(install|add|remove|update|upgrade|dlx)\b/i,
+    /(^|[;&|]\s*)git\s+(init|add|commit|merge|rebase|checkout|switch|reset|clean|stash|restore|rm|mv|worktree\s+(add|remove|prune|move|repair))\b/i,
+    /(^|[;&|]\s*)(sed|perl)\s+[^;&|]*\s-i\b/i,
+  ];
+  return dangerousPatterns.some((pattern) => pattern.test(command));
+}
+
+function extractRedirectTargets(command: string): string[] {
+  const targets: string[] = [];
+  const pattern = /(?:^|[\s;&|])(?:\d?>|>>)\s*("[^"]+"|'[^']+'|[^\s;&|]+)/g;
+  for (const match of command.matchAll(pattern)) {
+    const target = cleanShellPathToken(match[1]);
+    if (target && target !== "/dev/null" && !target.startsWith("&")) targets.push(target);
   }
-  if (agent.role === "designer" || agent.name.startsWith("designer")) {
-    return parts.every((part) => /^docs\/(design|ux|prototype)(\/.*)?$/i.test(part));
+  return targets;
+}
+
+function extractTeeTargets(command: string): string[] {
+  const targets: string[] = [];
+  const pattern = /(?:^|[\s;&|])tee(?:\s+-a)?\s+([^;&|]+)/g;
+  for (const match of command.matchAll(pattern)) {
+    for (const token of shellWordsLite(match[1])) {
+      if (token.startsWith("<")) break;
+      if (token.startsWith("-")) continue;
+      const target = cleanShellPathToken(token);
+      if (target && target !== "/dev/null") {
+        targets.push(target);
+        break;
+      }
+    }
   }
-  return false;
+  return targets;
+}
+
+function extractTouchTargets(command: string): string[] {
+  return extractCommandPathArgs(command, "touch");
+}
+
+function extractMkdirTargets(command: string): string[] {
+  return extractCommandPathArgs(command, "mkdir")
+    .filter((target) => target !== "-p");
+}
+
+function extractCommandPathArgs(command: string, commandName: "mkdir" | "touch"): string[] {
+  const targets: string[] = [];
+  const pattern = new RegExp(`(?:^|[;&|]\\s*)${commandName}\\s+([^;&|]+)`, "gi");
+  for (const match of command.matchAll(pattern)) {
+    for (const token of shellWordsLite(match[1])) {
+      if (token.startsWith("-")) continue;
+      const target = cleanShellPathToken(token);
+      if (target) targets.push(target);
+    }
+  }
+  return targets;
+}
+
+function cleanShellPathToken(token: string): string {
+  return token.replace(/^["']|["']$/g, "").trim();
+}
+
+function isSafeRelativeDocumentationFile(target: string): boolean {
+  if (!isSafeRelativeProjectToken(target)) return false;
+  return isNonRunnableDocumentationPath(target);
+}
+
+function isSafeRelativeDocumentationDirectory(target: string): boolean {
+  if (!isSafeRelativeProjectToken(target)) return false;
+  const normalized = normalizeRelativePath(target).replace(/\/+$/, "");
+  return /^(docs|docs\/.+|\.scratch|\.scratch\/.+|notes|notes\/.+|\.github\/ISSUE_TEMPLATE|\.github\/PULL_REQUEST_TEMPLATE)(\/.*)?$/i.test(normalized);
+}
+
+function isSafeRelativeProjectToken(target: string): boolean {
+  const normalized = normalizeRelativePath(target);
+  if (!normalized || normalized.startsWith("-") || normalized.startsWith("$")) return false;
+  if (path.isAbsolute(normalized)) return false;
+  if (normalized === ".." || normalized.startsWith("../") || normalized.includes("/../")) return false;
+  if (/^[a-z]+:\/\//i.test(normalized)) return false;
+  return true;
 }
 
 function isMutatingLeadBashCommand(command: string): boolean {
@@ -853,6 +1080,24 @@ function registerTools(pi: ExtensionAPI, runtime: {
       await refreshUi(ctx);
       const brief = buildLeadBrief(root);
       return toolResult(renderLeadBrief(brief), { brief });
+    },
+  });
+
+  pi.registerTool({
+    name: "company_maintain",
+    label: "Company Maintenance",
+    description: "Lead-only lifecycle watchdog pass: capture terminal text, detect stale/offline workers, and hibernate idle surfaces.",
+    promptSnippet: "Run pi-company lifecycle maintenance when a worker may be offline, stale, or when too many cmux surfaces are open.",
+    promptGuidelines: [
+      "Lead should use company_maintain before waiting silently for a worker that has not reported progress.",
+      "Use the returned recovery terminal text and actions to relaunch the same owner or reassign deliberately.",
+      "This reads cmux terminal text through read-screen; it does not use screenshots or vision.",
+    ],
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      const result = maintainCompany(root, agentName);
+      await refreshUi(ctx);
+      return toolResult(`Maintenance checked at ${result.checked_at}. Actions: ${result.actions.length}.`, { maintenance: result });
     },
   });
 
@@ -991,7 +1236,8 @@ function registerTools(pi: ExtensionAPI, runtime: {
       const issue = createIssue(root, agentName, params.title, params.body ?? "", { work_type: workType });
       const launch = params.owner ? assignAndLaunchIfNeeded(root, agentName, params.owner, issue.id) : null;
       await refreshUi(ctx);
-      return toolResult(`${issue.id}: ${issue.title}${launch?.cmux ? `\nLaunched ${params.owner} in ${launch.cmux}` : ""}`, { issue: loadState(root).issues[issue.id], launch });
+      const launchText = launch?.cmux ? `\n${launch.cmux_reused ? "Reused live" : "Launched"} ${params.owner} in ${launch.cmux}` : "";
+      return toolResult(`${issue.id}: ${issue.title}${launchText}`, { issue: loadState(root).issues[issue.id], launch });
     },
   });
 
@@ -1011,7 +1257,8 @@ function registerTools(pi: ExtensionAPI, runtime: {
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const launch = assignAndLaunchIfNeeded(root, agentName, params.owner, params.issue_id);
       await refreshUi(ctx);
-      return toolResult(`Assigned ${params.issue_id} to ${params.owner}${launch?.cmux ? `\nLaunched ${params.owner} in ${launch.cmux}` : ""}`, { issue: loadState(root).issues[params.issue_id], launch });
+      const launchText = launch?.cmux ? `\n${launch.cmux_reused ? "Reused live" : "Launched"} ${params.owner} in ${launch.cmux}` : "";
+      return toolResult(`Assigned ${params.issue_id} to ${params.owner}${launchText}`, { issue: loadState(root).issues[params.issue_id], launch });
     },
   });
 
@@ -1041,6 +1288,12 @@ function registerTools(pi: ExtensionAPI, runtime: {
       if (params.action === "report") reportTask(root, agentName, params.issue_id, note);
       if (params.action === "block") blockTask(root, agentName, params.issue_id, note || "blocked");
       if (params.action === "complete") completeTask(root, agentName, params.issue_id, note || "completed");
+      recordAgentRuntime(root, agentName, {
+        status: params.action === "complete" ? "idle" : "online",
+        current_task: params.action === "complete" ? null : params.issue_id,
+        progress: true,
+        note: note || params.action,
+      });
       await refreshUi(ctx);
       return toolResult(`${agentName} ${params.action} ${params.issue_id}`, { issue: loadState(root).issues[params.issue_id] });
     },
@@ -1080,14 +1333,18 @@ function registerTools(pi: ExtensionAPI, runtime: {
         const briefing = shouldLaunch || params.launch_in_cmux === false || params.mission || assignedIssue
           ? sendLaunchBriefingIfNeeded(root, agentName, loadState(root).agents[existing.name] ?? existing, params.mission ?? null)
           : null;
-        const cmux = shouldLaunch ? launchInCmux(root, agentName, existing.name, command) : null;
+        const cmuxLaunch = shouldLaunch ? launchInCmux(root, agentName, existing.name, command) : null;
+        const cmux = cmuxLaunch?.surface ?? null;
         await refreshUi(ctx);
-        if (cmux) return toolResult(`Launched existing ${existing.name} in ${cmux}`, { plan: existing, command, cmux, existing: true, briefing, assigned_issue: assignedIssue });
+        if (cmux) {
+          const verb = cmuxLaunch?.reused ? "Reused live" : "Launched existing";
+          return toolResult(`${verb} ${existing.name} in ${cmux}`, { plan: existing, command, cmux, cmux_reused: cmuxLaunch?.reused ?? false, existing: true, briefing, assigned_issue: assignedIssue });
+        }
         if (existing.status === "online" || existing.status === "running") {
           const notice = briefing ? `\nQueued launch briefing ${briefing.id}.` : "";
-          return toolResult(`Agent ${existing.name} is already ${existing.status}.${notice} Launch command:\n${command}`, { plan: existing, command, cmux, existing: true, briefing, assigned_issue: assignedIssue });
+          return toolResult(`Agent ${existing.name} is already ${existing.status}.${notice} Launch command:\n${command}`, { plan: existing, command, cmux, cmux_reused: false, existing: true, briefing, assigned_issue: assignedIssue });
         }
-        return toolResult(command, { plan: existing, command, cmux, existing: true, briefing, assigned_issue: assignedIssue });
+        return toolResult(command, { plan: existing, command, cmux, cmux_reused: false, existing: true, briefing, assigned_issue: assignedIssue });
       }
       const plan = planAgentSpawn(root, params.role, params.name, params.mission ?? null, { allowUnknownRole: params.force_role === true });
       const shouldCreateWorktree = (params.role === "coder" || params.name.startsWith("coder")) && params.create_worktree !== false;
@@ -1106,10 +1363,12 @@ function registerTools(pi: ExtensionAPI, runtime: {
       const assignedIssue = assignSpawnIssueIfNeeded(root, agentName, registered, params.issue_id ?? null);
       const briefing = sendLaunchBriefingIfNeeded(root, agentName, loadState(root).agents[plan.name] ?? registered, params.mission ?? plan.mission);
       const command = launchCommand(root, plan.name, currentExtensionPath);
-      let cmux: string | null = null;
-      if (params.launch_in_cmux !== false) cmux = launchInCmux(root, agentName, plan.name, command);
+      let cmuxLaunch: CmuxLaunchResult | null = null;
+      if (params.launch_in_cmux !== false) cmuxLaunch = launchInCmux(root, agentName, plan.name, command);
+      const cmux = cmuxLaunch?.surface ?? null;
       await refreshUi(ctx);
-      return toolResult(cmux ? `Launched ${plan.name} in ${cmux}` : command, { plan, command, cmux, briefing, assigned_issue: assignedIssue });
+      const verb = cmuxLaunch?.reused ? "Reused live" : "Launched";
+      return toolResult(cmux ? `${verb} ${plan.name} in ${cmux}` : command, { plan, command, cmux, cmux_reused: cmuxLaunch?.reused ?? false, briefing, assigned_issue: assignedIssue });
     },
   });
 
@@ -1308,7 +1567,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
       }
       const gates = getPrGateStatus(root, params.pr_id);
       await refreshUi(ctx);
-      return toolResult(gates.ready ? `${params.pr_id} is ready to merge` : `${params.pr_id} blocked:\n${gates.blockers.map((b) => `- ${b}`).join("\n")}`, { gates });
+      return toolResult(formatPrGateToolText(params.pr_id, pr, gates), { pr, gates });
     },
   });
 
@@ -1367,6 +1626,90 @@ function gateEvidenceParams(params: { clean?: boolean; caveats?: string[] }): { 
     clean: params.clean === true ? true : params.clean === false ? false : undefined,
     caveats: params.caveats ?? [],
   };
+}
+
+function formatPrGateToolText(prId: string, pr: PullRequestRecord | undefined, gates: { ready: boolean; blockers: string[] }): string {
+  if (!pr) return `Unknown PR ${prId}`;
+  const lines = [
+    gates.ready ? `${prId} is ready to merge` : `${prId} blocked:`,
+  ];
+  if (!gates.ready) lines.push(...gates.blockers.map((blocker) => `- ${blocker}`));
+  lines.push(
+    "",
+    "PR:",
+    `- title: ${pr.title}`,
+    `- issue: ${pr.issue_id ?? "none"}`,
+    `- author: ${pr.author}`,
+    `- branch: ${pr.branch}`,
+    `- head: ${pr.head ?? "unknown"}`,
+    `- status: ${pr.status}`,
+    "",
+    "Gate evidence:",
+    `- coder_ready: ${pr.self_test && pr.test_brief ? `ready_head=${pr.ready_head ?? "unknown"}` : "missing self-test or test brief"}`,
+    `  self_test: ${formatGateSummary(pr.self_test)}`,
+    `  test_brief: ${formatGateSummary(pr.test_brief)}`,
+    `- automated_tests: ${formatAutomatedGateEvidence(pr.automated_tests ?? null, pr.head ?? null)}`,
+    ...formatReviewGateEvidence(pr.reviews, pr.head ?? null),
+    ...formatTestGateEvidence(pr.tests, pr.head ?? null),
+    ...formatAcceptanceGateEvidence(pr.acceptances ?? [], pr.head ?? null),
+  );
+  return lines.join("\n");
+}
+
+function formatReviewGateEvidence(records: PullRequestRecord["reviews"], head: string | null): string[] {
+  const current = records.filter((record) => !head || record.head === head);
+  if (current.length === 0) return [`- reviews: missing for current head ${shortHeadForTool(head)}`];
+  return [
+    "- reviews:",
+    ...current.map((record) =>
+      `  - ${record.decision} by ${record.reviewer} head=${shortHeadForTool(record.head)} clean=${record.clean ?? "unset"}${formatGateCaveats(record)}\n    summary: ${formatGateSummary(record.summary)}`
+    ),
+  ];
+}
+
+function formatTestGateEvidence(records: PullRequestRecord["tests"], head: string | null): string[] {
+  const current = records.filter((record) => !head || record.head === head);
+  if (current.length === 0) return [`- tests: missing for current head ${shortHeadForTool(head)}`];
+  return [
+    "- tests:",
+    ...current.map((record) =>
+      `  - ${record.status} by ${record.tester} head=${shortHeadForTool(record.head)} clean=${record.clean ?? "unset"}${formatGateCaveats(record)}\n    summary: ${formatGateSummary(record.summary)}`
+    ),
+  ];
+}
+
+function formatAcceptanceGateEvidence(records: NonNullable<PullRequestRecord["acceptances"]>, head: string | null): string[] {
+  const current = records.filter((record) => !head || record.head === head);
+  if (current.length === 0) return [`- acceptances: missing for current head ${shortHeadForTool(head)}`];
+  return [
+    "- acceptances:",
+    ...current.map((record) =>
+      `  - ${record.decision} by ${record.accepter} head=${shortHeadForTool(record.head)} clean=${record.clean ?? "unset"}${formatGateCaveats(record)}\n    summary: ${formatGateSummary(record.summary)}`
+    ),
+  ];
+}
+
+function formatAutomatedGateEvidence(record: PullRequestRecord["automated_tests"], head: string | null): string {
+  if (!record) return `missing for current head ${shortHeadForTool(head)}`;
+  const stale = head && record.head !== head ? ` stale_at=${shortHeadForTool(record.head)} current=${shortHeadForTool(head)}` : "";
+  return `${record.status} head=${shortHeadForTool(record.head)} clean=${record.clean ?? "unset"}${stale}${formatGateCaveats(record)} command=${record.command ?? "none"} summary=${formatGateSummary(record.summary)}`;
+}
+
+function formatGateCaveats(record: GateEvidenceRecord): string {
+  const caveats = (record.caveats ?? []).filter((item) => item.trim().length > 0);
+  if (record.clean === false && caveats.length === 0) return " caveats=[clean=false]";
+  if (caveats.length === 0) return "";
+  return ` caveats=[${caveats.map((item) => formatGateSummary(item, 500)).join(" | ")}]`;
+}
+
+function formatGateSummary(value: string | null | undefined, max = 1200): string {
+  const text = (value ?? "").replace(/\s+/g, " ").trim();
+  if (!text) return "none";
+  return text.length > max ? `${text.slice(0, max - 1)}...` : text;
+}
+
+function shortHeadForTool(head?: string | null): string {
+  return head ? head.slice(0, 7) : "unknown";
 }
 
 async function configureModelPolicyInteractively(root: string, agentName: string, lead: string, ctx: ExtensionContext): Promise<string> {
@@ -1622,6 +1965,16 @@ function renderDeskPanel(state: ReturnType<typeof loadState>, agentName: string,
   return lines;
 }
 
+function renderPausedDeskPanel(state: ReturnType<typeof loadState>, agentName: string): string[] {
+  const agent = state.agents[agentName];
+  return [
+    `pi-company ${state.config?.id ?? "uninitialized"} | ${agentName} (${agent?.role ?? "unknown"})`,
+    "context: paused | ordinary Pi mode in this session",
+    "automation: inbox delivery, provider gates, tool guards, and company system prompt are paused",
+    "resume: run /company-resume to restore company context",
+  ];
+}
+
 function issuePanelRank(issue: { id: string; status: string }, activeIssueId?: string): number {
   if (issue.id === activeIssueId) return 3_000_000 + numericSuffix(issue.id);
   if (issue.status !== "done") return 2_000_000 + numericSuffix(issue.id);
@@ -1715,7 +2068,7 @@ function assignSpawnIssueIfNeeded(root: string, actor: string, agent: AgentRecor
   return loadState(root).issues[issue.id] ?? issue;
 }
 
-function assignAndLaunchIfNeeded(root: string, actor: string, owner: string, issueId: string): { command: string; cmux: string | null; briefing: MailboxMessage | null } | null {
+function assignAndLaunchIfNeeded(root: string, actor: string, owner: string, issueId: string): { command: string; cmux: string | null; cmux_reused: boolean; briefing: MailboxMessage | null } | null {
   assignIssue(root, actor, issueId, owner);
   const state = loadState(root);
   const agent = state.agents[owner];
@@ -1724,8 +2077,8 @@ function assignAndLaunchIfNeeded(root: string, actor: string, owner: string, iss
   const command = launchCommand(root, owner, currentExtensionPath);
   const delaySeconds = autoLaunchDelaySeconds(state, owner);
   const delayedCommand = delaySeconds > 0 ? `sleep ${delaySeconds}; ${command}` : command;
-  const cmux = launchInCmux(root, actor, owner, delayedCommand);
-  return { command, cmux, briefing };
+  const launch = launchInCmux(root, actor, owner, delayedCommand);
+  return { command, cmux: launch?.surface ?? null, cmux_reused: launch?.reused ?? false, briefing };
 }
 
 function autoLaunchDelaySeconds(state: CompanyState, owner: string): number {
@@ -1797,7 +2150,14 @@ function formatIssueBrief(issue: IssueRecord): string {
   return `- ${issue.id} ${issue.status}${issue.work_type ? ` ${issue.work_type}` : ""}: ${issue.title}`;
 }
 
-function launchInCmux(root: string, actor: string, agentName: string, command: string): string | null {
+function launchInCmux(root: string, actor: string, agentName: string, command: string): CmuxLaunchResult | null {
+  const state = loadState(root);
+  const existing = state.agents[agentName];
+  const liveSurface = findLiveCmuxSurfaceForAgent(root, state.config?.id ?? "not initialized", agentName, existing?.cmux_surface ?? null);
+  if (liveSurface) {
+    recordAgentLaunch(root, actor, agentName, liveSurface.ref);
+    return { surface: liveSurface.ref, reused: true };
+  }
   const pane = runCmux(["--json", "new-pane", "--type", "terminal", "--direction", "right", "--focus", "false"]);
   if (pane.status !== 0) return null;
   const surface = parseCmuxSurfaceRef(pane.stdout);
@@ -1805,7 +2165,134 @@ function launchInCmux(root: string, actor: string, agentName: string, command: s
   const send = runCmux(["send", "--surface", surface, `${command}\n`]);
   if (send.status !== 0) return null;
   recordAgentLaunch(root, actor, agentName, surface);
-  return surface;
+  return { surface, reused: false };
+}
+
+function currentCmuxSurfaceRef(root: string, agentName: string): string | null {
+  const identified = runCmux(["identify", "--json"]);
+  if (identified.status === 0 && identified.stdout.trim()) {
+    try {
+      const parsed = JSON.parse(identified.stdout) as Record<string, unknown>;
+      const caller = parsed.caller && typeof parsed.caller === "object" ? parsed.caller as Record<string, unknown> : null;
+      const surface = caller?.surface_ref;
+      if (typeof surface === "string" && surface.trim()) {
+        const liveSurface: LiveCmuxSurface = {
+          ref: surface.trim(),
+          title: null,
+          window_ref: typeof caller?.window_ref === "string" ? caller.window_ref : null,
+          workspace_ref: typeof caller?.workspace_ref === "string" ? caller.workspace_ref : null,
+          pane_ref: typeof caller?.pane_ref === "string" ? caller.pane_ref : null,
+        };
+        if (cmuxSurfaceLooksLikeCurrentAgent(liveSurface, root, agentName)) return liveSurface.ref;
+      }
+    } catch {
+      // Fall back to cmux environment variables below.
+    }
+  }
+  const envSurface = process.env.CMUX_SURFACE_ID?.trim();
+  if (!envSurface) return null;
+  const liveSurface: LiveCmuxSurface = { ref: envSurface, title: null };
+  return cmuxSurfaceLooksLikeCurrentAgent(liveSurface, root, agentName) ? envSurface : null;
+}
+
+function cmuxSurfaceLooksLikeCurrentAgent(surface: LiveCmuxSurface, root: string, agentName: string): boolean {
+  const args = ["read-screen", "--surface", surface.ref, "--scrollback", "--lines", "240"];
+  if (surface.workspace_ref) args.push("--workspace", surface.workspace_ref);
+  if (surface.window_ref) args.push("--window", surface.window_ref);
+  const read = runCmux(args);
+  if (read.status !== 0 || !read.stdout.trim()) return false;
+  const resolvedRoot = path.resolve(root);
+  const normalized = read.stdout.replace(/\s+/g, " ");
+  const compact = read.stdout.replace(/\s+/g, "");
+  const compactRoot = resolvedRoot.replace(/\s+/g, "");
+  const hasRoot = compact.includes(compactRoot) ||
+    normalized.includes(`PI_COMPANY_ROOT='${resolvedRoot}'`) ||
+    normalized.includes(`--company-root '${resolvedRoot}'`) ||
+    normalized.includes(`--company-root ${resolvedRoot}`);
+  const hasAgent = normalized.includes(`PI_COMPANY_AGENT='${agentName}'`) ||
+    normalized.includes(`--company-agent '${agentName}'`) ||
+    normalized.includes(`--company-agent ${agentName}`) ||
+    compact.includes(`|${agentName}(`);
+  return hasRoot && hasAgent;
+}
+
+function findLiveCmuxSurfaceForAgent(root: string, companyId: string, agentName: string, preferredRef: string | null): LiveCmuxSurface | null {
+  const surfaces = currentLiveCmuxSurfaces();
+  if (surfaces.length === 0) return null;
+  const title = `pi-company ${agentName}`;
+  const matches = surfaces.filter((surface) =>
+    (surface.ref === preferredRef && surface.title === title) ||
+    surface.title === title && cmuxSurfaceBelongsToCompany(surface, root, companyId, agentName)
+  );
+  if (matches.length === 0) return null;
+  if (preferredRef) {
+    const preferred = matches.find((surface) => surface.ref === preferredRef);
+    if (preferred) return preferred;
+  }
+  return matches.find((surface) => surface.active || surface.focused) ?? matches.at(-1) ?? null;
+}
+
+function cmuxSurfaceBelongsToCompany(surface: LiveCmuxSurface, root: string, companyId: string, agentName: string): boolean {
+  const args = ["read-screen", "--surface", surface.ref, "--scrollback", "--lines", "200"];
+  if (surface.workspace_ref) args.push("--workspace", surface.workspace_ref);
+  if (surface.window_ref) args.push("--window", surface.window_ref);
+  const read = runCmux(args);
+  if (read.status !== 0 || !read.stdout.trim()) return false;
+  const normalized = read.stdout.replace(/\s+/g, " ");
+  const compact = read.stdout.replace(/\s+/g, "");
+  const resolvedRoot = path.resolve(root);
+  const compactRoot = resolvedRoot.replace(/\s+/g, "");
+  const compactCompanyAgent = `pi-company${companyId}|${agentName}`;
+  return compact.includes(compactCompanyAgent) ||
+    compact.includes(compactRoot) ||
+    normalized.includes(`PI_COMPANY_ROOT='${resolvedRoot}'`) ||
+    normalized.includes(`--company-root '${resolvedRoot}'`) ||
+    normalized.includes(`--company-root ${resolvedRoot}`);
+}
+
+function currentLiveCmuxSurfaces(): LiveCmuxSurface[] {
+  const tree = runCmux(["tree", "--all", "--json"]);
+  if (tree.status !== 0 || !tree.stdout.trim()) return [];
+  try {
+    const parsed = JSON.parse(tree.stdout) as unknown;
+    const surfaces: LiveCmuxSurface[] = [];
+    collectLiveCmuxSurfaces(parsed, surfaces, {});
+    return surfaces;
+  } catch {
+    return [];
+  }
+}
+
+function collectLiveCmuxSurfaces(
+  value: unknown,
+  surfaces: LiveCmuxSurface[],
+  context: { window_ref?: string | null; workspace_ref?: string | null; pane_ref?: string | null },
+): void {
+  if (Array.isArray(value)) {
+    for (const item of value) collectLiveCmuxSurfaces(item, surfaces, context);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  const record = value as Record<string, unknown>;
+  const ref = record.ref;
+  const nextContext = { ...context };
+  if (typeof ref === "string") {
+    if (ref.startsWith("window:")) nextContext.window_ref = ref;
+    if (ref.startsWith("workspace:")) nextContext.workspace_ref = ref;
+    if (ref.startsWith("pane:")) nextContext.pane_ref = ref;
+  }
+  if (typeof ref === "string" && ref.startsWith("surface:")) {
+    surfaces.push({
+      ref,
+      title: typeof record.title === "string" ? record.title : null,
+      window_ref: nextContext.window_ref ?? null,
+      workspace_ref: nextContext.workspace_ref ?? null,
+      pane_ref: typeof record.pane_ref === "string" ? record.pane_ref : nextContext.pane_ref ?? null,
+      active: typeof record.active === "boolean" ? record.active : undefined,
+      focused: typeof record.focused === "boolean" ? record.focused : undefined,
+    });
+  }
+  for (const item of Object.values(record)) collectLiveCmuxSurfaces(item, surfaces, nextContext);
 }
 
 function runCmux(args: string[]): { status: number; stdout: string; stderr: string } {

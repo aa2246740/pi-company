@@ -75,6 +75,11 @@ pi
 
 如果你想把当前角色职责和 lead brief 手动推送到可见聊天里，可以在 Pi 里运行 `/company-start`。它现在是刷新命令，不是必需的恢复步骤。
 
+如果某个一次性 skill 或维护任务需要普通 Pi 行为，可以在当前 Pi session 里运行
+`/company-pause`。它只暂停这个窗口里的 company 工具拦截、inbox 投递、
+provider gate 和 company prompt 注入。运行 `/company-resume` 可恢复 company
+上下文。它是逃生口，不是日常绕过角色职责的工作流。
+
 安装 Pi package 不等于让每个 `pi` 都变成 company session。普通目录里没有 `.pi-company/` 时，Pi 仍然是普通 Pi：pi-company 不会创建文件、不会注册 company tools、不会镜像人类输入、不会拦 provider 请求，也不会显示 company 工作面板。
 
 然后你主要用自然语言对 lead 说需求，例如：
@@ -119,6 +124,17 @@ eval "$(pi-company launch-command lead)"
 `spawn` 可以创建新的具名 agent，也可以启动已有 roster 中的 planned agent。若只想拿到精确 shell 命令，可使用 `launch-command <agent>`。
 
 在已有 company 中再次运行 `init` 是幂等的。它会加载已有事件日志，不会重置 roster、issues、PRs 或 agent 状态。`init` 也会把 `.pi-company/` 加入 `.gitignore`，避免本地 company 状态和托管 worktrees 被 `git add .` 提交。
+
+## 角色文件边界
+
+pi-company 按文件影响面分边界，不按“是不是 write 工具”一刀切。非 coder
+角色可以写自己职责范围内的非 runnable Markdown/docs：PRD、产品规格、设计说明、
+测试报告、review 记录、研究报告、`AGENTS.md` / `CLAUDE.md` 这类 repo
+治理文档，以及 `docs/agents/**`。
+
+runnable 或会改变行为的文件仍然属于 coder worktree 和 PR gate：源码、
+HTML/CSS/JS、配置、package 文件、脚本、CI、测试实现、资产、生成的应用文件和
+其他实现产物。coder 也只能在自己的 worktree 里修改。
 
 开发者也可以从源码运行：
 
@@ -180,10 +196,28 @@ pi -e ./extensions/company.ts --company-root "$PWD" --company-agent lead --compa
 - UI：当前 agent 的状态行和 desk panel
 - input hook：把交互式 human steering 镜像到 lead
 - mailbox poller：读取本地消息
-- 命令：`/company-init`、`/company-start`（手动刷新 brief）、`/company-resume`（兼容别名）、`/company-status`、`/company-brief`、`/company-inbox`、`/company-ack`、`/company-send`、`/company-configure-models`
-- 工具：状态、lead/global brief、inbox、message、issues、task updates、spawn agent、本地 PR gates、review、test、acceptance、automated-test evidence、merge request、rate-limit report、model policy configuration
+- 命令：`/company-init`、`/company-start`（手动刷新 brief）、`/company-resume`、`/company-pause`、`/company-maintain`、`/company-status`、`/company-brief`、`/company-inbox`、`/company-ack`、`/company-send`、`/company-configure-models`
+- 工具：状态、lead/global brief、lifecycle maintenance、inbox、message、issues、task updates、spawn agent、本地 PR gates、review、test、acceptance、automated-test evidence、merge request、rate-limit report、model policy configuration
 
 `company_lead_brief` 是 lead 的权威全局交付视图。Lead 在告诉人类“完成”“可以合并”之前必须使用它。worker 的 “done”“merged”“tested” 之类散文报告不是交付真相。
+
+## 生命周期维护
+
+pi-company 把临时存活状态放在 `.pi-company/runtime/`，不再用周期性
+heartbeat 事件刷永久日志。lead 会运行轻量 watchdog：
+
+- 用 `cmux read-screen` 读取 live terminal 纯文本
+- 把有界恢复快照写到 `.pi-company/runtime/recovery/`
+- worker 离线或任务长时间无进展时通知 lead
+- 用 `cmux close-surface` hibernate 空闲 worker 窗口，但保留 worktree、
+  branch、issue 和 PR 记录
+
+默认策略最多保留 6 个 company-owned active surface；coder 空闲 5 分钟后
+可 hibernate，其他 worker 空闲 15 分钟后可 hibernate；空闲时保留一个 warm
+`pm`、`tester`、`reviewer`。默认不会自动重启关闭的 worker，lead 需要先阅读
+terminal-text excerpt，再决定重启同一个 owner 还是重新分配。
+
+Lead 也可以手动运行 `/company-maintain` 或 `company_maintain` tool。
 
 ## 消息背压与 provider 安全
 
