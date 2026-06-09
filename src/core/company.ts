@@ -2232,6 +2232,7 @@ export function launchCommand(root: string, agentName: string, extensionPathOver
     `PI_COMPANY_ROLE=${shellQuote(agent.role)}`,
     `PI_COMPANY_LEAD=${shellQuote(state.config?.lead ?? "lead")}`,
     "pi",
+    "--approve",
     ...modelArgs(modelConfig),
     "-e",
     shellQuote(extensionPath),

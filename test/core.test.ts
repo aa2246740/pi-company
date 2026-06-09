@@ -510,6 +510,7 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(command).toContain("PI_COMPANY_AGENT='tester'");
     expect(command).toContain("PI_COMPANY_ROLE='tester'");
     expect(command).toContain("PI_COMPANY_ROOT=");
+    expect(command).toContain("pi --approve");
     expect(command).toContain("--company-agent 'tester'");
   });
 

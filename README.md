@@ -105,6 +105,10 @@ pi-company spawn tester --cmux
 pi-company spawn coder --name coder-ui --yes --cmux
 ```
 
+`spawn` and `launch-command` start company-managed agents with Pi `--approve`
+so generated worktrees do not block on Pi's project trust prompt. Ordinary `pi`
+sessions outside a company project are unchanged.
+
 `--root <project>` is only for operating on a project while your shell is somewhere else:
 
 ```bash

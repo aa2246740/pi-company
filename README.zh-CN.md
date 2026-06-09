@@ -98,6 +98,10 @@ pi-company spawn tester --cmux
 pi-company spawn coder --name coder-ui --yes --cmux
 ```
 
+`spawn` 和 `launch-command` 会用 Pi `--approve` 启动 company 托管的 agent，
+避免生成的 worktree 卡在 Pi 的 project trust 弹窗。普通目录里的普通 `pi`
+会话不受影响。
+
 `--root <project>` 只是在你不在项目目录里操作时使用。例如：
 
 ```bash
