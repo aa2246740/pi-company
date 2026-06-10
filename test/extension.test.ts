@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import companyExtension from "../extensions/company.js";
@@ -18,6 +19,7 @@ import {
   registerAgent,
   reportRateLimit,
   requestAgentSpawn,
+  resolveGitHead,
   sendCompanyMessage,
   startTask,
   submitTest,
@@ -629,6 +631,60 @@ describe("pi-company extension", () => {
     expect(result.content[0].text).toContain("Gate evidence:");
     expect(result.content[0].text).toContain("WebSocket reconnect path was not exercised in this run.");
     expect(result.content[0].text).toContain("Runtime smoke passed, but websocket reconnect was not exercised.");
+  });
+
+  it("pins Pi tool review evidence to the declared head instead of the live branch tip", async () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "extension-review-head-pin" });
+    const coderPlan = requestAgentSpawn(root, "lead", "coder", "coder", "Implement the feature.");
+    registerAgent(root, { ...coderPlan, status: "online" });
+    const reviewerPlan = requestAgentSpawn(root, "lead", "reviewer", "reviewer-head-pin", "Review the feature.");
+    registerAgent(root, { ...reviewerPlan, status: "online" });
+
+    const branch = coderPlan.branch ?? "pi-company/coder";
+    runGit(root, ["checkout", "-b", branch]);
+    commitFile(root, "feature.txt", "first\n", "feature first");
+    const reviewedHead = resolveGitHead(root, branch);
+    runGit(root, ["checkout", "main"]);
+    const pr = createPr(root, "coder", {
+      title: "Head pin feature",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch,
+      worktree: coderPlan.worktree ?? root,
+      base: "main",
+    });
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate feature behavior.");
+
+    runGit(root, ["checkout", branch]);
+    commitFile(root, "feature.txt", "second\n", "feature second");
+    const liveHead = resolveGitHead(root, branch);
+    runGit(root, ["checkout", "main"]);
+    expect(liveHead).not.toBe(reviewedHead);
+
+    const { handlers, pi, tools } = fakePi({
+      "company-root": root,
+      "company-agent": "reviewer-head-pin",
+      "company-role": "reviewer",
+    });
+    const { ctx } = fakeContext(root);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const reviewTool = tools.find((tool) => tool.name === "company_submit_review");
+    if (!reviewTool) throw new Error("company_submit_review tool was not registered");
+    await reviewTool.execute("tool-1", {
+      pr_id: pr.id,
+      decision: "approve",
+      summary: "Approved the inspected commit.",
+      head: reviewedHead,
+    }, undefined, undefined, ctx);
+    await handlers.session_shutdown?.({}, ctx);
+
+    const review = loadState(root).prs[pr.id].reviews.at(-1);
+    expect(review?.head).toBe(reviewedHead);
+    expect(review?.head).not.toBe(liveHead);
   });
 
   it("lets lead abandon a superseded PR through the Pi tool", async () => {
@@ -1670,6 +1726,28 @@ function withWorkingDirectory<T>(cwd: string, fn: () => T): T {
     return fn();
   } finally {
     process.chdir(previous);
+  }
+}
+
+function initGitRepo(root: string): void {
+  runGit(root, ["init", "-b", "main"]);
+  runGit(root, ["config", "user.email", "pi-company-test@example.local"]);
+  runGit(root, ["config", "user.name", "Pi Company Test"]);
+  commitFile(root, "README.md", "# Test\n", "initial commit");
+}
+
+function commitFile(root: string, relativePath: string, content: string, message: string): void {
+  const target = path.join(root, relativePath);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, content, "utf8");
+  runGit(root, ["add", relativePath]);
+  runGit(root, ["commit", "-m", message]);
+}
+
+function runGit(root: string, args: string[]): void {
+  const result = spawnSync("git", ["-C", root, ...args], { encoding: "utf8" });
+  if (result.status !== 0) {
+    throw new Error(`git ${args.join(" ")} failed: ${result.stderr || result.stdout}`);
   }
 }
 

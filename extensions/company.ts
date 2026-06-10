@@ -1546,9 +1546,10 @@ function registerTools(pi: ExtensionAPI, runtime: {
       summary: Type.String(),
       clean: Type.Optional(Type.Boolean({ description: "Explicitly mark green review evidence clean. Clean evidence must not include caveats." })),
       caveats: Type.Optional(Type.Array(Type.String({ description: "Structured caveat that blocks a green approval until resolved." }))),
+      head: Type.Optional(Type.String({ description: "Commit actually reviewed; pins this evidence to that head." })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      submitReview(root, agentName, params.pr_id, params.decision, params.summary, gateEvidenceParams(params));
+      submitReview(root, agentName, params.pr_id, params.decision, params.summary, gateEvidenceParams(params), params.head ?? null);
       await refreshUi(ctx);
       return toolResult(`${agentName} submitted ${params.decision} for ${params.pr_id}`, { pr: loadState(root).prs[params.pr_id] });
     },
@@ -1570,9 +1571,10 @@ function registerTools(pi: ExtensionAPI, runtime: {
       summary: Type.String(),
       clean: Type.Optional(Type.Boolean({ description: "Explicitly mark green tester evidence clean. Clean evidence must not include caveats." })),
       caveats: Type.Optional(Type.Array(Type.String({ description: "Structured caveat that blocks a green tester pass until resolved." }))),
+      head: Type.Optional(Type.String({ description: "Commit actually tested; pins this evidence to that head." })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      submitTest(root, agentName, params.pr_id, params.status, params.summary, gateEvidenceParams(params));
+      submitTest(root, agentName, params.pr_id, params.status, params.summary, gateEvidenceParams(params), params.head ?? null);
       await refreshUi(ctx);
       return toolResult(`${agentName} submitted test ${params.status} for ${params.pr_id}`, { pr: loadState(root).prs[params.pr_id] });
     },
@@ -1595,9 +1597,10 @@ function registerTools(pi: ExtensionAPI, runtime: {
       summary: Type.String(),
       clean: Type.Optional(Type.Boolean({ description: "Explicitly mark green acceptance evidence clean. Clean evidence must not include caveats." })),
       caveats: Type.Optional(Type.Array(Type.String({ description: "Structured caveat that blocks green product acceptance until resolved." }))),
+      head: Type.Optional(Type.String({ description: "Commit actually accepted; pins this evidence to that head." })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      submitAcceptance(root, agentName, params.pr_id, params.decision, params.summary, gateEvidenceParams(params));
+      submitAcceptance(root, agentName, params.pr_id, params.decision, params.summary, gateEvidenceParams(params), params.head ?? null);
       await refreshUi(ctx);
       return toolResult(`${agentName} submitted product acceptance ${params.decision} for ${params.pr_id}`, { pr: loadState(root).prs[params.pr_id] });
     },
@@ -1620,9 +1623,10 @@ function registerTools(pi: ExtensionAPI, runtime: {
       command: Type.Optional(Type.String()),
       clean: Type.Optional(Type.Boolean({ description: "Explicitly mark green automated-test evidence clean. Clean evidence must not include caveats." })),
       caveats: Type.Optional(Type.Array(Type.String({ description: "Structured caveat that blocks green automated-test evidence until resolved." }))),
+      head: Type.Optional(Type.String({ description: "Commit automated tests ran against; pins this evidence to that head." })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      recordAutomatedTests(root, agentName, params.pr_id, params.status, params.summary, params.command ?? null, gateEvidenceParams(params));
+      recordAutomatedTests(root, agentName, params.pr_id, params.status, params.summary, params.command ?? null, gateEvidenceParams(params), params.head ?? null);
       await refreshUi(ctx);
       return toolResult(`Automated tests ${params.status} for ${params.pr_id}`, { pr: loadState(root).prs[params.pr_id] });
     },
@@ -1645,9 +1649,10 @@ function registerTools(pi: ExtensionAPI, runtime: {
       command: Type.Optional(Type.String()),
       clean: Type.Optional(Type.Boolean({ description: "Explicitly mark green automated-test evidence clean. Clean evidence must not include caveats." })),
       caveats: Type.Optional(Type.Array(Type.String({ description: "Structured caveat that blocks green automated-test evidence until resolved." }))),
+      head: Type.Optional(Type.String({ description: "Commit automated tests ran against; pins this evidence to that head." })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      recordAutomatedTests(root, agentName, params.pr_id, params.status, params.summary, params.command ?? null, gateEvidenceParams(params));
+      recordAutomatedTests(root, agentName, params.pr_id, params.status, params.summary, params.command ?? null, gateEvidenceParams(params), params.head ?? null);
       await refreshUi(ctx);
       return toolResult(`Automated tests ${params.status} for ${params.pr_id}`, { pr: loadState(root).prs[params.pr_id] });
     },
