@@ -193,7 +193,7 @@ describe('Tutorial Components', () => {
   describe('Provider429Tutorial', () => {
     it('should render title', () => {
       const wrapper = mountWithRouter(Provider429Tutorial)
-      expect(wrapper.find('h2').text()).toContain('Provider 429')
+      expect(wrapper.find('h2').text()).toContain('Provider 过载')
     })
 
     it('should have send button', () => {

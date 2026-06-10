@@ -2,66 +2,27 @@
 
 [English](README.md) | [中文](README.zh-CN.md)
 
-`pi-company` is a Pi-native runtime for running a local agent company inside one project.
+> Run Pi agents like a visible local project team.
 
-It is built for visible, steerable Pi agents. cmux can launch panes automatically, but cmux is optional.
+`pi-company` connects the Pi sessions you already open into one local workflow: lead keeps the global brief, workers coordinate through mailboxes, coders edit in isolated git worktrees, and local PRs cannot merge until review, test, and product acceptance gates pass.
 
 - Source: https://github.com/aa2246740/pi-company
 - Website: https://aa2246740.github.io/pi-company/
 
-## What Is It?
+## Why Install It?
 
-`pi-company` is not a Node backend service or a daemon you keep running.
+If you are already opening several Pi windows for one project, `pi-company` adds the missing operating layer:
 
-It has two pieces:
+- **Visible agents, not hidden subagents.** Every worker is still a normal Pi session you can watch, interrupt, and steer.
+- **One shared project truth.** Lead reads local issues, PRs, gates, inboxes, runtime state, and recovery snapshots before claiming work is done.
+- **Parallel code without branch chaos.** Coder agents work in separate git worktrees and must submit local PRs.
+- **Quality gates before merge.** Review, tester validation, automated checks, and PM/lead product acceptance are tracked as structured evidence.
+- **Human steering stays global.** When you type into any company Pi session, the guidance is mirrored to lead so the team does not drift.
+- **Provider pressure is managed.** Requests are queued and staggered per provider to reduce overload failures and noisy recovery storms.
 
-- **Pi extension/package**: loaded into Pi agent sessions to add the desk panel, mailbox polling, tools, slash commands, and human-steering mirror.
-- **Helper CLI**: used to initialize a project, print launch commands, plan/start agents, inspect status, and handle occasional operations.
+The point is simple: keep the speed of multiple agents without giving up the control of a human-readable project process.
 
-Node is only the runtime for the CLI and extension code. In daily use, you enter a project directory and launch Pi with the pi-company extension.
-
-## Current Scope
-
-- Pi required
-- Local single-machine
-- One project per company
-- Project-local `.pi-company/` state
-- Event log + reducer + mailboxes
-- Local issues and PR gates
-- Separate coder worktrees for parallel code edits
-- Human steering mirrored to lead from every interactive Pi session
-- Organization-level rate-limit backoff and staggered recovery
-- Optional cmux spawn adapter
-
-## Workflow
-
-```text
-human -> lead -> local issues -> coder worktrees -> local PR
-      -> reviewer + tester -> PM/lead acceptance -> gates -> lead merge
-```
-
-Every Pi gets its own desk panel inside Pi. Agents coordinate through local tools and mailbox messages. cmux is only a launcher/surface manager.
-
-Lead is the human's local proxy, not a passive dispatcher. PM can define product
-scope and acceptance criteria, but when PM needs a routine low-risk default,
-lead should make the decision and keep the company moving. Lead should only ask
-the human for decisions that are irreversible, expensive, legal/security
-sensitive, external-contract dependent, brand-risky, or mission-changing.
-Lead should not absorb role-owned execution work. If the human names a required
-skill, tool, or method, lead preserves that requirement in the assignment to the
-responsible agent instead of doing that work in the lead context.
-
-## Development
-
-```bash
-npm install
-npm run check
-npm run build
-```
-
-## Daily Use
-
-If you are used to starting Pi first, install pi-company as a Pi package:
+## 60-Second Start
 
 ```bash
 npm install -g pi-company
@@ -70,7 +31,66 @@ cd ~/Documents/cmux/tarot-draw
 pi
 ```
 
-Inside Pi, run:
+Inside Pi:
+
+```text
+/company-init
+```
+
+Then talk to lead:
+
+```text
+Build the tarot draw site. Decide which roles are needed, create issues, and keep the project gated until it is tested and accepted.
+```
+
+After a project has `.pi-company/`, ordinary `pi` starts from that directory attach to the existing company automatically. Ordinary directories stay ordinary Pi.
+
+## What It Looks Like
+
+```text
+human -> lead -> local issues -> coder worktrees -> local PR
+      -> reviewer + tester -> PM/lead acceptance -> gates -> lead merge
+```
+
+Every company agent gets a desk panel inside Pi. Agents coordinate through local tools and mailbox messages. cmux can open panes automatically, but it is optional. Without cmux, you can paste launch commands into ordinary terminal windows.
+
+## What You Get
+
+| Capability | What it means in practice |
+| --- | --- |
+| Lead brief | A single local delivery truth before anyone says "done". |
+| Human steering mirror | Guidance typed into any company Pi session reaches lead. |
+| Local issues | Lead breaks work into owned tasks instead of vague chat promises. |
+| Coder worktrees | Parallel implementation without agents editing the same checkout. |
+| Local PR gates | Coder ready, automated tests, reviewer approval, tester pass, PM/lead acceptance. |
+| Recovery snapshots | If a worker pane disappears, lead sees bounded terminal text instead of waiting silently. |
+| Provider queue | Same-provider requests are limited and staggered before overload errors pile up. |
+| Role model policy | Different roles or named agents can launch with different configured Pi models. |
+
+## What It Is
+
+`pi-company` has two pieces:
+
+- **Pi extension/package**: loaded into Pi sessions to add the desk panel, mailbox polling, tools, slash commands, and human-steering mirror.
+- **Helper CLI**: used to initialize a project, print launch commands, spawn agents, inspect status, and handle occasional operations.
+
+Node is only the runtime for the CLI and extension code. You do not run a Node daemon in daily use. You enter a project directory and launch Pi with the pi-company extension.
+
+## What It Is Not
+
+- Not a cloud service.
+- Not a headless orchestrator that hides work from you.
+- Not a replacement for Pi.
+- Not a cmux-only tool. cmux improves pane management, but the runtime works with normal terminals.
+- Not a license to skip review. The whole point is to make multi-agent work auditable.
+
+## Daily Use
+
+```bash
+pi
+```
+
+Inside Pi:
 
 ```text
 /company-init
@@ -133,6 +153,33 @@ Running `init` again in an existing company is idempotent. It loads the existing
 event log instead of resetting roster, issues, PRs, or agent status.
 `init` also keeps `.pi-company/` in `.gitignore` so local company state and
 managed worktrees do not get committed by `git add .`.
+
+## Lead Is the Human Proxy
+
+Lead is not a passive dispatcher. Lead should make routine low-risk decisions, preserve the human's requirements, and keep the project moving. Lead should only ask the human for decisions that are irreversible, expensive, legal/security sensitive, external-contract dependent, brand-risky, or mission-changing.
+
+Lead should not absorb role-owned execution work. If the human names a required skill, tool, or method, lead preserves that requirement in the assignment to the responsible agent instead of doing that work in the lead context.
+
+## Current Scope
+
+- Pi required
+- Local single-machine runtime
+- One project per company
+- Project-local `.pi-company/` state
+- Event log + reducer + mailboxes
+- Local issues and PR gates
+- Separate coder worktrees for parallel code edits
+- Human steering mirrored to lead from every interactive Pi session
+- Organization-level rate-limit backoff and staggered recovery
+- Optional cmux spawn adapter
+
+## Development
+
+```bash
+npm install
+npm run check
+npm run build
+```
 
 ## Role File Boundaries
 

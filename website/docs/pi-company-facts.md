@@ -5,9 +5,12 @@ that are not listed here.
 
 ## Product Summary
 
-`pi-company` is a Pi-native runtime for running a local agent company inside one
-project. It is built for visible, steerable Pi agents. cmux can launch panes
-automatically, but cmux is optional.
+`pi-company` lets Pi users run visible Pi agents like a local project team. It
+connects ordinary Pi panes into one project-local workflow: lead keeps the
+global brief, workers coordinate through mailboxes, coders edit in isolated git
+worktrees, and local PRs cannot merge until review, test, and product
+acceptance gates pass. cmux can launch panes automatically, but cmux is
+optional.
 
 ## Scope
 
@@ -20,7 +23,7 @@ automatically, but cmux is optional.
 - separate coder worktrees for parallel code edits
 - human steering mirrored to lead from every interactive Pi session
 - organization-level rate-limit backoff and staggered recovery
-- provider request gate to reduce 429s
+- provider request gate to reduce provider overload failures
 - optional cmux spawn adapter
 
 ## Core Workflow
@@ -103,10 +106,10 @@ Commands:
 - `task`: record task progress
 - `pr`: manage local PRs
 - `message`: send a mailbox message
-- `rate-limit`: report provider 429/quota pressure
+- `rate-limit`: report provider overload/quota pressure
 - `rate-limit-clear`: clear a verified false-positive or recovered backoff
 - `cmux-status`: set cmux sidebar status
-- `cmux-rate-limit-scan`: scan visible cmux pi-company surfaces for 429s
+- `cmux-rate-limit-scan`: scan visible cmux pi-company surfaces for provider overload signals
 
 ## Try Locally
 
@@ -243,7 +246,7 @@ Default provider policy:
 - starts for the same provider spaced by five seconds
 - unknown provider names are grouped under `unknown-provider`
 
-When provider 429 or quota pressure is observed:
+When provider overload or quota pressure is observed:
 
 ```bash
 pi-company rate-limit --actor tester --reason "Retry failed after 3 attempts: 429 Too many requests"
@@ -255,7 +258,7 @@ cmux scan:
 pi-company cmux-rate-limit-scan --workspace workspace:16
 ```
 
-The first provider 429 pauses automatic wakes for 60 seconds. A second report
+The first provider overload report pauses automatic wakes for 60 seconds. A second report
 while active backs off to 120 seconds, up to 10 minutes. Quota exhaustion uses
 at least 10 minutes. Lead resumes first; other agents resume in staggered
 intervals.

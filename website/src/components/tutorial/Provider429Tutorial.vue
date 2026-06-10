@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
- * Provider429Tutorial — 教程 13: Provider 429 与退避
- * 队列模拟器 + 429 事件触发冷却
+ * Provider429Tutorial — 教程 13: Provider 过载与恢复
+ * 队列模拟器 + provider overload 事件触发冷却
  */
 import { ref, computed } from 'vue'
 import TerminalPane from '@/components/terminal/TerminalPane.vue'
@@ -12,7 +12,7 @@ const cooldownActive = ref(false)
 const cooldownSeconds = ref(0)
 const backoffLevel = ref(0)
 
-const requests = ref<Array<{ id: number; status: 'pending' | 'success' | '429' }>>([])
+const requests = ref<Array<{ id: number; status: 'pending' | 'success' | 'overload' }>>([])
 
 function addRequest() {
   if (concurrentRequests.value >= maxConcurrent) return
@@ -24,7 +24,7 @@ function addRequest() {
     const req = requests.value.find(r => r.id === id)
     if (req) {
       if (Math.random() > 0.7 && backoffLevel.value > 0) {
-        req.status = '429'
+        req.status = 'overload'
         triggerCooldown()
       } else {
         req.status = 'success'
@@ -62,8 +62,8 @@ const canSend = computed(() => concurrentRequests.value < maxConcurrent && !cool
 
 <template>
   <div class="tut-429">
-    <h2>13. Provider 429 与退避</h2>
-    <p>模拟 provider 请求队列。最多 3 个并发请求，429 触发退避冷却。</p>
+    <h2>13. Provider 过载与恢复</h2>
+    <p>模拟 provider 请求队列。最多 3 个并发请求；过载会触发退避冷却。</p>
 
     <div class="queue-status">
       <TerminalPane title="provider-queue" :show-dots="true">
@@ -95,21 +95,21 @@ const canSend = computed(() => concurrentRequests.value < maxConcurrent && !cool
         :class="{
           'req-item--pending': req.status === 'pending',
           'req-item--success': req.status === 'success',
-          'req-item--429': req.status === '429',
+          'req-item--overload': req.status === 'overload',
         }"
       >
         <span class="req-id">#{{ req.id }}</span>
         <span class="req-status">
           <span v-if="req.status === 'pending'" class="text-cyan blink">⏳</span>
           <span v-else-if="req.status === 'success'" class="text-green">✓</span>
-          <span v-else class="text-red">429</span>
+          <span v-else class="text-red">overload</span>
         </span>
       </div>
     </div>
 
     <div class="backoff-info">
       <TerminalPane title="backoff-policy" :show-dots="true">
-        <div class="policy-line"><span class="text-cyan">首次 429：</span> 60 秒退避</div>
+        <div class="policy-line"><span class="text-cyan">首次过载：</span> 60 秒退避</div>
         <div class="policy-line"><span class="text-cyan">第二次：</span> 120 秒退避</div>
         <div class="policy-line"><span class="text-cyan">最大退避：</span> 10 分钟</div>
         <div class="policy-line"><span class="text-cyan">恢复顺序：</span> Lead 先恢复，worker 交错</div>
@@ -183,7 +183,7 @@ const canSend = computed(() => concurrentRequests.value < maxConcurrent && !cool
   border-color: rgba(0, 255, 65, 0.3);
   background: rgba(0, 255, 65, 0.05);
 }
-.req-item--429 {
+.req-item--overload {
   border-color: rgba(255, 51, 51, 0.3);
   background: rgba(255, 51, 51, 0.05);
 }

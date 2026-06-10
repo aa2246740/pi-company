@@ -60,7 +60,7 @@ export const sidebarNav: Record<string, NavItem[]> = {
     { id: 'tut-review',     label: '10. 审查测试验收',      path: '/tutorials#review-test' },
     { id: 'tut-truth',      label: '11. Lead 真相',         path: '/tutorials#lead-truth' },
     { id: 'tut-gates',      label: '12. 合并门控',          path: '/tutorials#merge-gates' },
-    { id: 'tut-429',        label: '13. Provider 429',      path: '/tutorials#provider-429' },
+    { id: 'tut-overload',   label: '13. Provider 过载',     path: '/tutorials#provider-429' },
     { id: 'tut-trouble',    label: '14. 故障排查',          path: '/tutorials#troubleshooting' },
     { id: 'tut-e2e',        label: '端到端演练',            path: '/tutorials#e2e-walkthrough' },
   ],

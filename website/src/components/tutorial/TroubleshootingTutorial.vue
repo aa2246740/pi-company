@@ -69,7 +69,7 @@ function selectItem(index: number) {
         />
         <CodeBlock
           v-if="selectedIndex === 5"
-          code='pi-company rate-limit --actor tester --reason "429 Too many requests"'
+          code='pi-company rate-limit --actor tester --reason "provider overload"'
           prompt="$ "
         />
       </div>

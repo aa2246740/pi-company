@@ -19,7 +19,78 @@ const zhToEn: Record<string, string> = {
   '关于': 'About',
   'Pi 原生的本地多智能体协作运行时': 'Pi-native local multi-agent collaboration runtime',
   '让可见、可控的 Pi 智能体在一个项目中协同工作': 'Coordinate visible, steerable Pi agents inside one project.',
+  'Pi 原生协作层': 'Pi-native coordination layer',
+  '让多个 Pi 像一个可见的本地项目团队一样工作。': 'Run Pi agents like a visible local project team.',
+  '把普通 Pi 窗口接成本地协作流程：lead 管全局真相，worker 用 mailbox 协作，coder 在独立 worktree 里并行改代码，合并必须经过 review、test 和产品验收。': 'Connect ordinary Pi panes into a local workflow: lead owns the global truth, workers coordinate through mailboxes, coders edit in isolated worktrees, and merges require review, test, and product acceptance.',
   '快速开始': 'Quick Start',
+  '查看 GitHub': 'View GitHub',
+  '看得见': 'Visible',
+  '每个 agent 都是可见 Pi session。你可以看它做什么，必要时随时打断。': 'Every agent is a visible Pi session. You can watch it work and interrupt when needed.',
+  '接得住': 'Steerable',
+  '任何窗口里的人类 steering 都会同步到 lead，团队不会只听见局部指令。': 'Human steering from any pane is mirrored to lead, so the team does not only hear local instructions.',
+  '合得稳': 'Gated',
+  '代码走本地 PR、隔离 worktree、review、tester 验证和 PM/lead 验收。': 'Code flows through local PRs, isolated worktrees, review, tester validation, and PM/lead acceptance.',
+  '为什么存在': 'Why it exists',
+  '多开 Pi 很快，但项目会失去共享真相。': 'Multiple Pi panes are fast, but projects lose shared truth.',
+  'pi-company 不是再造一个聊天机器人。它给可见 Pi agents 加上本地协作纪律：谁负责、做到哪一步、证据在哪里、什么时候能合并。': 'pi-company is not another chatbot. It adds local collaboration discipline to visible Pi agents: who owns the work, what is done, where the evidence is, and when a merge is allowed.',
+  '多个 Pi 窗口各自理解上下文。': 'Several Pi panes each understand their own context.',
+  'Lead 用本地 brief 保持一个交付真相。': 'Lead keeps one delivery truth with a local brief.',
+  'Agent 说 done，但你不知道证据在哪里。': 'An agent says done, but the evidence is unclear.',
+  'PR gate 记录自测、review、tester 和产品验收。': 'PR gates record self-test, review, tester validation, and product acceptance.',
+  '并行改代码容易互相覆盖。': 'Parallel code edits can overwrite each other.',
+  'Coder 在隔离 git worktree 里工作，再走本地 PR。': 'Coders work in isolated git worktrees, then submit local PRs.',
+  '工作方式': 'How it works',
+  '从一句需求，到一条可审计的本地 PR。': 'From one request to an auditable local PR.',
+  '人类把目标交给 lead': 'Human gives the goal to lead',
+  'Lead 创建本地 issue 并分配角色': 'Lead creates local issues and assigns roles',
+  'Coder 在独立 worktree 里实现': 'Coder implements in an isolated worktree',
+  'Reviewer 和 tester 分别提交证据': 'Reviewer and tester submit evidence',
+  'PM 或 lead 做产品验收': 'PM or lead performs product acceptance',
+  'Gates 全绿后 lead 合并': 'Lead merges after all gates are green',
+  '可见接管': 'Visible takeover',
+  '不是把 agent 藏进后台，而是让每个窗口都能被你 steering。': 'Agents are not hidden in the background. Every pane can still be steered by you.',
+  '你可以直接对 worker 说话，也可以让 lead 分发。pi-company 会把人类 steering 镜像给 lead，让局部修正进入全局协调。': 'You can talk directly to a worker or route through lead. pi-company mirrors human steering to lead so local corrections enter global coordination.',
+  '可信边界': 'Trust boundaries',
+  '角色不是人设，是上下文隔离。': 'Roles are not personas. They are context boundaries.',
+  '分角色的目的不是模拟公司层级，而是控制上下文污染：实现、测试、产品验收和最终合并各自留下证据。': 'Roles do not simulate a corporate hierarchy. They limit context pollution: implementation, testing, product acceptance, and final merge each leave evidence.',
+  '本地安全感': 'Local safety',
+  '装上之后，普通 Pi 还是普通 Pi。': 'After installation, ordinary Pi stays ordinary Pi.',
+  '只有项目里存在 .pi-company 状态时，pi-company 才会接入。没有 company 的目录不会被接管，不会创建状态，也不会注册 company tools。': 'pi-company only attaches when a project already has .pi-company state. Directories without a company are not taken over, do not create state, and do not register company tools.',
+  '本地优先': 'Local-first',
+  '状态写在项目的 .pi-company 目录里：事件日志、mailbox、issues、PRs 和 runtime 快照。': 'State lives in the project .pi-company directory: event log, mailboxes, issues, PRs, and runtime snapshots.',
+  '人类在环': 'Human in the loop',
+  '你对任意 Pi session 的 steering 会镜像给 lead。你仍然能接管任何可见窗口。': 'Steering from any Pi session is mirrored to lead. You can still take over any visible pane.',
+  '默认防乱': 'Disorder-resistant by default',
+  '请求按 provider 限流错峰；worker 消失时写恢复快照；合并前检查 root worktree。': 'Requests are limited and staggered by provider; disappearing workers leave recovery snapshots; root worktree state is checked before merge.',
+  '保护项目方向、吞吐量和集成质量。Lead 是人类的本地代理，应做出常规默认决策。': 'Protect project direction, throughput, and integration quality. Lead is the human local proxy and should make routine default decisions.',
+  '不应吸收角色拥有的执行工作': 'Do not absorb execution work owned by other roles',
+  '只在不可逆、昂贵、法律/安全敏感、外部合同、品牌风险或使命变更时询问人类': 'Ask the human only for irreversible, expensive, legal/security-sensitive, external-contract, brand-risk, or mission-changing decisions',
+  '必须使用全局真相（company_lead_brief）而非信任 worker 散文': 'Use global truth (company_lead_brief), not worker prose',
+  '信任 worker 说的 "done" 而不验证': 'Trusting a worker saying "done" without verification',
+  '自己做 coder/reviewer 的工作': 'Doing coder or reviewer work inside lead context',
+  '不在 merge 前检查 brief': 'Skipping the brief before merge',
+  '保护用户价值、范围和验收标准。PM 可以拥有产品验收。': 'Protect user value, scope, and acceptance criteria. PM can own product acceptance.',
+  '不应接受未观察到的关键用户流': 'Do not accept critical user flows that were not observed',
+  '不应接受缺少重要证据的情况': 'Do not accept when important evidence is missing',
+  '在关键功能未验证时就接受': 'Accepting before key behavior is verified',
+  '验收标准不够具体': 'Acceptance criteria are too vague',
+  '拥有跨职能未知和外部事实。其他角色可以在自己任务中研究，但 researcher 处理跨角色研究。': 'Own cross-functional unknowns and external facts. Other roles can research inside their own task, but researcher handles cross-role research.',
+  '不应替代角色自己的领域研究': 'Do not replace each role own domain research',
+  '研究范围过大导致延迟': 'Research scope expands until it delays delivery',
+  '拥有分配任务的实现质量。代码变更工作在本地 PR 流程完成前不算完成。': 'Own implementation quality for assigned tasks. Code work is not done until the local PR flow is complete.',
+  '代码变更必须走 PR 流程': 'Code changes must go through the PR flow',
+  '不能用任务报告替代 PR 流程': 'Do not replace PR flow with task reports',
+  '用散文 "done" 替代 PR 流程': 'Replacing PR flow with prose "done"',
+  '不运行测试就标记 ready': 'Marking ready without running tests',
+  '脏工作树阻塞证据': 'Dirty worktrees blocking evidence',
+  '保护代码质量、正确性、可维护性、安全性、集成风险和测试质量。': 'Protect code quality, correctness, maintainability, security, integration risk, and test quality.',
+  '不能把失败命令当作绿色来批准': 'Do not approve failed commands as green evidence',
+  '不仔细审查就批准': 'Approving without careful review',
+  '忽略测试质量问题': 'Ignoring test quality problems',
+  '保护用户行为。验证验收标准、真实工作流、边界情况和回归。': 'Protect user behavior. Validate acceptance criteria, real workflows, edge cases, and regressions.',
+  '不能在有隐藏问题时提交 pass': 'Do not submit pass while hiding issues',
+  '提交 pass 时隐藏问题': 'Submitting pass while hiding issues',
+  '只做静态阅读不验证真实行为': 'Only reading statically instead of validating real behavior',
   '实时状态面板': 'Live Status Panel',
   '每个 agent 都有可见的状态面板，一目了然': 'Each agent has a visible status panel that is easy to scan.',
   '系统架构': 'System Architecture',
@@ -138,14 +209,29 @@ const zhToEn: Record<string, string> = {
   'Lead 可以为不同角色或 agent 配置不同的 AI 模型。': 'Lead can configure different AI models for different roles or named agents.',
   '配置目标': 'Configuration Targets',
   '速率限制与恢复': 'Rate Limits and Recovery',
-  'pi-company 有内置的 provider 请求门控来减少 429 错误。': 'pi-company includes provider request gates to reduce provider overload errors.',
+  'pi-company 有内置的 provider 请求门控来减少过载失败。': 'pi-company includes provider request gates to reduce provider overload failures.',
   '最大并发': 'Max Concurrent',
   '启动间隔': 'Start Spacing',
   '首次退避': 'First Backoff',
   '最大退避': 'Max Backoff',
   '请求/provider': 'requests/provider',
   '同 provider': 'same provider',
-  '429 后': 'after provider overload',
+  '过载后': 'after provider overload',
+  'Provider 请求门控减少过载失败': 'Provider request gates reduce overload failures',
+  '报告 provider 过载/配额压力': 'report provider overload/quota pressure',
+  '扫描可见 cmux pi-company 表面的 provider 过载提示': 'scan visible cmux pi-company surfaces for provider overload signals',
+  '反复 provider overload 或 quota exhausted': 'repeated provider overload or quota exhausted',
+  'Provider 过载': 'Provider Overload',
+  '13. Provider 过载': '13. Provider Overload',
+  '13. Provider 过载与恢复': '13. Provider Overload and Recovery',
+  '模拟 provider 请求队列。最多 3 个并发请求；过载会触发退避冷却。': 'Simulate the provider request queue. At most three concurrent requests; overload triggers backoff cooldown.',
+  '并发请求：': 'Concurrent requests:',
+  '退避级别：': 'Backoff level:',
+  '冷却中：': 'Cooling down:',
+  '队列可用': 'queue available',
+  '发送请求': 'Send request',
+  '重置': 'Reset',
+  '首次过载：': 'First overload:',
   '上限': 'cap',
   '恢复顺序': 'Recovery Order',
   'cmux 集成': 'cmux Integration',
@@ -227,17 +313,13 @@ export function installRuntimeI18n() {
   if (typeof window === 'undefined') return
   observer?.disconnect()
   applyLocale()
+  queueApplyLocale()
 
   observer = new MutationObserver(() => {
-    if (pending) return
-    pending = true
-    window.requestAnimationFrame(() => {
-      pending = false
-      applyLocale()
-    })
+    queueApplyLocale()
   })
 
-  observer.observe(document.body, { attributes: true, childList: true, subtree: true })
+  observer.observe(document.body, { attributes: true, characterData: true, childList: true, subtree: true })
 
   watch(locale, () => {
     nextTick(() => applyLocale())
@@ -255,6 +337,17 @@ function applyLocale() {
   translateAttributes(document.body)
 }
 
+function queueApplyLocale() {
+  if (pending) return
+  pending = true
+  window.requestAnimationFrame(() => {
+    pending = false
+    applyLocale()
+  })
+  window.setTimeout(() => applyLocale(), 0)
+  window.setTimeout(() => applyLocale(), 100)
+}
+
 function translateTextNodes(root: HTMLElement) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
   const nodes: Text[] = []
@@ -266,7 +359,8 @@ function translateTextNodes(root: HTMLElement) {
 
     const original = textOriginals.get(node) ?? node.nodeValue ?? ''
     textOriginals.set(node, original)
-    node.nodeValue = locale.value === 'en' ? translate(original) : original
+    const nextValue = locale.value === 'en' ? translate(original) : original
+    if (node.nodeValue !== nextValue) node.nodeValue = nextValue
   }
 }
 
@@ -287,7 +381,8 @@ function translateAttribute(element: HTMLElement, attribute: string) {
   const dataset = element.dataset as Record<string, string | undefined>
   const original = dataset[key] ?? value
   dataset[key] = original
-  element.setAttribute(attribute, locale.value === 'en' ? translate(original) : original)
+  const nextValue = locale.value === 'en' ? translate(original) : original
+  if (value !== nextValue) element.setAttribute(attribute, nextValue)
 }
 
 function translate(input: string): string {

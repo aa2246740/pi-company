@@ -86,7 +86,7 @@ import TroubleshootingTutorial from '@/components/tutorial/TroubleshootingTutori
         <MergeGateTutorial />
       </section>
 
-      <!-- 教程 13: Provider 429 与退避 -->
+      <!-- 教程 13: Provider 过载与恢复 -->
       <section id="provider-429" class="tut-section">
         <Provider429Tutorial />
       </section>

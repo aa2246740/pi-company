@@ -55,7 +55,7 @@ import { rateLimitPolicy } from '@/data/facts'
       <!-- 速率限制 -->
       <section id="rate-limits" class="config-section">
         <h2>速率限制与恢复</h2>
-        <p>pi-company 有内置的 provider 请求门控来减少 429 错误。</p>
+        <p>pi-company 有内置的 provider 请求门控来减少过载失败。</p>
 
         <div class="policy-grid">
           <div class="policy-card">
@@ -71,7 +71,7 @@ import { rateLimitPolicy } from '@/data/facts'
           <div class="policy-card">
             <span class="policy-card__label">首次退避</span>
             <span class="policy-card__value text-amber">{{ rateLimitPolicy.firstBackoff }}</span>
-            <span class="policy-card__unit">429 后</span>
+            <span class="policy-card__unit">过载后</span>
           </div>
           <div class="policy-card">
             <span class="policy-card__label">最大退避</span>
@@ -81,7 +81,7 @@ import { rateLimitPolicy } from '@/data/facts'
         </div>
 
         <CodeBlock
-          code='pi-company --root ./my-project rate-limit --actor tester --reason "429 Too many requests"'
+          code='pi-company --root ./my-project rate-limit --actor tester --reason "provider overload"'
           prompt="$ "
         />
 

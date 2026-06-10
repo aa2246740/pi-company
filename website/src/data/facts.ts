@@ -6,9 +6,24 @@
 /** 产品摘要 */
 export const productSummary = {
   name: 'pi-company',
-  tagline: 'Pi 原生的本地多智能体协作运行时',
-  description: '让可见、可控的 Pi 智能体在一个项目中协同工作',
+  tagline: '让多个 Pi 像一个可见的本地项目团队一样工作。',
+  description: '把普通 Pi 窗口接成本地协作流程：lead 管全局真相，worker 用 mailbox 协作，coder 在独立 worktree 里并行改代码，合并必须经过 review、test 和产品验收。',
   coreWorkflow: 'human → lead → local issues → coder worktrees → local PR → reviewer + tester → PM/lead acceptance → gates → lead merge',
+  shortPitch: 'Run Pi agents like a visible local project team.',
+  valueProps: [
+    {
+      title: '看得见',
+      body: '每个 agent 都是可见 Pi session。你可以看它做什么，必要时随时打断。',
+    },
+    {
+      title: '接得住',
+      body: '任何窗口里的人类 steering 都会同步到 lead，团队不会只听见局部指令。',
+    },
+    {
+      title: '合得稳',
+      body: '代码走本地 PR、隔离 worktree、review、tester 验证和 PM/lead 验收。',
+    },
+  ],
   scope: [
     'Pi 必需',
     '本地单机运行时',
@@ -19,7 +34,7 @@ export const productSummary = {
     '独立 coder 工作树并行编辑',
     '人类引导自动镜像到 lead',
     '组织级速率限制退避和交错恢复',
-    'Provider 请求门控减少 429',
+    'Provider 请求门控减少过载失败',
     '可选 cmux 启动适配器',
   ],
 }
@@ -216,7 +231,7 @@ export const cliCommands: CliCommand[] = [
   },
   {
     command: 'pi-company rate-limit --actor <agent> --reason <reason>',
-    description: '报告 provider 429/配额压力',
+    description: '报告 provider 过载/配额压力',
     example: 'pi-company rate-limit --actor tester --reason "provider overload"',
     category: '速率限制',
   },
@@ -228,7 +243,7 @@ export const cliCommands: CliCommand[] = [
   },
   {
     command: 'pi-company cmux-rate-limit-scan',
-    description: '扫描可见 cmux pi-company 表面的 429',
+    description: '扫描可见 cmux pi-company 表面的 provider 过载提示',
     example: 'pi-company cmux-rate-limit-scan --workspace workspace:16',
     category: '速率限制',
   },
@@ -258,7 +273,7 @@ export const piTools = [
   { name: 'company_status', description: '读取本地 pi-company 状态' },
   { name: 'company_lead_brief', description: '读取权威全局交付摘要' },
   { name: 'company_inbox', description: '读取或确认邮箱消息' },
-  { name: 'company_report_rate_limit', description: '报告 provider 429/配额压力' },
+  { name: 'company_report_rate_limit', description: '报告 provider 过载/配额压力' },
   { name: 'company_clear_rate_limit', description: '清除误报退避（仅 lead）' },
   { name: 'company_configure_model_policy', description: '配置角色/agent 模型策略' },
   { name: 'company_send_message', description: '发送邮箱消息给另一个 agent' },
@@ -345,7 +360,7 @@ export const troubleshooting = [
     solution: '先停止 pi 进程，返回 shell，再运行启动命令',
   },
   {
-    symptom: '反复 429 或 quota exhausted',
+    symptom: '反复 provider overload 或 quota exhausted',
     diagnosis: 'Provider 压力过大',
     solution: '使用 rate-limit 报告，等待退避恢复，或切换模型/提供商',
   },

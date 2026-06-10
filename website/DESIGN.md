@@ -9,19 +9,21 @@ description: Official documentation and product experience for pi-company, a Pi-
 
 ## 1. Overview
 
-**Creative North Star: "The Command Center"**
+**Creative North Star: "The Visible Local Team"**
 
-This design system embodies the aesthetic of a futuristic terminal control room: dense, precise, and authoritative. Every pixel serves a purpose; every color communicates state. The system rejects the generic SaaS landing page aesthetic, the single-note green terminal cliché, and the decorative noise of modern marketing sites. It embraces information density, terminal-native interaction patterns, and the nostalgic authority of CRT-era computing.
+This design system presents pi-company as a local operating layer for visible Pi agents. The first job is comprehension: a visitor should understand in seconds that pi-company turns the Pi panes they already open into a coordinated local project team. Terminal aesthetics, CRT color, and dense panels are useful only when they make the workflow, evidence, and human takeover model easier to understand.
 
-The visual language draws from three eras: the phosphor glow of 1980s CRT monitors, the density of early terminal interfaces, and the precision of modern command-line tools. The result is a retro-future aesthetic that feels both familiar and forward-looking: a control room for a small agent company, not a marketing brochure.
+The visual language still draws from terminal software: phosphor color, pane boundaries, status bars, command blocks, and local state snapshots. It should feel like a trustworthy developer tool, not a generic SaaS page and not a decorative terminal poster.
 
 **Key Characteristics:**
-- Information density over whitespace; every surface carries signal
+- A sharp first sentence before detailed explanation
+- Benefits before feature inventory
+- One clear narrative path: why install, how it works, how to start, how gates protect the repo
 - Terminal-native interaction: command palettes, status bars, tabs, split panes
 - Multi-color phosphor palette; not a single-note green terminal
 - CRT textures used subtly (scanlines, glow) without sacrificing readability
 - State-driven color: the palette communicates status, not just decoration
-- Monospace-forward typography with pixel/retro display accents
+- Monospace-forward typography with pixel/retro display accents, used only when it improves orientation
 
 ## 2. Colors: The Phosphor Palette
 

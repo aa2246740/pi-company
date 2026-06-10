@@ -2,59 +2,27 @@
 
 [English](README.md) | [中文](README.zh-CN.md)
 
-`pi-company` 是一个 Pi 原生的本地多智能体协作运行时，用来在一个项目里运行一个可见、可控、可接管的 agent company。
+> 让多个 Pi 像一个可见的本地项目团队一样工作。
+
+`pi-company` 把你已经打开的多个 Pi session 接成一个本地协作流程：lead 维护全局 brief，worker 通过 mailbox 协作，coder 在隔离 git worktree 里改代码，本地 PR 必须经过 review、test 和 PM/lead 产品验收才能合并。
 
 - 源码：https://github.com/aa2246740/pi-company
 - 官网：https://aa2246740.github.io/pi-company/
 
-## 它到底是什么？
+## 为什么要装？
 
-`pi-company` 不是一个 Node 后端服务，也不是让你一直开着的 daemon。
+如果你已经会为了一个项目开多个 Pi 窗口，`pi-company` 补上的是协作地基：
 
-它由两部分组成：
+- **可见 agent，不是黑盒 subagent。** 每个 worker 仍然是普通 Pi session，你能看、能打断、能 steering。
+- **一个共享项目真相。** Lead 在说“完成”前会看本地 issues、PR、gates、inbox、runtime 状态和恢复快照。
+- **并行写代码但不乱。** Coder 在独立 git worktree 里改代码，必须提交本地 PR。
+- **合并前有质量门禁。** Review、tester 验证、自动化检查、PM/lead 产品验收都会变成结构化证据。
+- **人类 steering 会同步到 lead。** 你对任意 Pi session 说的话都会镜像给 lead，团队不容易跑偏。
+- **Provider 压力会被管理。** 同 provider 请求会排队和错峰，先预防过载，再做退避恢复。
 
-- **Pi extension/package**：启动 Pi agent 时加载，给 Pi 增加状态面板、mailbox、工具、斜杠命令和 human steering 镜像能力。
-- **辅助 CLI**：用来初始化项目、打印启动命令、规划/启动 agent、查看状态、做少量运维操作。
+一句话：保留多 agent 的速度，同时保留人类能读懂、能接管、能审计的项目流程。
 
-Node 只是 CLI 和扩展代码的运行环境。日常工作不是“启动一个 Node 服务”，而是进入你的项目目录，启动带 pi-company extension 的 Pi。
-
-## 当前范围
-
-- 需要 Pi
-- 本地单机运行
-- 一个项目一个 company
-- 项目本地 `.pi-company/` 状态
-- 事件日志 + reducer + mailbox
-- 本地 issues 和 PR 门控
-- 独立 coder worktrees 支持并行开发
-- 人类对任意 Pi session 的 steering 会镜像到 lead
-- 组织级速率限制退避和交错恢复
-- 可选 cmux 启动适配器
-
-## 工作流
-
-```text
-human -> lead -> local issues -> coder worktrees -> local PR
-      -> reviewer + tester -> PM/lead acceptance -> gates -> lead merge
-```
-
-每个 Pi agent 都有自己的可见工作面板。agent 通过本地工具和 mailbox 消息协作；cmux 只是可选的启动器和窗格管理器。
-
-Lead 是人类的本地代理，不是被动派发器。PM 可以定义产品范围和验收标准，但 routine、低风险的默认决策应由 lead 直接做出并推动公司前进。只有不可逆、昂贵、法律/安全敏感、外部合同相关、品牌风险或使命变更时，lead 才应该询问人类。
-
-## 开发
-
-```bash
-npm install
-npm run check
-npm run build
-```
-
-`npm run check` 会执行隐私扫描、类型检查、测试、构建，并在构建后再次扫描，避免把 key、本机路径、支付二维码等敏感内容放进发布候选。
-
-## 日常用法
-
-如果你习惯先启动 Pi，先把 pi-company 装成 Pi package：
+## 60 秒开始
 
 ```bash
 npm install -g pi-company
@@ -64,6 +32,65 @@ pi
 ```
 
 进入 Pi 后运行：
+
+```text
+/company-init
+```
+
+然后直接对 lead 说：
+
+```text
+我们要做塔罗抽卡网站。请判断需要哪些角色，创建 issues，分发任务，并在测试和验收通过前不要合并。
+```
+
+项目里有 `.pi-company/` 之后，在这个目录里普通启动 `pi` 就会自动接入已有 company。普通目录仍然是普通 Pi。
+
+## 它看起来是什么流程？
+
+```text
+human -> lead -> local issues -> coder worktrees -> local PR
+      -> reviewer + tester -> PM/lead acceptance -> gates -> lead merge
+```
+
+每个 company agent 都有自己的 Pi 内工作面板。agent 通过本地工具和 mailbox 消息协作。cmux 可以自动开窗，但不是必需；没有 cmux 时，你也可以把启动命令粘贴到普通终端窗口里。
+
+## 你会得到什么？
+
+| 能力 | 实际意义 |
+| --- | --- |
+| Lead brief | 在任何人说“完成”前，有一个本地权威交付真相。 |
+| Human steering mirror | 你在任意 company Pi 里输入的 steering 都会到 lead。 |
+| 本地 issues | Lead 把工作拆成有 owner 的任务，而不是聊天里的口头承诺。 |
+| Coder worktrees | 多个 coder 并行实现，不抢同一个 checkout。 |
+| 本地 PR gates | Coder ready、自动化测试、reviewer approval、tester pass、PM/lead acceptance。 |
+| 恢复快照 | worker 窗口消失时，lead 看到有界终端文本，不会一直干等。 |
+| Provider queue | 同 provider 请求限流错峰，减少过载错误和恢复风暴。 |
+| 角色模型策略 | 不同角色或具名 agent 可以使用不同的 Pi 已配置模型。 |
+
+## 它到底是什么？
+
+它由两部分组成：
+
+- **Pi extension/package**：启动 Pi agent 时加载，给 Pi 增加状态面板、mailbox、工具、斜杠命令和 human steering 镜像能力。
+- **辅助 CLI**：用来初始化项目、打印启动命令、规划/启动 agent、查看状态、做少量运维操作。
+
+Node 只是 CLI 和扩展代码的运行环境。日常工作不是“启动一个 Node 服务”，而是进入你的项目目录，启动带 pi-company extension 的 Pi。
+
+## 它不是什么？
+
+- 不是云服务。
+- 不是把工作藏起来的 headless orchestrator。
+- 不是 Pi 的替代品。
+- 不是 cmux 专用工具。cmux 让窗格管理更方便，但 runtime 可以配合普通终端使用。
+- 不是跳过 review 的理由。它的核心价值正是让多 agent 工作可审计。
+
+## 日常用法
+
+```bash
+pi
+```
+
+进入 Pi 后：
 
 ```text
 /company-init
@@ -124,6 +151,35 @@ eval "$(pi-company launch-command lead)"
 `spawn` 可以创建新的具名 agent，也可以启动已有 roster 中的 planned agent。若只想拿到精确 shell 命令，可使用 `launch-command <agent>`。
 
 在已有 company 中再次运行 `init` 是幂等的。它会加载已有事件日志，不会重置 roster、issues、PRs 或 agent 状态。`init` 也会把 `.pi-company/` 加入 `.gitignore`，避免本地 company 状态和托管 worktrees 被 `git add .` 提交。
+
+## Lead 是人类代理
+
+Lead 不是被动派发器。Lead 应该做出 routine、低风险的默认决策，保留人类要求，并推动项目继续前进。只有不可逆、昂贵、法律/安全敏感、外部合同相关、品牌风险或使命变更时，lead 才应该询问人类。
+
+Lead 不应该吸收其他角色拥有的执行工作。如果人类指定了必须使用的 skill、工具或方法，lead 应该把要求传给负责角色，而不是在 lead 上下文里自己做。
+
+## 当前范围
+
+- 需要 Pi
+- 本地单机运行
+- 一个项目一个 company
+- 项目本地 `.pi-company/` 状态
+- 事件日志 + reducer + mailbox
+- 本地 issues 和 PR 门控
+- 独立 coder worktrees 支持并行开发
+- 人类对任意 Pi session 的 steering 会镜像到 lead
+- 组织级速率限制退避和交错恢复
+- 可选 cmux 启动适配器
+
+## 开发
+
+```bash
+npm install
+npm run check
+npm run build
+```
+
+`npm run check` 会执行隐私扫描、类型检查、测试、构建，并在构建后再次扫描，避免把 key、本机路径、支付二维码等敏感内容放进发布候选。
 
 ## 角色文件边界
 
