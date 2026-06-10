@@ -1,9 +1,13 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { DEFAULT_PROVIDER_REQUEST_POLICY } from "./defaults.js";
 import { atomicWriteText, ensureDir, readJson } from "./io.js";
 import { companyPaths } from "./paths.js";
 import type { ProviderRequestPolicy } from "./types.js";
+
+const PROVIDER_LOCK_STALE_MS = 10_000;
+const PROVIDER_LOCK_TIMEOUT_MS = 60_000;
 
 export interface ProviderQueueState {
   provider: string;
@@ -132,36 +136,59 @@ function activeLeases(leases: ProviderLeaseRecord[], now: number): ProviderLease
 
 async function withProviderQueueLock<T>(root: string, provider: string, fn: () => T): Promise<T> {
   const lockDir = providerQueueLockDir(root, provider);
-  await acquireLockDir(lockDir);
+  const token = await acquireLockDir(lockDir);
   try {
     return fn();
   } finally {
+    releaseLockDir(lockDir, token);
+  }
+}
+
+async function acquireLockDir(lockDir: string): Promise<string> {
+  ensureDir(path.dirname(lockDir));
+  const token = crypto.randomUUID();
+  const startedAt = Date.now();
+  for (;;) {
+    try {
+      fs.mkdirSync(lockDir);
+      fs.writeFileSync(path.join(lockDir, "owner.json"), `${JSON.stringify({ token })}\n`, "utf8");
+      return token;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      removeStaleLock(lockDir);
+      if (Date.now() - startedAt > PROVIDER_LOCK_TIMEOUT_MS) {
+        throw new Error(`Timed out waiting for provider-queue lock at ${lockDir}.`);
+      }
+      await sleep(50);
+    }
+  }
+}
+
+function releaseLockDir(lockDir: string, token: string): void {
+  if (readLockToken(lockDir) === token) {
     fs.rmSync(lockDir, { recursive: true, force: true });
   }
 }
 
-async function acquireLockDir(lockDir: string): Promise<void> {
-  ensureDir(path.dirname(lockDir));
-  for (;;) {
-    try {
-      fs.mkdirSync(lockDir);
-      return;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      removeStaleLock(lockDir);
-      await sleep(50);
-    }
+function readLockToken(lockDir: string): string | null {
+  try {
+    return (JSON.parse(fs.readFileSync(path.join(lockDir, "owner.json"), "utf8")) as { token?: string }).token ?? null;
+  } catch {
+    return null;
   }
 }
 
 function removeStaleLock(lockDir: string): void {
   try {
     const stat = fs.statSync(lockDir);
-    if (Date.now() - stat.mtimeMs > 10_000) {
-      fs.rmSync(lockDir, { recursive: true, force: true });
-    }
+    if (Date.now() - stat.mtimeMs <= PROVIDER_LOCK_STALE_MS) return;
+    // Claim the stale lock via a unique tombstone rename so two racing waiters
+    // cannot both delete it and then both acquire it.
+    const tombstone = `${lockDir}.stale.${process.pid}.${crypto.randomUUID()}`;
+    fs.renameSync(lockDir, tombstone);
+    fs.rmSync(tombstone, { recursive: true, force: true });
   } catch {
-    // Another process may have released the lock.
+    // Another process may have released or already claimed the lock.
   }
 }
 

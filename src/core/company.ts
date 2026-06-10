@@ -146,7 +146,30 @@ function ensureCompanyGitignore(root: string): void {
 
 export function loadConfig(root = process.cwd()): CompanyConfig | null {
   const paths = companyPaths(root);
-  return readYaml<CompanyConfig | null>(paths.config, null);
+  const config = readYaml<CompanyConfig | null>(paths.config, null);
+  if (!config || typeof config !== "object") return config;
+  // A hand-edited company.yaml may parse but be missing or have a partial
+  // quality_gates block. The merge gate reads these fields unguarded, so
+  // normalize against defaults rather than crashing every command on a PR.
+  config.quality_gates = normalizeQualityGates(config.quality_gates);
+  return config;
+}
+
+function normalizeQualityGates(gates?: Partial<CompanyConfig["quality_gates"]> | null): CompanyConfig["quality_gates"] {
+  const g = gates && typeof gates === "object" ? gates : {};
+  const requiredReviews = typeof g.required_reviews === "number" && Number.isInteger(g.required_reviews) && g.required_reviews >= 0
+    ? g.required_reviews
+    : 1;
+  return {
+    required_reviews: requiredReviews,
+    require_tests: g.require_tests !== false,
+    require_tester_pass: g.require_tester_pass !== false,
+    require_product_acceptance: g.require_product_acceptance !== false,
+    require_diff_check: g.require_diff_check !== false,
+    block_caveated_passes: g.block_caveated_passes !== false,
+    test_command: typeof g.test_command === "string" ? g.test_command : null,
+    merge_strategy: "no-ff",
+  };
 }
 
 export function setModelPolicy(root: string, actor: string, target: "defaults" | "role" | "agent", name: string | null, model: PiModelConfig | null): CompanyConfig {
@@ -1102,6 +1125,18 @@ export function completeTask(root: string, actor: string, issueId: string, summa
   }));
 }
 
+const AGENT_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+function assertValidAgentName(name: string): void {
+  // Agent names become path components (mailboxes, coder worktrees, branches).
+  // Reject anything that could traverse out of .pi-company/ or break tooling.
+  if (!AGENT_NAME_PATTERN.test(name) || name.includes("..")) {
+    throw new Error(
+      `Invalid agent name "${name}". Use letters, digits, '.', '_' or '-' (no path separators or '..').`,
+    );
+  }
+}
+
 export function planAgentSpawn(root: string, role: AgentRole, name: string, mission?: string | null, options: { allowUnknownRole?: boolean } = {}): {
   name: string;
   role: AgentRole;
@@ -1111,6 +1146,7 @@ export function planAgentSpawn(root: string, role: AgentRole, name: string, miss
   mission: string | null;
 } {
   if (options.allowUnknownRole !== true) assertRoleAvailable(root, role);
+  assertValidAgentName(name);
   const config = loadConfig(root);
   const projectId = config?.id ?? slug(path.basename(root));
   const isCoder = role === "coder";
@@ -2187,7 +2223,21 @@ export function markPrReady(root: string, actor: string, prId: string, selfTest:
   return loadState(root);
 }
 
-export function submitReview(root: string, actor: string, prId: string, decision: "approve" | "request_changes" | "comment", summary: string, evidence?: GateEvidenceInput | null): CompanyState {
+function resolveEvidenceHead(root: string, pr: PullRequestRecord, expectedHead?: string | null): string | null {
+  // When the actor declares the commit they actually verified, pin the evidence
+  // to that commit (normalized to a canonical SHA). The merge gate only counts
+  // evidence whose head matches the PR's current head, so this prevents a commit
+  // landing between inspection and submission from inheriting the approval.
+  const declared = expectedHead?.trim();
+  if (declared) {
+    const resolved = resolveGitHead(root, declared);
+    if (!resolved) throw new Error(`Cannot resolve --head ${declared} to a commit on this repo.`);
+    return resolved;
+  }
+  return resolveGitHead(root, pr.branch);
+}
+
+export function submitReview(root: string, actor: string, prId: string, decision: "approve" | "request_changes" | "comment", summary: string, evidence?: GateEvidenceInput | null, expectedHead?: string | null): CompanyState {
   const state = loadState(root);
   const pr = state.prs[prId];
   if (!pr) throw new Error(`Unknown PR ${prId}`);
@@ -2200,14 +2250,14 @@ export function submitReview(root: string, actor: string, prId: string, decision
     pr_id: prId,
     decision,
     summary,
-    head: pr ? resolveGitHead(root, pr.branch) : null,
+    head: resolveEvidenceHead(root, pr, expectedHead),
     ...normalizeGateEvidenceInput(evidence),
   }));
   notifyLeadOfPrGate(root, next, actor, prId, `Review ${decision} submitted by ${actor} for ${prId}. Check gates and route fixes or acceptance.`);
   return loadState(root);
 }
 
-export function submitTest(root: string, actor: string, prId: string, status: "pass" | "fail" | "blocked", summary: string, evidence?: GateEvidenceInput | null): CompanyState {
+export function submitTest(root: string, actor: string, prId: string, status: "pass" | "fail" | "blocked", summary: string, evidence?: GateEvidenceInput | null, expectedHead?: string | null): CompanyState {
   const state = loadState(root);
   const pr = state.prs[prId];
   if (!pr) throw new Error(`Unknown PR ${prId}`);
@@ -2220,14 +2270,14 @@ export function submitTest(root: string, actor: string, prId: string, status: "p
     pr_id: prId,
     status,
     summary,
-    head: pr ? resolveGitHead(root, pr.branch) : null,
+    head: resolveEvidenceHead(root, pr, expectedHead),
     ...normalizeGateEvidenceInput(evidence),
   }));
   notifyLeadOfPrGate(root, next, actor, prId, `Tester status ${status} submitted by ${actor} for ${prId}. Check gates and route fixes or acceptance.`);
   return loadState(root);
 }
 
-export function submitAcceptance(root: string, actor: string, prId: string, decision: "accept" | "request_changes" | "comment", summary: string, evidence?: GateEvidenceInput | null): CompanyState {
+export function submitAcceptance(root: string, actor: string, prId: string, decision: "accept" | "request_changes" | "comment", summary: string, evidence?: GateEvidenceInput | null, expectedHead?: string | null): CompanyState {
   const state = loadState(root);
   const pr = state.prs[prId];
   if (!pr) throw new Error(`Unknown PR ${prId}`);
@@ -2245,14 +2295,14 @@ export function submitAcceptance(root: string, actor: string, prId: string, deci
     pr_id: prId,
     decision,
     summary,
-    head: pr ? resolveGitHead(root, pr.branch) : null,
+    head: resolveEvidenceHead(root, pr, expectedHead),
     ...normalizeGateEvidenceInput(evidence),
   }));
   notifyLeadOfPrGate(root, next, actor, prId, `Product acceptance ${decision} submitted by ${actor} for ${prId}. Check gates and merge readiness.`);
   return loadState(root);
 }
 
-export function recordAutomatedTests(root: string, actor: string, prId: string, status: "passed" | "failed" | "blocked", summary: string, command?: string | null, evidence?: GateEvidenceInput | null): CompanyState {
+export function recordAutomatedTests(root: string, actor: string, prId: string, status: "passed" | "failed" | "blocked", summary: string, command?: string | null, evidence?: GateEvidenceInput | null, expectedHead?: string | null): CompanyState {
   const state = loadState(root);
   const pr = state.prs[prId];
   if (!pr) throw new Error(`Unknown PR ${prId}`);
@@ -2269,7 +2319,7 @@ export function recordAutomatedTests(root: string, actor: string, prId: string, 
     status,
     summary,
     command: command ?? null,
-    head: pr ? resolveGitHead(root, pr.branch) : null,
+    head: resolveEvidenceHead(root, pr, expectedHead),
     ...normalizeGateEvidenceInput(evidence),
   }));
   notifyLeadOfPrGate(root, next, actor, prId, `Automated tests ${status} recorded by ${actor} for ${prId}. Check gates and route fixes or acceptance.`);
@@ -2797,17 +2847,37 @@ export function mergePr(root: string, actor: string, prId: string, execute = fal
   const verify = spawnSync("git", ["-C", root, "rev-parse", "--verify", pr.branch], { encoding: "utf8" });
   if (verify.status !== 0) blockMergeAndThrow(root, actor, prId, `Branch ${pr.branch} does not exist.`);
 
+  // Pin the merge to the exact commit the gates were evaluated against. The
+  // branch tip can advance between gate evaluation (loadState above) and this
+  // merge; merging the branch name would land unreviewed commits and also
+  // record a head the reducer rejects on replay (live/replay divergence).
+  if (pr.head) {
+    const liveHead = resolveGitHead(root, pr.branch);
+    if (liveHead && liveHead !== pr.head) {
+      blockMergeAndThrow(
+        root, actor, prId,
+        `Branch ${pr.branch} advanced since gates were checked (${pr.head} -> ${liveHead}). Re-run review/test on the new head.`,
+      );
+    }
+  }
+  const mergeRef = pr.head ?? pr.branch;
+
   const checkout = spawnSync("git", ["-C", root, "checkout", pr.base], { encoding: "utf8" });
   if (checkout.status !== 0) blockMergeAndThrow(root, actor, prId, checkout.stderr || checkout.stdout || `git checkout ${pr.base} failed`);
 
-  const merge = spawnSync("git", ["-C", root, "merge", "--no-ff", pr.branch, "-m", `pi-company: merge ${pr.id} ${pr.title}`], {
+  const merge = spawnSync("git", ["-C", root, "merge", "--no-ff", mergeRef, "-m", `pi-company: merge ${pr.id} ${pr.title}`], {
     encoding: "utf8",
   });
-  if (merge.status !== 0) blockMergeAndThrow(root, actor, prId, merge.stderr || merge.stdout || "git merge failed");
+  if (merge.status !== 0) {
+    // Abort the half-applied merge so the project root is not left in a
+    // conflicted MERGE_HEAD state that blocks every subsequent merge.
+    spawnSync("git", ["-C", root, "merge", "--abort"], { encoding: "utf8" });
+    blockMergeAndThrow(root, actor, prId, merge.stderr || merge.stdout || "git merge failed");
+  }
 
   return recordEvent(root, makeEvent("merge.completed", actor, {
     pr_id: prId,
-    head: resolveGitHead(root, pr.branch) ?? pr.head ?? null,
+    head: pr.head ?? resolveGitHead(root, pr.branch) ?? null,
     base_head: resolveGitHead(root, pr.base) ?? pr.base_head ?? null,
   }));
 }

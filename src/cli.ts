@@ -122,7 +122,6 @@ program.command("spawn")
   .action((role, opts) => {
     const root = rootOpt();
     const name = opts.name ?? defaultNameForRole(role);
-    const mission = readTextOption(opts.mission, opts.missionFile, opts.missionStdin === true, "mission", false);
     const existing = loadState(root).agents[name];
     if (existing) {
       if (existing.role !== role) {
@@ -139,11 +138,14 @@ program.command("spawn")
       launchInCmux(root, currentLead(root), name, cmd);
       return;
     }
+    // Only the new-agent path uses a mission; reading stdin earlier would block
+    // (and discard the value) when relaunching an already-existing agent.
+    const mission = readTextOption(opts.mission, opts.missionFile, opts.missionStdin === true, "mission", false);
     const plan = planAgentSpawn(root, role, name, mission, { allowUnknownRole: opts.forceRole === true });
     if (role === "coder") {
       ensureCoderWorktree(root, plan, opts.yes === true);
     }
-    requestAgentSpawn(root, "lead", role, name, mission, { allowUnknownRole: opts.forceRole === true });
+    requestAgentSpawn(root, currentLead(root), role, name, mission, { allowUnknownRole: opts.forceRole === true });
     registerAgent(root, {
       name: plan.name,
       role: plan.role,
@@ -321,11 +323,12 @@ pr.command("review")
   .requiredOption("--summary <text>")
   .option("--clean", "Mark approval evidence as explicitly clean")
   .option("--caveat <text>", "Structured caveat that blocks green evidence; repeat for multiple caveats", collectOption, [])
+  .option("--head <commit>", "Commit you actually reviewed; pins the evidence to that head")
   .action((prId, opts) => {
     if (!["approve", "request_changes", "comment"].includes(opts.decision)) {
       throw new Error("decision must be approve, request_changes, or comment");
     }
-    submitReview(rootOpt(), opts.reviewer, prId, opts.decision, opts.summary, gateEvidenceOptions(opts));
+    submitReview(rootOpt(), opts.reviewer, prId, opts.decision, opts.summary, gateEvidenceOptions(opts), opts.head ?? null);
     console.log(`${opts.reviewer} submitted ${opts.decision} for ${prId}`);
   });
 
@@ -336,11 +339,12 @@ pr.command("test")
   .requiredOption("--summary <text>")
   .option("--clean", "Mark passing evidence as explicitly clean")
   .option("--caveat <text>", "Structured caveat that blocks green evidence; repeat for multiple caveats", collectOption, [])
+  .option("--head <commit>", "Commit you actually tested; pins the evidence to that head")
   .action((prId, opts) => {
     if (!["pass", "fail", "blocked"].includes(opts.status)) {
       throw new Error("status must be pass, fail, or blocked");
     }
-    submitTest(rootOpt(), opts.tester, prId, opts.status, opts.summary, gateEvidenceOptions(opts));
+    submitTest(rootOpt(), opts.tester, prId, opts.status, opts.summary, gateEvidenceOptions(opts), opts.head ?? null);
     console.log(`${opts.tester} submitted test ${opts.status} for ${prId}`);
   });
 
@@ -351,11 +355,12 @@ pr.command("accept")
   .requiredOption("--summary <text>")
   .option("--clean", "Mark acceptance evidence as explicitly clean")
   .option("--caveat <text>", "Structured caveat that blocks green evidence; repeat for multiple caveats", collectOption, [])
+  .option("--head <commit>", "Commit you actually accepted; pins the evidence to that head")
   .action((prId, opts) => {
     if (!["accept", "request_changes", "comment"].includes(opts.decision)) {
       throw new Error("decision must be accept, request_changes, or comment");
     }
-    submitAcceptance(rootOpt(), opts.actor, prId, opts.decision, opts.summary, gateEvidenceOptions(opts));
+    submitAcceptance(rootOpt(), opts.actor, prId, opts.decision, opts.summary, gateEvidenceOptions(opts), opts.head ?? null);
     console.log(`${opts.actor} submitted product acceptance ${opts.decision} for ${prId}`);
   });
 
@@ -367,12 +372,13 @@ pr.command("auto-test")
   .option("--actor <agent>", "Actor; defaults to PR author")
   .option("--clean", "Mark passing automated-test evidence as explicitly clean")
   .option("--caveat <text>", "Structured caveat that blocks green evidence; repeat for multiple caveats", collectOption, [])
+  .option("--head <commit>", "Commit the automated tests ran against; pins the evidence to that head")
   .action((prId, opts) => {
     if (!["passed", "failed", "blocked"].includes(opts.status)) {
       throw new Error("status must be passed, failed, or blocked");
     }
     const root = rootOpt();
-    recordAutomatedTests(root, opts.actor ?? prAuthor(root, prId), prId, opts.status, opts.summary, opts.command ?? null, gateEvidenceOptions(opts));
+    recordAutomatedTests(root, opts.actor ?? prAuthor(root, prId), prId, opts.status, opts.summary, opts.command ?? null, gateEvidenceOptions(opts), opts.head ?? null);
     console.log(`Automated tests ${opts.status} for ${prId}`);
   });
 

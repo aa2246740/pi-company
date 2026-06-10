@@ -49,10 +49,24 @@ export function appendJsonl(file: string, value: unknown): void {
 
 export function readJsonl<T>(file: string): T[] {
   if (!fs.existsSync(file)) return [];
-  return fs.readFileSync(file, "utf8")
+  const entries = fs.readFileSync(file, "utf8")
     .split("\n")
-    .filter((line) => line.trim().length > 0)
-    .map((line) => JSON.parse(line) as T);
+    .map((line, index) => ({ line, index }))
+    .filter(({ line }) => line.trim().length > 0);
+  const result: T[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    const { line, index } = entries[i];
+    try {
+      result.push(JSON.parse(line) as T);
+    } catch (error) {
+      // A crash or full disk mid-append can leave a torn final line. Tolerate
+      // that single case so one bad write cannot permanently brick the log.
+      // Any earlier malformed line is real corruption and must surface loudly.
+      if (i === entries.length - 1) break;
+      throw new Error(`Corrupt JSONL in ${file} at line ${index + 1}: ${(error as Error).message}`);
+    }
+  }
+  return result;
 }
 
 export function ensureCompanyDirs(paths: CompanyPaths): void {

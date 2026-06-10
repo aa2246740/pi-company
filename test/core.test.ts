@@ -3569,6 +3569,167 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(gitOutput(root, ["status", "--porcelain", "--untracked-files=no"]).trim()).toBe("");
     expect(fs.readFileSync(path.join(root, "app.txt"), "utf8")).toBe("from feature a\n");
   }, 20_000);
+
+  it("does not let a later approval from another reviewer override an unresolved request_changes", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "cross-reviewer-demo" });
+    const plan = registerCoder(root);
+    registerReviewer(root, "rev2");
+    runGit(root, ["checkout", "-b", plan.branch ?? "pi-company/coder"]);
+    commitFile(root, "feature.txt", "first\n", "feature first");
+    runGit(root, ["checkout", "main"]);
+
+    const pr = createPr(root, "coder", {
+      title: "Feature",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate feature.");
+    recordAutomatedTests(root, "tester", pr.id, "passed", "Automated checks passed.", "npm test");
+    submitTest(root, "tester", pr.id, "pass", "Passed.");
+    submitAcceptance(root, "pm", pr.id, "accept", "Product behavior accepted.");
+
+    submitReview(root, "reviewer", pr.id, "request_changes", "Security hole, do not merge.");
+    submitReview(root, "rev2", pr.id, "approve", "Looks fine to me.");
+
+    const gates = getPrGateStatus(root, pr.id);
+    expect(gates.ready).toBe(false);
+    expect(gates.blockers).toContain("Latest review requests changes");
+
+    // Resolving the objecting reviewer's review clears the block.
+    submitReview(root, "reviewer", pr.id, "approve", "Resolved, approved.");
+    expect(getPrGateStatus(root, pr.id).ready).toBe(true);
+  });
+
+  it("does not let one reviewer's clean approval clear another reviewer's caveated approval", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "cross-reviewer-caveat-demo" });
+    const plan = registerCoder(root);
+    registerReviewer(root, "rev2");
+    runGit(root, ["checkout", "-b", plan.branch ?? "pi-company/coder"]);
+    commitFile(root, "feature.txt", "first\n", "feature first");
+    runGit(root, ["checkout", "main"]);
+
+    const pr = createPr(root, "coder", {
+      title: "Feature",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate feature.");
+    recordAutomatedTests(root, "tester", pr.id, "passed", "Automated checks passed.", "npm test");
+    submitTest(root, "tester", pr.id, "pass", "Passed.");
+    submitAcceptance(root, "pm", pr.id, "accept", "Product behavior accepted.");
+
+    submitReview(root, "reviewer", pr.id, "approve", "Approved but there is a known issue.", { caveats: ["known issue"] });
+    submitReview(root, "rev2", pr.id, "approve", "All clean.", { clean: true });
+
+    const gates = getPrGateStatus(root, pr.id);
+    expect(gates.ready).toBe(false);
+    expect(gates.blockers).toContain("Reviewer approval contains caveat");
+  });
+
+  it("pins review evidence to the commit the reviewer declares with expectedHead", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "evidence-head-demo" });
+    const plan = registerCoder(root);
+    runGit(root, ["checkout", "-b", plan.branch ?? "pi-company/coder"]);
+    commitFile(root, "feature.txt", "first\n", "feature first");
+    runGit(root, ["checkout", "main"]);
+
+    const pr = createPr(root, "coder", {
+      title: "Feature",
+      issue_id: null,
+      summary: "Feature summary.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? root,
+      base: "main",
+    });
+    const reviewedHead = resolveGitHead(root, plan.branch ?? "pi-company/coder");
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate feature.");
+    recordAutomatedTests(root, "tester", pr.id, "passed", "Automated checks passed.", "npm test", null, reviewedHead);
+    submitReview(root, "reviewer", pr.id, "approve", "Approved.", null, reviewedHead);
+    submitTest(root, "tester", pr.id, "pass", "Passed.", null, reviewedHead);
+    submitAcceptance(root, "pm", pr.id, "accept", "Accepted.", null, reviewedHead);
+    expect(getPrGateStatus(root, pr.id).ready).toBe(true);
+
+    // A new unreviewed commit must invalidate the head-pinned evidence, even
+    // though the coder could re-ready against it.
+    runGit(root, ["checkout", plan.branch ?? "pi-company/coder"]);
+    commitFile(root, "feature.txt", "second\n", "feature second");
+    runGit(root, ["checkout", "main"]);
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate feature.");
+
+    const gates = getPrGateStatus(root, pr.id);
+    expect(gates.ready).toBe(false);
+    expect(gates.blockers).toContain("Needs 1 reviewer approval(s)");
+  });
+
+  it("rejects agent names that could traverse the .pi-company directory", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "name-validation-demo" });
+    expect(() => requestAgentSpawn(root, "lead", "coder", "../../../tmp/pwn")).toThrow(/Invalid agent name/);
+    expect(() => requestAgentSpawn(root, "lead", "coder", "a/b")).toThrow(/Invalid agent name/);
+    // Ordinary names still work.
+    expect(() => requestAgentSpawn(root, "lead", "coder", "coder-ui")).not.toThrow();
+  });
+
+  it("clears the previous owner's current task when an issue is reassigned", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "reassign-demo" });
+    registerCoder(root, "coder-a");
+    registerCoder(root, "coder-b");
+    const issue = createIssue(root, "lead", "Shared work", "", { work_type: "implementation" });
+    assignIssue(root, "lead", issue.id, "coder-a");
+    startTask(root, "coder-a", issue.id, "Working.");
+    expect(loadState(root).agents["coder-a"].current_task).toBe(issue.id);
+    expect(loadState(root).agents["coder-a"].status).toBe("running");
+
+    assignIssue(root, "lead", issue.id, "coder-b");
+    const state = loadState(root);
+    expect(state.agents["coder-a"].current_task).toBeNull();
+    expect(state.agents["coder-a"].status).toBe("idle");
+    expect(state.issues[issue.id].owner).toBe("coder-b");
+  });
+
+  it("ignores a heartbeat whose actor does not match the named agent", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "actor-spoof-demo" });
+    registerAgent(root, { name: "pm", role: "pm", cwd: root, status: "online" });
+    registerCoder(root, "coder-a");
+    recordEvent(root, makeEvent("agent.heartbeat", "coder-a", { name: "pm", status: "offline" }));
+    expect(loadState(root).agents["pm"].status).toBe("online");
+  });
+
+  it("tolerates a torn final line in the event log without bricking the company", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "torn-log-demo" });
+    createIssue(root, "lead", "Real issue", "", { work_type: "implementation" });
+    const eventsPath = companyPaths(root).events;
+    fs.appendFileSync(eventsPath, '{"id":"evt_partial","type":"issue.created"', "utf8");
+    const state = loadState(root);
+    expect(state.issues["ISSUE-001"]).toBeTruthy();
+  });
+
+  it("normalizes a company.yaml that is missing its quality_gates block", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "missing-gates-demo" });
+    const configPath = companyPaths(root).config;
+    const config = YAML.parse(fs.readFileSync(configPath, "utf8")) as Record<string, unknown>;
+    delete config.quality_gates;
+    fs.writeFileSync(configPath, YAML.stringify(config), "utf8");
+    const state = loadState(root);
+    expect(state.config?.quality_gates.required_reviews).toBe(1);
+    expect(state.config?.quality_gates.require_tests).toBe(true);
+  });
 });
 
 function tempRoot(): string {
@@ -3676,6 +3837,12 @@ function registerCoder(root: string, name = "coder"): ReturnType<typeof requestA
     ...plan,
     status: "online",
   });
+  return plan;
+}
+
+function registerReviewer(root: string, name: string): ReturnType<typeof requestAgentSpawn> {
+  const plan = requestAgentSpawn(root, "lead", "reviewer", name, "Test reviewer.");
+  registerAgent(root, { ...plan, status: "online" });
   return plan;
 }
 

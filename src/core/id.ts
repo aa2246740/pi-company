@@ -5,7 +5,7 @@ export function nowIso(): string {
 }
 
 export function newId(prefix: string): string {
-  return `${prefix}_${crypto.randomUUID().slice(0, 8)}`;
+  return `${prefix}_${crypto.randomUUID().replace(/-/g, "")}`;
 }
 
 export function slug(input: string): string {
