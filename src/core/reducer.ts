@@ -539,6 +539,8 @@ export function evaluatePrGates(config: CompanyConfig | null, pr: PullRequestRec
     else if (currentHead && lastAcceptance.head !== currentHead) blockers.push("Product acceptance is stale for current head");
     else if (blockCaveatedPasses && evidenceHasGateCaveat(lastAcceptance)) {
       blockers.push("Product acceptance contains caveat");
+    } else if (blockCaveatedPasses && productAcceptanceHasUnresolvedPriorCaveat(pr, eligibleAcceptances, currentHead)) {
+      blockers.push("Product acceptance prior caveat lacks fresh validation");
     }
   }
 
@@ -606,6 +608,55 @@ function hasUnresolvedCaveatedEvidence(records: Array<ReviewRecord | TestRecord 
     }
   }
   return unresolved;
+}
+
+function productAcceptanceHasUnresolvedPriorCaveat(
+  pr: PullRequestRecord,
+  acceptances: AcceptanceRecord[],
+  currentHead: string | null,
+): boolean {
+  let unresolvedSince: string | null = null;
+  for (const acceptance of acceptances) {
+    if (acceptance.decision !== "accept" || evidenceHasGateCaveat(acceptance)) {
+      unresolvedSince = acceptance.ts;
+      continue;
+    }
+    if (!unresolvedSince) continue;
+    if (
+      hasFreshSupportingGateEvidence(pr, currentHead, unresolvedSince, acceptance.ts) ||
+      mentionsFreshProductValidationOrWaiver(acceptance.summary)
+    ) {
+      unresolvedSince = null;
+    }
+  }
+  return unresolvedSince !== null;
+}
+
+function hasFreshSupportingGateEvidence(
+  pr: PullRequestRecord,
+  currentHead: string | null,
+  afterTs: string,
+  beforeOrAtTs: string,
+): boolean {
+  const after = Date.parse(afterTs);
+  const beforeOrAt = Date.parse(beforeOrAtTs);
+  if (!Number.isFinite(after) || !Number.isFinite(beforeOrAt)) return false;
+  const isFresh = (record: ReviewRecord | TestRecord | AutomatedTestRecord): boolean => {
+    if (currentHead && record.head !== currentHead) return false;
+    const ts = Date.parse(record.ts);
+    return Number.isFinite(ts) && ts > after && ts <= beforeOrAt;
+  };
+  const isFreshValidation = (record: TestRecord | AutomatedTestRecord): boolean =>
+    !evidenceHasGateCaveat(record) && isFresh(record) && mentionsFreshProductValidationOrWaiver(record.summary);
+  if (pr.tests.some((test) => test.status === "pass" && isFreshValidation(test))) return true;
+  if (pr.automated_tests && pr.automated_tests.status === "passed" && isFreshValidation(pr.automated_tests)) return true;
+  if ((pr.automated_test_history ?? []).some((record) => record.status === "passed" && isFreshValidation(record))) return true;
+  return false;
+}
+
+function mentionsFreshProductValidationOrWaiver(summary: string): boolean {
+  return /(?:observed|saw|clicked|opened|ran|retested|re-tested|validated|verified|playwright|browser|rendered|api request|screenshot|human (?:waiver|waived)|explicit (?:human|user) (?:waiver|approval)|risk (?:accepted|waived))/i.test(summary) ||
+    /(?:实测|實測|已实测|已實測|浏览器|瀏覽器|打开页面|打開頁面|点击|點擊|观察到|觀察到|已观察|已觀察|渲染|API 请求|API 請求|截图|截圖|Playwright|重新验证|重新驗證|人类明确豁免|人類明確豁免|用户明确豁免|用戶明確豁免|接受风险|接受風險)/.test(summary);
 }
 
 function mentionsResolvedHistoricalCaveat(summary: string): boolean {

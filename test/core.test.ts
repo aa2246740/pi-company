@@ -216,6 +216,20 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(listInbox(root, "lead")[0].type).toBe("human_steering");
   });
 
+  it("delivers human steering sent directly to lead into lead inbox", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "lead-steering-demo" });
+
+    const delivered = recordHumanSteering(root, "lead", "Browser acceptance failed; create a follow-up issue.", "followUp");
+    const state = loadState(root);
+
+    expect(delivered?.to).toBe("lead");
+    expect(state.human_steering).toHaveLength(1);
+    expect(state.inbox_counts.lead).toBe(1);
+    expect(listInbox(root, "lead")[0].type).toBe("human_steering");
+    expect(listInbox(root, "lead")[0].text).toContain("Browser acceptance failed");
+  });
+
   it("acknowledges unread mailbox messages", () => {
     const root = tempRoot();
     initCompany({ root, id: "inbox-demo" });
@@ -1994,7 +2008,51 @@ Rate limit 已过期，可以恢复正常工作`);
     submitAcceptance(root, "pm", pr.id, "accept", "接受 MVP 状态，剩余交互教程和移动端导航作为后续 issue。");
     expect(getPrGateStatus(root, pr.id).blockers).toContain("Product acceptance contains caveat");
 
+    submitAcceptance(root, "pm", pr.id, "accept", "修复确定性高，逻辑已经闭合。", { clean: true });
+    expect(getPrGateStatus(root, pr.id).blockers).toContain("Product acceptance prior caveat lacks fresh validation");
+
     submitAcceptance(root, "pm", pr.id, "accept", "Observed the analysis button trigger an API request and render the final result.");
+    expect(getPrGateStatus(root, pr.id)).toEqual({ ready: true, blockers: [] });
+  });
+
+  it("requires fresh validation before clean product acceptance can clear a prior caveat", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "acceptance-fresh-validation-demo" });
+    registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Show dynamic skills",
+      issue_id: null,
+      summary: "Loads skills for slash suggestions.",
+      branch: "pi-company/coder",
+      worktree: path.join(root, ".pi-company/worktrees/coder"),
+      base: "main",
+    });
+
+    markPrReady(root, "coder", pr.id, "Self-test passed.", "Validate slash suggestions in browser.");
+    recordAutomatedTests(root, "tester", pr.id, "passed", "Automated checks passed.", "npm test");
+    submitReview(root, "reviewer", pr.id, "approve", "Approved.");
+    submitTest(root, "tester", pr.id, "pass", "Static checks passed.");
+    submitAcceptance(root, "lead", pr.id, "accept", "Accept, but tester did not run browser validation.");
+
+    expect(getPrGateStatus(root, pr.id).blockers).toContain("Product acceptance contains caveat");
+
+    submitAcceptance(root, "lead", pr.id, "accept", "修复确定性高，逻辑已经闭合。", { clean: true });
+    expect(getPrGateStatus(root, pr.id).blockers).toContain("Product acceptance prior caveat lacks fresh validation");
+
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    submitReview(root, "reviewer", pr.id, "approve", "Fresh code review approved.", { clean: true });
+    submitAcceptance(root, "lead", pr.id, "accept", "代码看起来已经没问题。", { clean: true });
+    expect(getPrGateStatus(root, pr.id).blockers).toContain("Product acceptance prior caveat lacks fresh validation");
+
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    submitTest(root, "tester", pr.id, "pass", "Static checks passed.", { clean: true });
+    submitAcceptance(root, "lead", pr.id, "accept", "静态检查已经通过。", { clean: true });
+    expect(getPrGateStatus(root, pr.id).blockers).toContain("Product acceptance prior caveat lacks fresh validation");
+
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    submitTest(root, "tester", pr.id, "pass", "Fresh browser validation passed: typing / shows cmux-browser and grill-me.");
+    submitAcceptance(root, "lead", pr.id, "accept", "Product behavior accepted after tester browser validation.", { clean: true });
+
     expect(getPrGateStatus(root, pr.id)).toEqual({ ready: true, blockers: [] });
   });
 

@@ -962,7 +962,6 @@ export function recordHumanSteering(root: string, targetAgent: string, text: str
     streaming_behavior: streamingBehavior ?? null,
   });
   recordEvent(root, event);
-  if (targetAgent === lead) return null;
   return sendCompanyMessage(root, {
     from: targetAgent,
     to: lead,
