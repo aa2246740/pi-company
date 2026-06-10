@@ -699,6 +699,7 @@ function leadToolBlockReason(event: { toolName: string; input: Record<string, un
   if (event.toolName === "bash") {
     const command = typeof event.input.command === "string" ? event.input.command : "";
     if (isAllowedNonCoderDocBashCommand(command)) return null;
+    if (isAllowedNonCoderOperationalBashCommand(command)) return null;
     if (isMutatingLeadBashCommand(command)) {
       return "pi-company lead cannot mutate runnable or behavior-changing project files through raw bash. Use pi-company issue/spawn/PR/merge tools, delegate implementation to workers, or run /company-pause for explicit ordinary-Pi maintenance.";
     }
@@ -726,6 +727,8 @@ function workerToolBlockReason(event: { toolName: string; input: Record<string, 
       return coderBashBlockReason(command, agent);
     }
     if (isAllowedNonCoderDocBashCommand(command)) return null;
+    if (isAllowedNonCoderOperationalBashCommand(command)) return null;
+    if (isAllowedNonCoderValidationCleanupBashCommand(command)) return null;
     if (isMutatingLeadBashCommand(command)) {
       return `pi-company ${agent.role} ${agent.name} cannot mutate runnable or behavior-changing project files through raw bash. Non-runnable Markdown/docs are allowed; implementation/config/test/assets must go to coder, or use /company-pause for explicit ordinary-Pi maintenance.`;
     }
@@ -895,6 +898,27 @@ function isAllowedNonCoderDocBashCommand(command: string): boolean {
   return writtenFiles.every(isSafeRelativeDocumentationFile) && writtenDirs.every(isSafeRelativeDocumentationDirectory);
 }
 
+function isAllowedNonCoderOperationalBashCommand(command: string): boolean {
+  const normalized = command.replace(/\\\n/g, " ").replace(/\s+/g, " ").trim();
+  if (!normalized || !isMutatingLeadBashCommand(normalized)) return false;
+  if (hasDangerousNonCoderMutation(normalized)) return false;
+  if (extractTeeTargets(normalized).length > 0) return false;
+  const redirects = extractRedirectTargets(normalized);
+  return redirects.length > 0 && redirects.every(isSafeTempRedirectTarget);
+}
+
+function isAllowedNonCoderValidationCleanupBashCommand(command: string): boolean {
+  const normalized = command.replace(/\\\n/g, " ").replace(/\s+/g, " ").trim();
+  if (!normalized || !/(^|[;&|]\s*)rm\b/i.test(normalized)) return false;
+  if (extractTeeTargets(normalized).length > 0) return false;
+  const redirects = extractRedirectTargets(normalized);
+  if (redirects.some((target) => !isSafeTempRedirectTarget(target))) return false;
+  const rmTargets = extractRmTargets(normalized);
+  if (rmTargets.length === 0 || !rmTargets.every(isSafeGeneratedArtifactTarget)) return false;
+  const withoutRm = normalized.replace(/(^|[;&|]\s*)rm\s+[^;&|]+/gi, "$1 true");
+  return !hasDangerousNonCoderMutation(withoutRm);
+}
+
 function hasDangerousNonCoderMutation(command: string): boolean {
   const dangerousPatterns = [
     /(^|[;&|]\s*)(rm|mv|cp|install|chmod|chown|truncate)\b/i,
@@ -941,6 +965,19 @@ function extractMkdirTargets(command: string): string[] {
     .filter((target) => target !== "-p");
 }
 
+function extractRmTargets(command: string): string[] {
+  const targets: string[] = [];
+  const pattern = /(?:^|[;&|]\s*)rm\s+([^;&|]+)/gi;
+  for (const match of command.matchAll(pattern)) {
+    for (const token of shellWordsLite(match[1])) {
+      if (token.startsWith("-")) continue;
+      const target = cleanShellPathToken(token);
+      if (target) targets.push(target);
+    }
+  }
+  return targets;
+}
+
 function extractCommandPathArgs(command: string, commandName: "mkdir" | "touch"): string[] {
   const targets: string[] = [];
   const pattern = new RegExp(`(?:^|[;&|]\\s*)${commandName}\\s+([^;&|]+)`, "gi");
@@ -976,6 +1013,54 @@ function isSafeRelativeProjectToken(target: string): boolean {
   if (normalized === ".." || normalized.startsWith("../") || normalized.includes("/../")) return false;
   if (/^[a-z]+:\/\//i.test(normalized)) return false;
   return true;
+}
+
+function isSafeTempRedirectTarget(target: string): boolean {
+  const cleaned = cleanShellPathToken(target);
+  if (!cleaned || cleaned.startsWith("&")) return true;
+  if (cleaned === "/dev/null") return true;
+  if (!path.isAbsolute(cleaned)) return false;
+  const resolved = path.resolve(cleaned);
+  return resolved.startsWith("/tmp/") || resolved.startsWith("/private/tmp/");
+}
+
+function isSafeGeneratedArtifactTarget(target: string): boolean {
+  const cleaned = cleanShellPathToken(target);
+  if (!cleaned || cleaned.startsWith("-") || cleaned.startsWith("$")) return false;
+  if (/[!*?[{\]}]/.test(cleaned)) return false;
+  if (/^[a-z]+:\/\//i.test(cleaned)) return false;
+  if (cleaned === ".." || cleaned.startsWith("../") || cleaned.includes("/../")) return false;
+
+  const unix = cleaned.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (path.isAbsolute(cleaned)) {
+    const resolved = path.resolve(cleaned).replace(/\\/g, "/");
+    return resolved.includes("/.pi-company/worktrees/") && isGeneratedArtifactPath(resolved);
+  }
+  if (!isSafeRelativeProjectToken(unix)) return false;
+  return isGeneratedArtifactPath(unix);
+}
+
+function isGeneratedArtifactPath(target: string): boolean {
+  const normalized = target.replace(/\\/g, "/").replace(/\/+$/, "");
+  const segments = normalized.split("/").filter(Boolean);
+  const last = segments.at(-1)?.toLowerCase() ?? "";
+  const generatedDirs = new Set([
+    ".cache",
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
+    ".turbo",
+    ".vite",
+    "build",
+    "coverage",
+    "dist",
+    "out",
+    "target",
+    "tmp",
+  ]);
+  if (!generatedDirs.has(last)) return false;
+  if (normalized.includes("/.pi-company/worktrees/")) return true;
+  return segments.length <= 3;
 }
 
 function isMutatingLeadBashCommand(command: string): boolean {

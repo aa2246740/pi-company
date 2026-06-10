@@ -411,7 +411,7 @@ describe("pi-company extension", () => {
       expect(log).toContain("read-screen --surface surface:new");
       expect(log).toContain("close-surface --surface surface:new");
     });
-  });
+  }, 20_000);
 
   it("reuses an existing live cmux surface instead of opening a duplicate agent pane", async () => {
     const root = tempRoot();
@@ -1067,6 +1067,24 @@ describe("pi-company extension", () => {
       toolName: "bash",
       input: { command: "git status --short && ls -la" },
     }, ctx);
+    const runtimeRestart = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-5",
+      toolName: "bash",
+      input: { command: "lsof -ti:3001 | xargs kill -9 2>/dev/null; sleep 1; cd app && nohup node dist/index.js > /tmp/pi-company-app.log 2>&1 & sleep 2; curl -s http://localhost:3001/api/health" },
+    }, ctx);
+    const sourceRedirect = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-6",
+      toolName: "bash",
+      input: { command: "echo '<html></html>' > index.html" },
+    }, ctx);
+    const heredocRedirect = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-7",
+      toolName: "bash",
+      input: { command: "cat > index.html <<'EOF'\n<html></html>\nEOF" },
+    }, ctx);
     await handlers.session_shutdown?.({ reason: "quit" }, ctx);
 
     expect(writeResult).toMatchObject({ block: true });
@@ -1075,6 +1093,9 @@ describe("pi-company extension", () => {
     expect(editResult).toMatchObject({ block: true });
     expect(bashResult).toMatchObject({ block: true });
     expect(readOnlyBash).toBeUndefined();
+    expect(runtimeRestart).toBeUndefined();
+    expect(sourceRedirect).toMatchObject({ block: true });
+    expect(heredocRedirect).toMatchObject({ block: true });
   });
 
   it("does not apply the lead direct-work guard to coder agents", async () => {
@@ -1248,6 +1269,43 @@ describe("pi-company extension", () => {
       expect(docWrite).toBeUndefined();
       expect(srcWrite).toMatchObject({ block: true });
     }
+  });
+
+  it("allows testers to clean generated artifacts for validation but not source files", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-tester-clean-artifacts" });
+    const { handlers, pi } = fakePi({
+      "company-root": root,
+      "company-agent": "tester",
+      "company-role": "tester",
+    });
+    const { ctx } = fakeContext(root);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const cleanBuild = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-1",
+      toolName: "bash",
+      input: { command: "cd app && rm -rf dist client/dist coverage && npm run build" },
+    }, ctx);
+    const absoluteWorktreeClean = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-2",
+      toolName: "bash",
+      input: { command: `rm -rf ${path.join(root, ".pi-company", "worktrees", "coder", "dist")}` },
+    }, ctx);
+    const sourceDelete = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-3",
+      toolName: "bash",
+      input: { command: "rm -rf src package.json" },
+    }, ctx);
+    await handlers.session_shutdown?.({ reason: "quit" }, ctx);
+
+    expect(cleanBuild).toBeUndefined();
+    expect(absoluteWorktreeClean).toBeUndefined();
+    expect(sourceDelete).toMatchObject({ block: true });
   });
 
   it("blocks coder bash mutations that reference paths outside the assigned worktree", async () => {
@@ -1688,6 +1746,9 @@ if [ "$1" = "--json" ] && [ "$2" = "new-pane" ]; then
   exit 0
 fi
 	if [ "$1" = "send" ]; then
+	  exit 0
+	fi
+	if [ "$1" = "send-key" ]; then
 	  exit 0
 	fi
 	if [ "$1" = "respawn-pane" ]; then

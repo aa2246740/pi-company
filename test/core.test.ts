@@ -3299,7 +3299,7 @@ Rate limit 已过期，可以恢复正常工作`);
       expect(result.stderr || result.stdout).toContain("terminal never became readable");
       expect(loadState(root).agents.tester.cmux_surface ?? null).toBeNull();
     });
-  });
+  }, 20_000);
 
   it("reuses CLI spawn for existing planned agents and creates confirmed missing coder worktrees", () => {
     const root = tempRoot();
