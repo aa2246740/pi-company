@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import type {
@@ -2874,6 +2875,9 @@ export function launchCommand(root: string, agentName: string, extensionPathOver
   const rolePath = path.join(companyPaths(root).rolesDir, `${agent.role}.md`);
   const cwd = agent.worktree ?? agent.cwd;
   const modelConfig = resolveAgentModelConfig(root, agentName);
+  const extensionArgs = shouldLaunchWithExplicitExtension(extensionPath)
+    ? ["-e", shellQuote(extensionPath)]
+    : [];
   return [
     `cd ${shellQuote(cwd)}`,
     "&&",
@@ -2884,8 +2888,7 @@ export function launchCommand(root: string, agentName: string, extensionPathOver
     "pi",
     "--approve",
     ...modelArgs(modelConfig),
-    "-e",
-    shellQuote(extensionPath),
+    ...extensionArgs,
     "--company-root",
     shellQuote(root),
     "--company-agent",
@@ -2897,6 +2900,27 @@ export function launchCommand(root: string, agentName: string, extensionPathOver
     "--append-system-prompt",
     shellQuote(rolePath),
   ].join(" ");
+}
+
+function shouldLaunchWithExplicitExtension(extensionPath: string): boolean {
+  const mode = process.env.PI_COMPANY_LAUNCH_EXTENSION?.trim().toLowerCase();
+  if (mode === "1" || mode === "true" || mode === "yes") return true;
+  if (mode === "0" || mode === "false" || mode === "no") return false;
+
+  const piAgentPackageExtension = path.join(
+    os.homedir(),
+    ".pi",
+    "agent",
+    "npm",
+    "node_modules",
+    "pi-company",
+    "dist",
+    "extensions",
+    "company.js",
+  );
+  if (fs.existsSync(piAgentPackageExtension)) return false;
+
+  return fs.existsSync(extensionPath);
 }
 
 export function shellQuote(value: string): string {

@@ -518,6 +518,42 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(command).toContain("--company-agent 'tester'");
   });
 
+  it("can omit explicit extension loading in package-installed mode", () => {
+    const previous = process.env.PI_COMPANY_LAUNCH_EXTENSION;
+    process.env.PI_COMPANY_LAUNCH_EXTENSION = "0";
+    try {
+      const root = tempRoot();
+      initCompany({ root, id: "launch-package-demo" });
+
+      const command = launchCommand(root, "tester", "/tmp/company.js");
+
+      expect(command).toContain("pi --approve");
+      expect(command).not.toContain(" -e ");
+      expect(command).toContain("--company-agent 'tester'");
+    } finally {
+      if (previous === undefined) delete process.env.PI_COMPANY_LAUNCH_EXTENSION;
+      else process.env.PI_COMPANY_LAUNCH_EXTENSION = previous;
+    }
+  });
+
+  it("can force explicit extension loading for source development", () => {
+    const previous = process.env.PI_COMPANY_LAUNCH_EXTENSION;
+    process.env.PI_COMPANY_LAUNCH_EXTENSION = "1";
+    try {
+      const root = tempRoot();
+      initCompany({ root, id: "launch-source-demo" });
+
+      const command = launchCommand(root, "tester", "/tmp/company.js");
+
+      expect(command).toContain("pi --approve");
+      expect(command).toContain(" -e '/tmp/company.js'");
+      expect(command).toContain("--company-agent 'tester'");
+    } finally {
+      if (previous === undefined) delete process.env.PI_COMPANY_LAUNCH_EXTENSION;
+      else process.env.PI_COMPANY_LAUNCH_EXTENSION = previous;
+    }
+  });
+
   it("adds role model policy to launch commands", () => {
     const root = tempRoot();
     initCompany({ root, id: "launch-model-demo" });
