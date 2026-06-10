@@ -21,7 +21,7 @@ const ignoredFilePatterns = [
 ];
 
 const suspiciousAssetNamePattern =
-  /(?:qrcode|qr-code|payment|pay-code|wechat|weixin|alipay|donate|收款|支付).*\.(?:png|jpe?g|webp|gif|heic|pdf)$/i;
+  /(?:qrcode|qr-code|payment|pay-code|wechat|weixin|alipay|donate|收款|支付).*\.(?:png|jpe?g|webp|gif|heic|pdf|svg|bmp|tiff?)$/i;
 
 const textExtensions = new Set([
   ".cjs",
@@ -72,8 +72,13 @@ const rules = [
   },
   {
     name: "literal secret assignment",
+    // Matches `api_key=...`, JSON `"api_key": "..."`, and compound field names
+    // like client_secret / auth_token / jwt_secret. The optional quote before
+    // the delimiter is required to catch quoted JSON/YAML keys, and a leading
+    // word-prefix lets compound names match (the previous `\b` anchor missed
+    // both, silently passing JSON configs and the most common field names).
     pattern:
-      /\b(?:api[_-]?key|secret|access[_-]?token|refresh[_-]?token|password)\b\s*[:=]\s*["']?(?!\$|\$\{|<|your-|your_|example|placeholder|process\.env|PROVIDER_API_KEY|ENV_VAR)([A-Za-z0-9._~+/=-]{16,})/gi,
+      /(?<![A-Za-z0-9])[A-Za-z0-9]*[_-]?(?:api[_-]?key|secret|access[_-]?token|refresh[_-]?token|auth[_-]?token|password)["']?\s*[:=]\s*["']?(?!\$|\$\{|<|your-|your_|example|placeholder|process\.env|PROVIDER_API_KEY|ENV_VAR)([A-Za-z0-9._~+/=-]{16,})/gi,
   },
   {
     name: "local user path",

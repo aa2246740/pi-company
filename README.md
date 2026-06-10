@@ -378,6 +378,14 @@ CLI `pr ready` and `pr auto-test` default to the PR author when `--actor` is
 omitted. Pass `--actor tester` or `--actor system` explicitly when those actors
 actually produced the automated test evidence.
 
+`pr review`, `pr test`, `pr accept`, and `pr auto-test` accept an optional
+`--head <commit>` that pins the evidence to the exact commit the actor verified.
+When omitted, evidence is stamped against the current branch tip. Passing the
+reviewed commit closes a race where a coder lands a new commit between
+inspection and evidence submission: the gate only counts evidence whose head
+matches the PR's current head, so head-pinned evidence on a superseded commit
+correctly goes stale instead of green-lighting unreviewed code.
+
 A PR is mergeable only when:
 
 - the PR author is an existing coder agent

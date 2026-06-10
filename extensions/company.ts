@@ -248,8 +248,12 @@ export default function companyExtension(pi: ExtensionAPI): void {
     if (now - lastAutomaticRateLimitReportAt < AUTOMATIC_RATE_LIMIT_DEDUPE_MS) {
       return loadState(root);
     }
+    // Stamp the dedupe window only after a successful report. If reportRateLimit
+    // throws (e.g. lock contention), a failed report must not suppress the next
+    // 429 and leave the org hammering a rate-limited provider with no backoff.
+    const state = reportRateLimit(root, agentName, reason, kind);
     lastAutomaticRateLimitReportAt = now;
-    return reportRateLimit(root, agentName, reason, kind);
+    return state;
   }
 
   async function releaseOldestProviderLease(): Promise<void> {
@@ -410,6 +414,13 @@ export default function companyExtension(pi: ExtensionAPI): void {
     const provider = providerNameFromRequest(event, ctx);
     const lease = await acquireProviderRequestLease(root, provider, agentName, state.config?.provider_request_policy);
     activeProviderLeases.push(lease);
+    // The acquire can block for seconds behind the concurrency/spacing gate. If
+    // the company was paused while we waited, release immediately rather than
+    // holding a slot for a request that pause may suppress.
+    if (companyPaused) {
+      await releaseOldestProviderLease();
+      return undefined;
+    }
     if (ctx.hasUI) {
       const waited = lease.waited_ms > 0 ? ` waited ${Math.round(lease.waited_ms / 1000)}s` : "";
       ctx.ui.setStatus("pi-company", `provider gate: ${lease.provider}${waited}`);
@@ -419,8 +430,11 @@ export default function companyExtension(pi: ExtensionAPI): void {
 
   pi.on("after_provider_response", async (event, ctx) => {
     if (!isCompanyActive()) return;
-    if (companyPaused) return;
+    // Always release the lease, even if the company was paused mid-request;
+    // otherwise the acquired provider slot leaks until turn_end and starves
+    // other agents of the limited concurrent-request budget.
     await releaseOldestProviderLease();
+    if (companyPaused) return;
     recordLiveRuntime({ status: "idle", turn_ended: true });
     if (event.status !== 429) return;
     const retryAfter = typeof event.headers?.["retry-after"] === "string"

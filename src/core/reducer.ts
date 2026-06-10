@@ -56,6 +56,16 @@ function sameNullablePath(left: string | null, right: string | null): boolean {
   return path.resolve(left) === path.resolve(right);
 }
 
+const AGENT_STATUSES: ReadonlySet<AgentRecord["status"]> = new Set([
+  "planned", "online", "idle", "running", "blocked", "offline",
+]);
+
+function normalizeAgentStatus(value: unknown, fallback: AgentRecord["status"]): AgentRecord["status"] {
+  return typeof value === "string" && AGENT_STATUSES.has(value as AgentRecord["status"])
+    ? (value as AgentRecord["status"])
+    : (value === undefined || value === null ? "online" : fallback);
+}
+
 function agentIdentityEventMatches(existing: AgentRecord, event: CompanyEvent): boolean {
   if (hasOwn(event.data, "role") && nullableEventString(event.data.role) !== existing.role) return false;
   if (hasOwn(event.data, "branch") && nullableEventString(event.data.branch) !== (existing.branch ?? null)) return false;
@@ -115,6 +125,10 @@ export function reduceEvents(events: CompanyEvent[]): CompanyState {
       case "agent.spawned":
       case "agent.heartbeat": {
         const name = String(event.data.name ?? event.actor);
+        // An agent can only update its own record. Without this an actor could
+        // forge a heartbeat/spawn for another agent (e.g. mark a peer offline or
+        // rewrite its mission) on replay.
+        if (event.actor !== name) break;
         const existing = state.agents[name];
         if (!existing) break;
         if (!agentIdentityEventMatches(existing, event)) break;
@@ -128,7 +142,7 @@ export function reduceEvents(events: CompanyEvent[]): CompanyState {
           mission: (event.data.mission as string | undefined) ?? existing.mission ?? null,
           cmux_surface: existing.cmux_surface ?? null,
           last_launch_at: existing.last_launch_at ?? null,
-          status: String(event.data.status ?? "online") as AgentRecord["status"],
+          status: normalizeAgentStatus(event.data.status, existing.status),
           current_task: (event.data.current_task as string | undefined) ?? existing.current_task ?? null,
           last_seen_at: event.ts,
         };
@@ -136,6 +150,7 @@ export function reduceEvents(events: CompanyEvent[]): CompanyState {
       }
       case "agent.launch_recorded": {
         const name = String(event.data.name ?? event.actor);
+        if (event.actor !== name) break;
         const existing = state.agents[name];
         const surface = typeof event.data.cmux_surface === "string" ? event.data.cmux_surface.trim() : "";
         if (!existing || surface.length === 0) break;
@@ -205,6 +220,18 @@ export function reduceEvents(events: CompanyEvent[]): CompanyState {
           state.agents[owner] &&
           issueOwnerCanOwnWorkType(state.agents[owner].role, owner, issue.work_type ?? null)
         ) {
+          const previousOwner = issue.owner;
+          // Release the previous owner from this issue. Otherwise they keep a
+          // stale current_task they can no longer act on (the reducer rejects
+          // their task events for an issue they no longer own) and stay pinned
+          // as "running", which corrupts liveness and hibernation decisions.
+          if (previousOwner && previousOwner !== owner) {
+            const prev = state.agents[previousOwner];
+            if (prev && prev.current_task === id) {
+              prev.current_task = null;
+              if (prev.status === "running") prev.status = "idle";
+            }
+          }
           issue.owner = owner;
           issue.status = "assigned";
           issue.updated_at = event.ts;
@@ -467,8 +494,9 @@ export function evaluatePrGates(config: CompanyConfig | null, pr: PullRequestRec
   const eligibleAcceptances = currentAcceptances.filter((a) => a.accepter !== pr.author && productAcceptanceActorIsValidForAgents(config, agents, a.accepter));
   const latestEligibleReviews = latestReviewPerReviewer(eligibleReviews);
   const latestEligibleAcceptances = latestAcceptancePerAccepter(eligibleAcceptances);
-  const approved = latestEligibleReviews.filter((r) => r.decision === "approve").length;
-  const lastReview = latestEligibleReviews.at(-1);
+  const approvedReviews = latestEligibleReviews.filter((r) => r.decision === "approve");
+  const approved = approvedReviews.length;
+  const anyReviewerRequestsChanges = latestEligibleReviews.some((r) => r.decision === "request_changes");
   const lastTest = eligibleTests.at(-1);
   const lastAcceptance = latestEligibleAcceptances.at(-1);
 
@@ -477,8 +505,14 @@ export function evaluatePrGates(config: CompanyConfig | null, pr: PullRequestRec
   if (!pr.test_brief || pr.test_brief.trim().length === 0) blockers.push("Missing test brief");
   if (currentHead && pr.ready_head !== currentHead) blockers.push("Coder self-test/test brief are stale for current head");
   if (approved < requiredReviews) blockers.push(`Needs ${requiredReviews} reviewer approval(s)`);
-  if (lastReview?.decision === "request_changes") blockers.push("Latest review requests changes");
-  if (blockCaveatedPasses && hasUnresolvedCaveatedEvidence(latestEligibleReviews.filter((r) => r.decision === "approve"))) {
+  // Any reviewer's standing request_changes blocks the merge. A later approval
+  // from a *different* reviewer must not silently override an unresolved
+  // objection, so this checks every reviewer's latest decision, not just the
+  // chronologically last one.
+  if (anyReviewerRequestsChanges) blockers.push("Latest review requests changes");
+  // Evaluate caveat resolution per reviewer so one reviewer's clean approval
+  // cannot clear another reviewer's caveated approval.
+  if (blockCaveatedPasses && approvedReviews.some((review) => hasUnresolvedCaveatedEvidence([review]))) {
     blockers.push("Reviewer approval contains caveat");
   }
 
