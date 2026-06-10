@@ -676,13 +676,13 @@ function launchInCmux(root: string, actor: string, agentName: string, command: s
   if (pane.status !== 0) throw new Error(pane.stderr || pane.stdout || "cmux new-pane failed");
   const surface = parseCmuxSurfaceRef(pane.stdout);
   if (!surface) throw new Error(`cmux new-pane did not return a surface ref: ${pane.stdout}`);
-  const launch = spawnSync("cmux", ["respawn-pane", "--surface", surface, "--command", command], { encoding: "utf8" });
-  if (launch.status !== 0) {
-    const send = spawnSync("cmux", ["send", "--surface", surface, `${command}\n`], { encoding: "utf8" });
-    if (send.status !== 0) {
-      spawnSync("cmux", ["close-surface", "--surface", surface], { encoding: "utf8" });
-      throw new Error(send.stderr || send.stdout || launch.stderr || launch.stdout || "cmux launch failed");
-    }
+  const send = spawnSync("cmux", ["send", "--surface", surface, command], { encoding: "utf8" });
+  const enter = send.status === 0
+    ? spawnSync("cmux", ["send-key", "--surface", surface, "Enter"], { encoding: "utf8" })
+    : send;
+  if (send.status !== 0 || enter.status !== 0) {
+    spawnSync("cmux", ["close-surface", "--surface", surface], { encoding: "utf8" });
+    throw new Error(send.stderr || send.stdout || enter.stderr || enter.stdout || "cmux launch failed");
   }
   if (!waitForCmuxSurfaceReadable(surface)) {
     spawnSync("cmux", ["close-surface", "--surface", surface], { encoding: "utf8" });
@@ -693,10 +693,10 @@ function launchInCmux(root: string, actor: string, agentName: string, command: s
 }
 
 function waitForCmuxSurfaceReadable(surface: string): boolean {
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  for (let attempt = 0; attempt < 25; attempt += 1) {
     const read = spawnSync("cmux", ["read-screen", "--surface", surface, "--lines", "20"], { encoding: "utf8" });
     if (read.status === 0) return true;
-    sleepSync(350);
+    sleepSync(400);
   }
   return false;
 }

@@ -2194,19 +2194,17 @@ function launchInCmux(root: string, actor: string, agentName: string, command: s
   if (pane.status !== 0) return null;
   const surface = parseCmuxSurfaceRef(pane.stdout);
   if (!surface) return null;
-  const launchArgs = ["respawn-pane", "--surface", surface];
-  appendCmuxContextArgs(launchArgs, context);
-  launchArgs.push("--command", command);
-  const launch = runCmux(launchArgs);
-  if (launch.status !== 0) {
-    const sendArgs = ["send", "--surface", surface];
-    appendCmuxContextArgs(sendArgs, context);
-    sendArgs.push(`${command}\n`);
-    const send = runCmux(sendArgs);
-    if (send.status !== 0) {
-      closeCmuxSurface(surface, context);
-      return null;
-    }
+  const sendArgs = ["send", "--surface", surface];
+  appendCmuxContextArgs(sendArgs, context);
+  sendArgs.push(command);
+  const send = runCmux(sendArgs);
+  const enterArgs = ["send-key", "--surface", surface];
+  appendCmuxContextArgs(enterArgs, context);
+  enterArgs.push("Enter");
+  const enter = send.status === 0 ? runCmux(enterArgs) : send;
+  if (send.status !== 0 || enter.status !== 0) {
+    closeCmuxSurface(surface, context);
+    return null;
   }
   if (!waitForCmuxSurfaceReadable(surface, context)) {
     closeCmuxSurface(surface, context);
@@ -2237,12 +2235,12 @@ function appendCmuxContextArgs(args: string[], context: CmuxContext): void {
 }
 
 function waitForCmuxSurfaceReadable(surface: string, context: CmuxContext): boolean {
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  for (let attempt = 0; attempt < 25; attempt += 1) {
     const args = ["read-screen", "--surface", surface, "--lines", "20"];
     appendCmuxContextArgs(args, context);
     const read = runCmux(args);
     if (read.status === 0) return true;
-    sleepSync(350);
+    sleepSync(400);
   }
   return false;
 }

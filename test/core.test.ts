@@ -3658,7 +3658,7 @@ function withFakeCmuxLaunch<T>(surface: string, options: { readable?: boolean },
   const readableCase = options.readable === false
     ? ""
     : `if [ "$1" = "read-screen" ]; then\n  printf 'pi-company tester\\n'\n  exit 0\nfi\n`;
-  fs.writeFileSync(cmuxPath, `#!/bin/sh\nif [ "$1" = "--json" ] && [ "$2" = "new-pane" ]; then\n  printf '{"surface_ref":"${surface}"}\\n'\n  exit 0\nfi\nif [ "$1" = "send" ]; then\n  exit 0\nfi\nif [ "$1" = "respawn-pane" ]; then\n  exit 0\nfi\nif [ "$1" = "close-surface" ]; then\n  exit 0\nfi\n${readableCase}if [ "$1" = "tree" ]; then\n  cat <<'JSON'\n${tree}\nJSON\n  exit 0\nfi\nexit 1\n`, "utf8");
+  fs.writeFileSync(cmuxPath, `#!/bin/sh\nif [ "$1" = "--json" ] && [ "$2" = "new-pane" ]; then\n  printf '{"surface_ref":"${surface}"}\\n'\n  exit 0\nfi\nif [ "$1" = "send" ]; then\n  exit 0\nfi\nif [ "$1" = "send-key" ]; then\n  exit 0\nfi\nif [ "$1" = "respawn-pane" ]; then\n  exit 0\nfi\nif [ "$1" = "close-surface" ]; then\n  exit 0\nfi\n${readableCase}if [ "$1" = "tree" ]; then\n  cat <<'JSON'\n${tree}\nJSON\n  exit 0\nfi\nexit 1\n`, "utf8");
   fs.chmodSync(cmuxPath, 0o755);
   const previousPath = process.env.PATH;
   process.env.PATH = `${binDir}${path.delimiter}${previousPath ?? ""}`;
