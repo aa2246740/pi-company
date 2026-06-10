@@ -1073,6 +1073,12 @@ describe("pi-company extension", () => {
       toolName: "bash",
       input: { command: "lsof -ti:3001 | xargs kill -9 2>/dev/null; sleep 1; cd app && nohup node dist/index.js > /tmp/pi-company-app.log 2>&1 & sleep 2; curl -s http://localhost:3001/api/health" },
     }, ctx);
+    const cleanBuildArtifacts = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-5b",
+      toolName: "bash",
+      input: { command: "cd app && rm -rf dist client/dist && npm run build" },
+    }, ctx);
     const sourceRedirect = await handlers.tool_call?.({
       type: "tool_call",
       toolCallId: "tool-6",
@@ -1094,6 +1100,7 @@ describe("pi-company extension", () => {
     expect(bashResult).toMatchObject({ block: true });
     expect(readOnlyBash).toBeUndefined();
     expect(runtimeRestart).toBeUndefined();
+    expect(cleanBuildArtifacts).toBeUndefined();
     expect(sourceRedirect).toMatchObject({ block: true });
     expect(heredocRedirect).toMatchObject({ block: true });
   });

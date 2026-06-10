@@ -700,6 +700,7 @@ function leadToolBlockReason(event: { toolName: string; input: Record<string, un
     const command = typeof event.input.command === "string" ? event.input.command : "";
     if (isAllowedNonCoderDocBashCommand(command)) return null;
     if (isAllowedNonCoderOperationalBashCommand(command)) return null;
+    if (isAllowedNonCoderValidationCleanupBashCommand(command)) return null;
     if (isMutatingLeadBashCommand(command)) {
       return "pi-company lead cannot mutate runnable or behavior-changing project files through raw bash. Use pi-company issue/spawn/PR/merge tools, delegate implementation to workers, or run /company-pause for explicit ordinary-Pi maintenance.";
     }
