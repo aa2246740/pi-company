@@ -21,6 +21,7 @@ import {
   requestAgentSpawn,
   resolveGitHead,
   sendCompanyMessage,
+  setModelPolicy,
   startTask,
   submitTest,
 } from "../src/core/company.js";
@@ -818,6 +819,16 @@ describe("pi-company extension", () => {
   it("configures role model policy through Pi UI model choices", async () => {
     const root = tempRoot();
     initCompany({ root, id: "extension-model-policy" });
+    setModelPolicy(root, "lead", "defaults", null, {
+      provider: "xiaomi-token-plan-cn",
+      model: "mimo-v2.5-pro",
+      thinking: "high",
+    });
+    setModelPolicy(root, "lead", "role", "coder", {
+      provider: "openai-codex",
+      model: "gpt-5.4-mini",
+      thinking: "medium",
+    });
     const docsCoder = requestAgentSpawn(root, "lead", "coder", "coder-docs", "Docs coder.");
     registerAgent(root, {
       ...docsCoder,
@@ -841,7 +852,7 @@ describe("pi-company extension", () => {
       ]),
     } as never;
     ui.select
-      .mockResolvedValueOnce("Role default: coder")
+      .mockResolvedValueOnce("Role default: coder [current: openai-codex/gpt-5.4-mini:medium]")
       .mockResolvedValueOnce("openai-codex/gpt-5.4-mini context:272K thinking:yes")
       .mockResolvedValueOnce("low")
       .mockResolvedValueOnce("Done");
@@ -854,8 +865,12 @@ describe("pi-company extension", () => {
     await handlers.session_shutdown?.({ reason: "quit" }, ctx);
 
     const targetOptions = ui.select.mock.calls[0]?.[1] as string[] | undefined;
-    expect(targetOptions).toContain("Role default: coder");
+    expect(targetOptions).toContain("Default model (future and unconfigured roles) [current: xiaomi-token-plan-cn/mimo-v2.5-pro:high]");
+    expect(targetOptions).toContain("Role default: coder [current: openai-codex/gpt-5.4-mini:medium]");
+    expect(targetOptions).toContain("Role default: tester [current: inherits default xiaomi-token-plan-cn/mimo-v2.5-pro:high]");
     expect(targetOptions).not.toContain("Agent: coder-docs");
+    expect(targetOptions?.some((option) => option.startsWith("Agent:"))).toBe(false);
+    expect(ui.select.mock.calls[1]?.[0]).toBe("Choose Pi model for Role default: coder (current: openai-codex/gpt-5.4-mini:medium):");
     expect(result.content[0].text).toContain("Configured Role default: coder to openai-codex/gpt-5.4-mini:low.");
     expect(loadConfig(root)?.model_policy?.roles?.coder).toEqual({
       provider: "openai-codex",

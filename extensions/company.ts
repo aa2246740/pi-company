@@ -1874,7 +1874,15 @@ async function configureModelPolicyInteractively(root: string, agentName: string
   return `${changes.join("\n")}\nRelaunch affected agents for changes to take effect.`;
 }
 
-function modelPolicyTargetOptions(state: CompanyState): Array<{ label: string; scope: "defaults" | "role"; name: string | null }> {
+interface ModelPolicyTargetOption {
+  label: string;
+  title: string;
+  scope: "defaults" | "role";
+  name: string | null;
+  currentSummary: string;
+}
+
+function modelPolicyTargetOptions(state: CompanyState): ModelPolicyTargetOption[] {
   const roles = [...new Set([
     "lead",
     "pm",
@@ -1884,26 +1892,48 @@ function modelPolicyTargetOptions(state: CompanyState): Array<{ label: string; s
     "tester",
     ...Object.values(state.agents).map((agent) => agent.role),
   ])].sort();
+  const defaults = state.config?.model_policy?.defaults ?? null;
+  const defaultSummary = formatModelPolicyConfig(defaults) ?? "Pi/lead current model";
   return [
-    { label: "Default model (future and unconfigured roles)", scope: "defaults", name: null },
-    ...roles.map((role) => ({ label: `Role default: ${role}`, scope: "role" as const, name: role })),
+    modelPolicyTargetOption("Default model (future and unconfigured roles)", "defaults", null, defaultSummary),
+    ...roles.map((role) => {
+      const roleConfig = state.config?.model_policy?.roles?.[role] ?? null;
+      const roleSummary = formatModelPolicyConfig(roleConfig)
+        ?? (defaults ? `inherits default ${defaultSummary}` : "inherits Pi/lead current model");
+      return modelPolicyTargetOption(`Role default: ${role}`, "role", role, roleSummary);
+    }),
   ];
+}
+
+function modelPolicyTargetOption(
+  title: string,
+  scope: "defaults" | "role",
+  name: string | null,
+  currentSummary: string,
+): ModelPolicyTargetOption {
+  return {
+    label: `${title} [current: ${currentSummary}]`,
+    title,
+    scope,
+    name,
+    currentSummary,
+  };
 }
 
 async function configureOneModelPolicy(
   root: string,
   agentName: string,
   ctx: ExtensionContext,
-  target: { label: string; scope: "defaults" | "role"; name: string | null },
+  target: ModelPolicyTargetOption,
   modelOptions: Array<{ label: string; provider: string; model: string; reasoning: boolean }>,
 ): Promise<string> {
   const clearLabel = target.scope === "defaults"
     ? "Use Pi/lead current model by default"
-    : "Use default model / clear this override";
-  const modelChoice = await selectRequired(ctx, `Choose Pi model for ${target.label}:`, [clearLabel, ...modelOptions.map((option) => option.label)]);
+    : "Inherit default / clear this role override";
+  const modelChoice = await selectRequired(ctx, `Choose Pi model for ${target.title} (current: ${target.currentSummary}):`, [clearLabel, ...modelOptions.map((option) => option.label)]);
   if (modelChoice === clearLabel) {
     setModelPolicy(root, agentName, target.scope, target.name, null);
-    return `Cleared ${target.label}.`;
+    return `Cleared ${target.title}.`;
   }
 
   const selectedModel = modelOptions.find((option) => option.label === modelChoice);
@@ -1912,7 +1942,7 @@ async function configureOneModelPolicy(
   const thinkingChoices = selectedModel.reasoning
     ? ["inherit Pi default", "off", "minimal", "low", "medium", "high", "xhigh"]
     : ["inherit Pi default", "off"];
-  const thinkingChoice = await selectRequired(ctx, `Choose thinking for ${target.label}:`, thinkingChoices);
+  const thinkingChoice = await selectRequired(ctx, `Choose thinking for ${target.title} (current: ${target.currentSummary}):`, thinkingChoices);
   const modelConfig: PiModelConfig = {
     provider: selectedModel.provider,
     model: selectedModel.model,
@@ -1921,7 +1951,16 @@ async function configureOneModelPolicy(
 
   setModelPolicy(root, agentName, target.scope, target.name, modelConfig);
   const thinking = modelConfig.thinking ? `:${modelConfig.thinking}` : "";
-  return `Configured ${target.label} to ${modelConfig.provider}/${modelConfig.model}${thinking}.`;
+  return `Configured ${target.title} to ${modelConfig.provider}/${modelConfig.model}${thinking}.`;
+}
+
+function formatModelPolicyConfig(config: PiModelConfig | null | undefined): string | null {
+  if (!config) return null;
+  const model = config.models
+    ? `models=${config.models}`
+    : [config.provider, config.model].filter(Boolean).join("/");
+  if (!model) return null;
+  return config.thinking ? `${model}:${config.thinking}` : model;
 }
 
 async function availableModelOptions(ctx: ExtensionContext): Promise<Array<{ label: string; provider: string; model: string; reasoning: boolean }>> {

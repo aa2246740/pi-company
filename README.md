@@ -218,10 +218,13 @@ In the lead Pi pane, the human can simply say "configure role models" or run:
 ```
 
 Lead opens a choice-based wizard. The human does not need to know role names
-ahead of time. The wizard lists:
+ahead of time. The wizard lists each target with its current setting:
 
 - default model for future and unconfigured roles
 - all built-in supported roles: lead, pm, designer, researcher, coder, reviewer, tester
+
+Targets show whether they are explicitly configured, inheriting the default, or
+falling back to Pi's current startup model before the human changes anything.
 
 For each target, lead chooses one model from Pi's configured models, then an
 optional thinking level. After one target is configured, the wizard asks whether
