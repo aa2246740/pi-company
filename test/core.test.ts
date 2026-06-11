@@ -556,11 +556,54 @@ Rate limit 已过期，可以恢复正常工作`);
     try {
       const root = tempRoot();
       initCompany({ root, id: "launch-source-demo" });
+      const extensionPath = path.join(root, "company.js");
+      fs.writeFileSync(extensionPath, "export default function company() {}\n", "utf8");
 
-      const command = launchCommand(root, "tester", "/tmp/company.js");
+      const command = launchCommand(root, "tester", extensionPath);
 
       expect(command).toContain("pi --approve");
-      expect(command).toContain(" -e '/tmp/company.js'");
+      expect(command).toContain(` -e '${extensionPath}'`);
+      expect(command).toContain("--company-agent 'tester'");
+    } finally {
+      if (previous === undefined) delete process.env.PI_COMPANY_LAUNCH_EXTENSION;
+      else process.env.PI_COMPANY_LAUNCH_EXTENSION = previous;
+    }
+  });
+
+  it("does not emit stale missing explicit extension paths", () => {
+    const previous = process.env.PI_COMPANY_LAUNCH_EXTENSION;
+    process.env.PI_COMPANY_LAUNCH_EXTENSION = "1";
+    try {
+      const root = tempRoot();
+      initCompany({ root, id: "launch-stale-extension-demo" });
+
+      const command = launchCommand(root, "tester", "/private/tmp/pi-company-publish/dist/extensions/company.js");
+
+      expect(command).toContain("pi --approve");
+      expect(command).not.toContain(" -e ");
+      expect(command).not.toContain("pi-company-publish");
+      expect(command).toContain("--company-agent 'tester'");
+    } finally {
+      if (previous === undefined) delete process.env.PI_COMPANY_LAUNCH_EXTENSION;
+      else process.env.PI_COMPANY_LAUNCH_EXTENSION = previous;
+    }
+  });
+
+  it("does not emit transient publish extension paths even when present", () => {
+    const previous = process.env.PI_COMPANY_LAUNCH_EXTENSION;
+    process.env.PI_COMPANY_LAUNCH_EXTENSION = "1";
+    try {
+      const root = tempRoot();
+      initCompany({ root, id: "launch-transient-extension-demo" });
+      const extensionPath = path.join(root, "pi-company-publish", "dist", "extensions", "company.js");
+      fs.mkdirSync(path.dirname(extensionPath), { recursive: true });
+      fs.writeFileSync(extensionPath, "export default function company() {}\n", "utf8");
+
+      const command = launchCommand(root, "tester", extensionPath);
+
+      expect(command).toContain("pi --approve");
+      expect(command).not.toContain(" -e ");
+      expect(command).not.toContain("pi-company-publish");
       expect(command).toContain("--company-agent 'tester'");
     } finally {
       if (previous === undefined) delete process.env.PI_COMPANY_LAUNCH_EXTENSION;

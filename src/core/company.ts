@@ -2972,8 +2972,10 @@ export function launchCommand(root: string, agentName: string, extensionPathOver
 }
 
 function shouldLaunchWithExplicitExtension(extensionPath: string): boolean {
+  if (isTransientPublishExtensionPath(extensionPath)) return false;
+
   const mode = process.env.PI_COMPANY_LAUNCH_EXTENSION?.trim().toLowerCase();
-  if (mode === "1" || mode === "true" || mode === "yes") return true;
+  if (mode === "1" || mode === "true" || mode === "yes") return fs.existsSync(extensionPath);
   if (mode === "0" || mode === "false" || mode === "no") return false;
 
   const piAgentPackageExtension = path.join(
@@ -2990,6 +2992,12 @@ function shouldLaunchWithExplicitExtension(extensionPath: string): boolean {
   if (fs.existsSync(piAgentPackageExtension)) return false;
 
   return fs.existsSync(extensionPath);
+}
+
+function isTransientPublishExtensionPath(extensionPath: string): boolean {
+  const normalized = path.normalize(extensionPath);
+  return normalized.includes(`${path.sep}pi-company-publish${path.sep}`)
+    || normalized.endsWith(`${path.sep}pi-company-publish`);
 }
 
 export function shellQuote(value: string): string {
