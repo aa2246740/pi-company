@@ -672,7 +672,7 @@ ${renderCompanySystemPrompt(root, agentName, role, lead)}`,
   });
 
   pi.registerCommand("company-configure-models", {
-    description: "Configure role or agent Pi model policy through choices",
+    description: "Configure default and role Pi model policy through choices",
     handler: async (_args, ctx) => {
       if (!isCompanyActive()) {
         notifyNoCompany(ctx);
@@ -1270,10 +1270,10 @@ function registerTools(pi: ExtensionAPI, runtime: {
   pi.registerTool({
     name: "company_configure_model_policy",
     label: "Configure Models",
-    description: "Lead-only interactive selector for role or agent Pi models. Uses Pi's configured available models; it does not accept free-form model names.",
-    promptSnippet: "Configure pi-company role or agent model policy through Pi UI choices.",
+    description: "Lead-only interactive selector for default and role-level Pi models. Uses Pi's configured available models; it does not accept free-form model names.",
+    promptSnippet: "Configure pi-company default and role model policy through Pi UI choices.",
     promptGuidelines: [
-      "Use company_configure_model_policy when the human asks lead to set model/provider choices for roles or agents.",
+      "Use company_configure_model_policy when the human asks lead to set company-wide model/provider choices for roles.",
       "This tool is interactive: pick from Pi's configured available models instead of inventing provider or model strings.",
       "Model changes affect newly launched or relaunched agents; running Pi panes keep their current model until restarted or changed inside Pi.",
     ],
@@ -1855,7 +1855,7 @@ async function configureModelPolicyInteractively(root: string, agentName: string
   while (true) {
     const targetOptions = modelPolicyTargetOptions(loadState(root));
     const doneLabel = changes.length > 0 ? "Done" : "Cancel";
-    const targetChoice = await selectRequired(ctx, "Choose role or agent to configure:", [
+    const targetChoice = await selectRequired(ctx, "Choose default or role to configure:", [
       ...targetOptions.map((option) => option.label),
       doneLabel,
     ]);
@@ -1866,7 +1866,7 @@ async function configureModelPolicyInteractively(root: string, agentName: string
     const change = await configureOneModelPolicy(root, agentName, ctx, target, modelOptions);
     changes.push(change);
 
-    const next = await selectRequired(ctx, "Configure another model policy?", ["Configure another role", "Done"]);
+    const next = await selectRequired(ctx, "Configure another model policy?", ["Configure another role/default", "Done"]);
     if (next === "Done") break;
   }
 
@@ -1874,7 +1874,7 @@ async function configureModelPolicyInteractively(root: string, agentName: string
   return `${changes.join("\n")}\nRelaunch affected agents for changes to take effect.`;
 }
 
-function modelPolicyTargetOptions(state: CompanyState): Array<{ label: string; scope: "defaults" | "role" | "agent"; name: string | null }> {
+function modelPolicyTargetOptions(state: CompanyState): Array<{ label: string; scope: "defaults" | "role"; name: string | null }> {
   const roles = [...new Set([
     "lead",
     "pm",
@@ -1884,11 +1884,9 @@ function modelPolicyTargetOptions(state: CompanyState): Array<{ label: string; s
     "tester",
     ...Object.values(state.agents).map((agent) => agent.role),
   ])].sort();
-  const agents = Object.values(state.agents).map((agent) => agent.name).sort();
   return [
     { label: "Default model (future and unconfigured roles)", scope: "defaults", name: null },
-    ...roles.map((role) => ({ label: `Role: ${role}`, scope: "role" as const, name: role })),
-    ...agents.map((agent) => ({ label: `Agent: ${agent}`, scope: "agent" as const, name: agent })),
+    ...roles.map((role) => ({ label: `Role default: ${role}`, scope: "role" as const, name: role })),
   ];
 }
 
@@ -1896,7 +1894,7 @@ async function configureOneModelPolicy(
   root: string,
   agentName: string,
   ctx: ExtensionContext,
-  target: { label: string; scope: "defaults" | "role" | "agent"; name: string | null },
+  target: { label: string; scope: "defaults" | "role"; name: string | null },
   modelOptions: Array<{ label: string; provider: string; model: string; reasoning: boolean }>,
 ): Promise<string> {
   const clearLabel = target.scope === "defaults"

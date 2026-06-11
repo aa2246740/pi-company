@@ -65,7 +65,7 @@ human -> lead -> local issues -> coder worktrees -> local PR
 | 本地 PR gates | Coder ready、自动化测试、reviewer approval、tester pass、PM/lead acceptance。 |
 | 恢复快照 | worker 窗口消失时，lead 看到有界终端文本，不会一直干等。 |
 | Provider queue | 同 provider 请求限流错峰，减少过载错误和恢复风暴。 |
-| 角色模型策略 | 不同角色或具名 agent 可以使用不同的 Pi 已配置模型。 |
+| 角色模型策略 | 不同角色可以使用不同的 Pi 已配置模型。 |
 
 ## 它到底是什么？
 
@@ -202,7 +202,7 @@ node dist/src/cli.js status
 
 ## 角色模型策略
 
-pi-company 可以为不同角色或具名 agent 使用不同 Pi 模型。模型不是自由填写的；lead 使用 Pi 已配置的可选模型列表，也就是 `/model` 和 `pi --list-models` 的同一来源。
+pi-company 可以为不同角色使用不同 Pi 模型。模型不是自由填写的；lead 使用 Pi 已配置的可选模型列表，也就是 `/model` 和 `pi --list-models` 的同一来源。
 
 在 lead 的 Pi pane 中，人类可以直接说“配置角色模型”，或运行：
 
@@ -214,7 +214,6 @@ Lead 会打开基于选择项的配置流程。用户不需要提前知道所有
 
 - future/unconfigured roles 的 default model
 - 内置角色：lead、pm、designer、researcher、coder、reviewer、tester
-- 已存在的 named agents
 
 配置会保存到 `.pi-company/company.yaml`：
 
@@ -226,6 +225,8 @@ model_policy:
       model: gpt-5.4-mini
       thinking: low
 ```
+
+这是组织级策略。某一个正在运行的具体 agent 如果临时想换模型，直接进入那个 Pi pane，用 Pi 自己的模型切换能力处理，不需要写进 pi-company 的全局配置。
 
 运行中的 Pi pane 会保持当前模型，直到重启或在 Pi 内手动切换。
 

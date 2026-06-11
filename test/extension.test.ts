@@ -818,6 +818,11 @@ describe("pi-company extension", () => {
   it("configures role model policy through Pi UI model choices", async () => {
     const root = tempRoot();
     initCompany({ root, id: "extension-model-policy" });
+    const docsCoder = requestAgentSpawn(root, "lead", "coder", "coder-docs", "Docs coder.");
+    registerAgent(root, {
+      ...docsCoder,
+      status: "online",
+    });
     const { handlers, pi, tools } = fakePi({
       "company-root": root,
       "company-agent": "lead",
@@ -836,7 +841,7 @@ describe("pi-company extension", () => {
       ]),
     } as never;
     ui.select
-      .mockResolvedValueOnce("Role: coder")
+      .mockResolvedValueOnce("Role default: coder")
       .mockResolvedValueOnce("openai-codex/gpt-5.4-mini context:272K thinking:yes")
       .mockResolvedValueOnce("low")
       .mockResolvedValueOnce("Done");
@@ -848,7 +853,10 @@ describe("pi-company extension", () => {
     const result = await tool.execute("tool-1", {}, undefined, undefined, ctx) as ToolResult;
     await handlers.session_shutdown?.({ reason: "quit" }, ctx);
 
-    expect(result.content[0].text).toContain("Configured Role: coder to openai-codex/gpt-5.4-mini:low.");
+    const targetOptions = ui.select.mock.calls[0]?.[1] as string[] | undefined;
+    expect(targetOptions).toContain("Role default: coder");
+    expect(targetOptions).not.toContain("Agent: coder-docs");
+    expect(result.content[0].text).toContain("Configured Role default: coder to openai-codex/gpt-5.4-mini:low.");
     expect(loadConfig(root)?.model_policy?.roles?.coder).toEqual({
       provider: "openai-codex",
       model: "gpt-5.4-mini",

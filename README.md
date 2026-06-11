@@ -65,7 +65,7 @@ Every company agent gets a desk panel inside Pi. Agents coordinate through local
 | Local PR gates | Coder ready, automated tests, reviewer approval, tester pass, PM/lead acceptance. |
 | Recovery snapshots | If a worker pane disappears, lead sees bounded terminal text instead of waiting silently. |
 | Provider queue | Same-provider requests are limited and staggered before overload errors pile up. |
-| Role model policy | Different roles or named agents can launch with different configured Pi models. |
+| Role model policy | Different roles can launch with different configured Pi models. |
 
 ## What It Is
 
@@ -207,7 +207,7 @@ For an exact shell command without spawn ergonomics, use `launch-command <agent>
 
 ## Role Model Policy
 
-Pi-company can launch different roles or named agents with different Pi models.
+Pi-company can launch different roles with different Pi models.
 Model choices are not free-form inside the Pi UI: lead uses Pi's configured
 available model list, the same source as `/model` and `pi --list-models`.
 
@@ -222,11 +222,10 @@ ahead of time. The wizard lists:
 
 - default model for future and unconfigured roles
 - all built-in supported roles: lead, pm, designer, researcher, coder, reviewer, tester
-- existing named agents
 
 For each target, lead chooses one model from Pi's configured models, then an
 optional thinking level. After one target is configured, the wizard asks whether
-to configure another role.
+to configure another role or default.
 
 The selection is saved to `.pi-company/company.yaml` under `model_policy`.
 For example:
@@ -245,8 +244,13 @@ model_policy:
 
 If no explicit default is configured, agents inherit Pi's normal startup model,
 which is usually the same model the lead pane was launched with. If default is
-changed, dynamically added roles and agents inherit that default unless a role
-or named-agent override is set.
+changed, dynamically added agents inherit that default unless their role has a
+role model policy.
+
+Pi-company intentionally keeps this as an organization-level policy. If one
+specific running agent needs a temporary model change, switch it in that agent's
+own Pi pane with Pi's normal model controls instead of encoding it into the
+company defaults.
 
 The next `launch-command` or `company_spawn_agent` run for that role includes
 Pi flags such as `--provider`, `--model`, and `--thinking`. Running Pi panes keep
