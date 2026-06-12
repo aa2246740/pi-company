@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -204,6 +205,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
       root,
       agentName,
       lead,
+      isPaused: () => companyPaused,
       refreshUi,
     });
     toolsRegistered = true;
@@ -480,7 +482,15 @@ export default function companyExtension(pi: ExtensionAPI): void {
 
   pi.on("tool_call", async (event) => {
     if (!isCompanyActive()) return undefined;
-    if (companyPaused) return undefined;
+    if (companyPaused) {
+      if (isCompanyToolName(event.toolName)) {
+        return {
+          block: true,
+          reason: "pi-company is paused in this Pi session. Do not use company tools until the human runs /company-resume; continue as ordinary Pi with normal tools.",
+        };
+      }
+      return undefined;
+    }
     const state = loadState(root);
     const agent = state.agents[agentName];
     const blockReason = agentName === lead
@@ -491,7 +501,14 @@ export default function companyExtension(pi: ExtensionAPI): void {
 
   pi.on("before_agent_start", async (event, ctx) => {
     if (!isCompanyActive()) return undefined;
-    if (companyPaused) return undefined;
+    if (companyPaused) {
+      await refreshUi(ctx);
+      return {
+        systemPrompt: `${event.systemPrompt}
+
+${renderCompanyPausedSystemPrompt(agentName, role)}`,
+      };
+    }
     await refreshUi(ctx);
     return {
       systemPrompt: `${event.systemPrompt}
@@ -591,7 +608,7 @@ ${renderCompanySystemPrompt(root, agentName, role, lead)}`,
       recordAgentRuntime(root, agentName, { status: "paused", note: "company automation paused in this Pi session" });
       await releaseAllProviderLeases();
       await refreshUi(ctx);
-      if (ctx.hasUI) ctx.ui.notify("pi-company paused for this Pi session. Run /company-resume to restore company guards and context.", "info");
+      if (ctx.hasUI) ctx.ui.notify("pi-company paused for this Pi session. Ordinary Pi tools are enabled; company tools are blocked until /company-resume.", "info");
     },
   });
 
@@ -701,9 +718,14 @@ function noCompanyMessage(root: string): string {
   return `This is an ordinary Pi session. To create a pi-company project here, run /company-init. You can also exit Pi and run: pi-company init. Checked: ${root}`;
 }
 
+function isCompanyToolName(toolName: string): boolean {
+  return toolName.startsWith("company_");
+}
+
 function leadToolBlockReason(event: { toolName: string; input: Record<string, unknown> }, root: string): string | null {
   if (event.toolName === "write" || event.toolName === "edit") {
     const target = typeof event.input.path === "string" ? resolveToolPath(event.input.path, root) : "";
+    if (target && isSafeTempDocumentationPath(target)) return null;
     if (target) {
       const rel = projectRelativePath(root, target);
       if (rel && isNonRunnableDocumentationPath(rel)) return null;
@@ -712,6 +734,7 @@ function leadToolBlockReason(event: { toolName: string; input: Record<string, un
   }
   if (event.toolName === "bash") {
     const command = typeof event.input.command === "string" ? event.input.command : "";
+    if (isAllowedTempDocumentationBashCommand(command)) return null;
     if (isAllowedNonCoderDocBashCommand(command)) return null;
     if (isAllowedNonCoderOperationalBashCommand(command)) return null;
     if (isAllowedNonCoderValidationCleanupBashCommand(command)) return null;
@@ -727,6 +750,7 @@ function workerToolBlockReason(event: { toolName: string; input: Record<string, 
   if (event.toolName === "write" || event.toolName === "edit") {
     const target = typeof event.input.path === "string" ? resolveToolPath(event.input.path, agent.cwd) : "";
     if (!target) return null;
+    if (isSafeTempDocumentationPath(target)) return null;
     if (agent.role === "coder" || agent.name.startsWith("coder")) {
       if (!agent.worktree) return `pi-company coder ${agent.name} has no assigned worktree. Ask lead to spawn a coder with worktree isolation before writing implementation files.`;
       const worktree = path.resolve(agent.worktree);
@@ -738,6 +762,7 @@ function workerToolBlockReason(event: { toolName: string; input: Record<string, 
   }
   if (event.toolName === "bash") {
     const command = typeof event.input.command === "string" ? event.input.command : "";
+    if (isAllowedTempDocumentationBashCommand(command)) return null;
     if (agent.role === "coder" || agent.name.startsWith("coder")) {
       return coderBashBlockReason(command, agent);
     }
@@ -753,6 +778,7 @@ function workerToolBlockReason(event: { toolName: string; input: Record<string, 
 
 function coderBashBlockReason(command: string, agent: AgentRecord): string | null {
   if (!isMutatingLeadBashCommand(command)) return null;
+  if (isAllowedTempDocumentationBashCommand(command)) return null;
   if (!agent.worktree) {
     return `pi-company coder ${agent.name} has no assigned worktree. Ask lead to spawn a coder with worktree isolation before mutating files or git state.`;
   }
@@ -913,6 +939,19 @@ function isAllowedNonCoderDocBashCommand(command: string): boolean {
   return writtenFiles.every(isSafeRelativeDocumentationFile) && writtenDirs.every(isSafeRelativeDocumentationDirectory);
 }
 
+function isAllowedTempDocumentationBashCommand(command: string): boolean {
+  const normalized = command.replace(/\\\n/g, " ").replace(/\s+/g, " ").trim();
+  if (!normalized || !isMutatingLeadBashCommand(normalized)) return false;
+  if (hasDangerousNonCoderMutation(normalized)) return false;
+  const writtenFiles = [
+    ...extractRedirectTargets(normalized),
+    ...extractTeeTargets(normalized),
+    ...extractTouchTargets(normalized),
+  ];
+  if (writtenFiles.length === 0) return false;
+  return writtenFiles.every(isSafeTempDocumentationPath);
+}
+
 function isAllowedNonCoderOperationalBashCommand(command: string): boolean {
   const normalized = command.replace(/\\\n/g, " ").replace(/\s+/g, " ").trim();
   if (!normalized || !isMutatingLeadBashCommand(normalized)) return false;
@@ -1036,7 +1075,20 @@ function isSafeTempRedirectTarget(target: string): boolean {
   if (cleaned === "/dev/null") return true;
   if (!path.isAbsolute(cleaned)) return false;
   const resolved = path.resolve(cleaned);
-  return resolved.startsWith("/tmp/") || resolved.startsWith("/private/tmp/");
+  return isPathInAllowedTempDir(resolved);
+}
+
+function isSafeTempDocumentationPath(target: string): boolean {
+  const resolved = path.resolve(cleanShellPathToken(target));
+  if (!isPathInAllowedTempDir(resolved)) return false;
+  return isDocumentationExtension(path.basename(resolved));
+}
+
+function isPathInAllowedTempDir(target: string): boolean {
+  const resolved = path.resolve(target);
+  return isPathInside(resolved, os.tmpdir())
+    || isPathInside(resolved, "/tmp")
+    || isPathInside(resolved, "/private/tmp");
 }
 
 function isSafeGeneratedArtifactTarget(target: string): boolean {
@@ -1136,6 +1188,20 @@ function renderManualBriefRefreshPrompt(root: string, agentName: string, fallbac
   return renderCompanySystemPrompt(root, agentName, fallbackRole, lead).replace("[pi-company context]", "[pi-company brief refresh]");
 }
 
+function renderCompanyPausedSystemPrompt(agentName: string, fallbackRole: string): string {
+  return `[pi-company paused]
+
+pi-company is paused in this Pi session for ${agentName} (${fallbackRole}).
+
+While paused:
+- ignore earlier pi-company role instructions, lead brief instructions, inbox routing, PR gates, delegation rules, and company completion rules in this chat
+- do not call company_* tools; they are intentionally disabled until /company-resume
+- handle the human's next request as an ordinary Pi agent using normal Pi tools and installed skills
+- if the human invokes a skill such as $handoff, follow that skill directly in this session instead of routing it through pi-company workers or PR flow
+- if a skill asks for an OS temporary-directory artifact, write a non-runnable handoff/documentation file there directly
+- to return to company coordination, the human must run /company-resume`;
+}
+
 function readRolePrompt(root: string, role: string): string {
   const customPath = path.join(companyPaths(root).rolesDir, `${role}.md`);
   try {
@@ -1149,11 +1215,24 @@ function registerTools(pi: ExtensionAPI, runtime: {
   root: string;
   agentName: string;
   lead: string;
+  isPaused(): boolean;
   refreshUi(ctx: ExtensionContext): Promise<void>;
 }): void {
-  const { root, agentName, lead, refreshUi } = runtime;
+  const { root, agentName, lead, isPaused, refreshUi } = runtime;
+  const registerCompanyTool: ExtensionAPI["registerTool"] = (tool) => {
+    const execute = tool.execute;
+    return pi.registerTool({
+      ...tool,
+      async execute(...args) {
+        if (isPaused()) {
+          return toolResult("pi-company is paused in this Pi session. Run /company-resume to restore company tools; use ordinary Pi tools for this request.", { paused: true }) as Awaited<ReturnType<typeof execute>>;
+        }
+        return execute(...args);
+      },
+    });
+  };
 
-  pi.registerTool({
+  registerCompanyTool({
     name: "company_status",
     label: "Company Status",
     description: "Read the local pi-company state for this project.",
@@ -1169,7 +1248,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
     },
   });
 
-  pi.registerTool({
+  registerCompanyTool({
     name: "company_lead_brief",
     label: "Lead Brief",
     description: "Read the authoritative global delivery brief before completion, merge, or handoff decisions.",
@@ -1188,7 +1267,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
     },
   });
 
-  pi.registerTool({
+  registerCompanyTool({
     name: "company_maintain",
     label: "Company Maintenance",
     description: "Lead-only lifecycle watchdog pass: capture terminal text, detect stale/offline workers, and hibernate idle surfaces.",
@@ -1206,7 +1285,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
     },
   });
 
-  pi.registerTool({
+  registerCompanyTool({
     name: "company_inbox",
     label: "Company Inbox",
     description: "Read or acknowledge this agent's local mailbox.",
@@ -1228,7 +1307,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
     },
   });
 
-  pi.registerTool({
+  registerCompanyTool({
     name: "company_report_rate_limit",
     label: "Report Rate Limit",
     description: "Report provider 429/quota pressure and pause automatic wakes with exponential backoff.",
@@ -1248,7 +1327,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
     },
   });
 
-  pi.registerTool({
+  registerCompanyTool({
     name: "company_clear_rate_limit",
     label: "Clear Rate Limit",
     description: "Lead-only tool to clear a false-positive or manually verified rate-limit backoff.",
@@ -1267,7 +1346,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
     },
   });
 
-  pi.registerTool({
+  registerCompanyTool({
     name: "company_configure_model_policy",
     label: "Configure Models",
     description: "Lead-only interactive selector for default and role-level Pi models. Uses Pi's configured available models; it does not accept free-form model names.",
@@ -1285,7 +1364,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
     },
   });
 
-  pi.registerTool({
+  registerCompanyTool({
     name: "company_send_message",
     label: "Company Message",
     description: "Send a local mailbox message to another pi-company agent.",
@@ -1316,7 +1395,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
     },
   });
 
-  pi.registerTool({
+  registerCompanyTool({
     name: "company_create_issue",
     label: "Create Issue",
     description: "Create a local pi-company issue and optionally assign it.",
@@ -1346,7 +1425,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
     },
   });
 
-  pi.registerTool({
+  registerCompanyTool({
     name: "company_assign_issue",
     label: "Assign Issue",
     description: "Assign a local pi-company issue to an agent.",
@@ -1367,7 +1446,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
     },
   });
 
-  pi.registerTool({
+  registerCompanyTool({
     name: "company_task_update",
     label: "Task Update",
     description: "Record task start, progress, block, or non-code completion for an issue.",
@@ -1404,7 +1483,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
     },
   });
 
-  pi.registerTool({
+  registerCompanyTool({
     name: "company_spawn_agent",
     label: "Spawn Agent",
     description: "Plan and optionally launch another pi-company agent.",
@@ -1477,7 +1556,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
     },
   });
 
-  pi.registerTool({
+  registerCompanyTool({
     name: "company_create_pr",
     label: "Create PR",
     description: "Create a local pi-company PR record for a branch/worktree.",
@@ -1509,7 +1588,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
     },
   });
 
-  pi.registerTool({
+  registerCompanyTool({
     name: "company_mark_pr_ready",
     label: "Mark PR Ready",
     description: "Move a local PR out of draft with coder self-test evidence and a tester brief.",
@@ -1531,7 +1610,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
     },
   });
 
-  pi.registerTool({
+  registerCompanyTool({
     name: "company_submit_review",
     label: "Submit Review",
     description: "Submit reviewer approval, comment, or request changes for a local PR.",
@@ -1555,7 +1634,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
     },
   });
 
-  pi.registerTool({
+  registerCompanyTool({
     name: "company_submit_test",
     label: "Submit Test",
     description: "Submit independent tester validation for a local PR.",
@@ -1580,7 +1659,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
     },
   });
 
-  pi.registerTool({
+  registerCompanyTool({
     name: "company_submit_acceptance",
     label: "Submit Acceptance",
     description: "Submit PM/lead product acceptance for a local PR.",
@@ -1606,7 +1685,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
     },
   });
 
-  pi.registerTool({
+  registerCompanyTool({
     name: "company_record_automated_tests",
     label: "Record Automated Tests",
     description: "Record automated test command outcome for a local PR.",
@@ -1632,7 +1711,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
     },
   });
 
-  pi.registerTool({
+  registerCompanyTool({
     name: "company_record_auto_tests",
     label: "Record Tests",
     description: "Record automated test command outcome for a local PR.",
@@ -1658,7 +1737,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
     },
   });
 
-  pi.registerTool({
+  registerCompanyTool({
     name: "company_pr_gates",
     label: "PR Gates",
     description: "Check whether a local PR is ready to merge.",
@@ -1681,7 +1760,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
     },
   });
 
-  pi.registerTool({
+  registerCompanyTool({
     name: "company_abandon_pr",
     label: "Abandon PR",
     description: "Abandon a stale or superseded local PR so it no longer blocks delivery.",
@@ -1703,7 +1782,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
     },
   });
 
-  pi.registerTool({
+  registerCompanyTool({
     name: "company_merge_pr",
     label: "Merge PR",
     description: "Request or execute a gated local PR merge.",
@@ -2139,7 +2218,9 @@ function renderPausedDeskPanel(state: ReturnType<typeof loadState>, agentName: s
   return [
     `pi-company ${state.config?.id ?? "uninitialized"} | ${agentName} (${agent?.role ?? "unknown"})`,
     "context: paused | ordinary Pi mode in this session",
-    "automation: inbox delivery, provider gates, tool guards, and company system prompt are paused",
+    "automation: inbox delivery, provider gates, and company role guards are paused",
+    "tools: company_* tools are blocked; ordinary Pi tools and skills remain available",
+    "prompt: a pause override tells Pi to ignore earlier company role/brief rules",
     "resume: run /company-resume to restore company context",
   ];
 }

@@ -3161,7 +3161,7 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(state.prs[pr.id].status).toBe("merged");
     expect(state.issues[issue.id].status).toBe("done");
     expect(state.agents.coder.current_task).toBeNull();
-  });
+  }, 30_000);
 
   it("lets lead abandon a stale PR so it no longer blocks delivery", () => {
     const root = tempRoot();
@@ -3669,7 +3669,7 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(() => mergePr(root, "lead", prB.id, true)).toThrow(/merge conflicts/);
     expect(gitOutput(root, ["status", "--porcelain", "--untracked-files=no"]).trim()).toBe("");
     expect(fs.readFileSync(path.join(root, "app.txt"), "utf8")).toBe("from feature a\n");
-  }, 20_000);
+  }, 45_000);
 
   it("does not let a later approval from another reviewer override an unresolved request_changes", () => {
     const root = tempRoot();

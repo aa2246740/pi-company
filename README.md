@@ -103,10 +103,11 @@ If you prefer shell-first setup, `pi-company init` does the same initialization 
 If you want to manually push the current role instructions and lead brief into the visible chat, run `/company-start` inside Pi. It is a refresh command, not a required resume step.
 
 If a one-off skill or maintenance task needs ordinary Pi behavior, run
-`/company-pause` in that Pi session. It pauses company tool guards, inbox
-delivery, provider gates, and company prompt injection for that session only.
-Run `/company-resume` to restore company context. Use this as an escape hatch,
-not as the normal way to bypass role ownership.
+`/company-pause` in that Pi session. It pauses inbox delivery and provider
+gates, blocks `company_*` tools, disables role file guards, and injects a small
+pause override telling Pi to ignore earlier company role/brief instructions for
+that session only. Run `/company-resume` to restore company context. Use this as
+an escape hatch, not as the normal way to bypass role ownership.
 
 Installing the Pi package does not make every `pi` session a company session. In ordinary directories without `.pi-company/`, Pi stays ordinary: pi-company does not create files, register company tools, mirror human input, gate provider requests, or show the company desk panel.
 
@@ -160,6 +161,12 @@ Lead is not a passive dispatcher. Lead should make routine low-risk decisions, p
 
 Lead should not absorb role-owned execution work. If the human names a required skill, tool, or method, lead preserves that requirement in the assignment to the responsible agent instead of doing that work in the lead context.
 
+Handoff is the important exception. If the human invokes `$handoff` or asks for
+a handoff to another agent/session, lead should produce the redacted
+non-runnable handoff directly, save it to the OS temporary directory, include
+suggested skills, and avoid worker delegation, local issues, PR gates, or
+project worktrees. Handoff is a human export artifact, not a project deliverable.
+
 ## Current Scope
 
 - Pi required
@@ -193,6 +200,10 @@ Runnable or behavior-changing files still belong to coder worktrees and PR
 gates: source files, HTML/CSS/JS, configs, package files, scripts, CI, tests,
 assets, generated app files, and other implementation artifacts. Coder agents
 can mutate only inside their assigned worktree.
+
+Non-runnable Markdown/text handoff artifacts under the OS temporary directory
+are allowed for all roles. They are treated as human export artifacts, not
+project deliverables.
 
 For source development:
 

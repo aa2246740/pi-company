@@ -80,7 +80,7 @@ describe("pi-company extension", () => {
   it("pauses and resumes pi-company guards in the current Pi session", async () => {
     const root = tempRoot();
     initCompany({ root, id: "extension-session-pause" });
-    const { handlers, pi, commands } = fakePi({
+    const { handlers, pi, tools, commands } = fakePi({
       "company-root": root,
       "company-agent": "lead",
       "company-role": "lead",
@@ -92,6 +92,8 @@ describe("pi-company extension", () => {
     const pause = commands.find((command) => command.name === "company-pause");
     const resume = commands.find((command) => command.name === "company-resume");
     if (!pause || !resume) throw new Error("pause/resume command was not registered");
+    const statusTool = tools.find((tool) => tool.name === "company_status");
+    if (!statusTool) throw new Error("company_status tool was not registered");
 
     await pause.handler("", ctx);
     const pausedWrite = await handlers.tool_call?.({
@@ -100,8 +102,15 @@ describe("pi-company extension", () => {
       toolName: "write",
       input: { path: path.join(root, "index.html"), content: "<html></html>" },
     }, ctx);
+    const pausedCompanyTool = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-paused-company",
+      toolName: "company_status",
+      input: {},
+    }, ctx);
+    const pausedStatusResult = await statusTool.execute("tool-1", {}, undefined, undefined, ctx) as ToolResult;
     const pausedInput = await handlers.input?.({ source: "interactive", text: "ordinary pi steering" }, ctx);
-    const pausedPrompt = await handlers.before_agent_start?.({ systemPrompt: "base" }, ctx);
+    const pausedPrompt = await handlers.before_agent_start?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
 
     await resume.handler("", ctx);
     const resumedWrite = await handlers.tool_call?.({
@@ -115,8 +124,12 @@ describe("pi-company extension", () => {
 
     expect(ui.setStatus).toHaveBeenCalledWith("pi-company", "lead/lead paused");
     expect(pausedWrite).toBeUndefined();
+    expect(pausedCompanyTool).toMatchObject({ block: true });
+    expect(pausedStatusResult.content[0].text).toContain("pi-company is paused");
     expect(pausedInput).toEqual({ action: "continue" });
-    expect(pausedPrompt).toBeUndefined();
+    expect(pausedPrompt.systemPrompt).toContain("[pi-company paused]");
+    expect(pausedPrompt.systemPrompt).toContain("ignore earlier pi-company role instructions");
+    expect(pausedPrompt.systemPrompt).not.toContain("[pi-company context]");
     expect(resumedWrite).toMatchObject({ block: true });
     expect(resumedPrompt).toMatchObject({ systemPrompt: expect.stringContaining("[pi-company context]") });
   });
@@ -1170,6 +1183,18 @@ describe("pi-company extension", () => {
       toolName: "bash",
       input: { command: "cat > index.html <<'EOF'\n<html></html>\nEOF" },
     }, ctx);
+    const tempHandoffWrite = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-8",
+      toolName: "write",
+      input: { path: path.join(os.tmpdir(), "her-handoff.md"), content: "# Handoff\n" },
+    }, ctx);
+    const tempHandoffBash = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-9",
+      toolName: "bash",
+      input: { command: `cat > ${path.join(os.tmpdir(), "her-handoff.txt")} <<'EOF'\nHandoff\nEOF` },
+    }, ctx);
     await handlers.session_shutdown?.({ reason: "quit" }, ctx);
 
     expect(writeResult).toMatchObject({ block: true });
@@ -1182,6 +1207,8 @@ describe("pi-company extension", () => {
     expect(cleanBuildArtifacts).toBeUndefined();
     expect(sourceRedirect).toMatchObject({ block: true });
     expect(heredocRedirect).toMatchObject({ block: true });
+    expect(tempHandoffWrite).toBeUndefined();
+    expect(tempHandoffBash).toBeUndefined();
   });
 
   it("does not apply the lead direct-work guard to coder agents", async () => {
@@ -1444,6 +1471,12 @@ describe("pi-company extension", () => {
       toolName: "bash",
       input: { command: "cat > ../index.html <<'EOF'\n<html></html>\nEOF" },
     }, ctx);
+    const tempHandoffBash = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-4",
+      toolName: "bash",
+      input: { command: `cat > ${path.join(os.tmpdir(), "coder-handoff.md")} <<'EOF'\n# Handoff\nEOF` },
+    }, ctx);
     await handlers.session_shutdown?.({ reason: "quit" }, ctx);
 
     expect(insideBash).toBeUndefined();
@@ -1451,6 +1484,7 @@ describe("pi-company extension", () => {
     expect(readDevNullBash).toBeUndefined();
     expect(outsideBash).toMatchObject({ block: true });
     expect(parentBash).toMatchObject({ block: true });
+    expect(tempHandoffBash).toBeUndefined();
     expect(String((outsideBash as { reason?: string } | undefined)?.reason)).toContain("only inside its assigned worktree");
   });
 
@@ -1492,11 +1526,25 @@ describe("pi-company extension", () => {
       toolName: "edit",
       input: { path: path.join(root, "site", "index.html"), edits: [] },
     }, ctx);
+    const tempHandoffWrite = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-4",
+      toolName: "write",
+      input: { path: path.join(os.tmpdir(), "coder-handoff.md"), content: "# Handoff\n" },
+    }, ctx);
+    const tempCodeWrite = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-5",
+      toolName: "write",
+      input: { path: path.join(os.tmpdir(), "coder-output.js"), content: "console.log('nope')\n" },
+    }, ctx);
     await handlers.session_shutdown?.({ reason: "quit" }, ctx);
 
     expect(insideWrite).toBeUndefined();
     expect(outsideWrite).toMatchObject({ block: true });
     expect(outsideEdit).toMatchObject({ block: true });
+    expect(tempHandoffWrite).toBeUndefined();
+    expect(tempCodeWrite).toMatchObject({ block: true });
   });
 
   it("records provider 429 responses from Pi provider hooks", async () => {
