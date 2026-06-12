@@ -1,2 +1,0 @@
-import{D as e,E as t,F as n,L as r,S as i,n as a,y as o}from"./index-CLeM8-hG.js";var s={class:`gate-badge__icon`},c={class:`gate-badge__label`},l=a(t({__name:`GateBadge`,props:{label:{},passed:{type:Boolean}},setup(t){return(a,l)=>(e(),i(`div`,{class:n([`gate-badge`,{"gate-badge--passed":t.passed,"gate-badge--blocked":!t.passed}])},[o(`span`,s,r(t.passed?`✓`:`✗`),1),o(`span`,c,r(t.label),1)],2))}}),[[`__scopeId`,`data-v-40931d3f`]]);export{l as t};
-//# sourceMappingURL=GateBadge-DlSUPfDJ.js.map
