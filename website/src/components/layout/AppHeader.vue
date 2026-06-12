@@ -10,6 +10,7 @@ import { useLocale } from '@/i18n/runtime'
 
 const mobileMenuOpen = ref(false)
 const { locale, toggleLocale } = useLocale()
+const githubUrl = 'https://github.com/aa2246740/pi-company'
 
 function toggleMobileMenu() {
   mobileMenuOpen.value = !mobileMenuOpen.value
@@ -45,6 +46,16 @@ function closeMobileMenu() {
           <span class="status-dot status-dot--online"></span>
           <span class="header__status-text">docs v1.0</span>
         </span>
+
+        <a
+          class="header__github"
+          :href="githubUrl"
+          target="_blank"
+          rel="noreferrer"
+          aria-label="Open GitHub repository"
+        >
+          GitHub
+        </a>
 
         <button
           class="header__lang"
@@ -89,6 +100,17 @@ function closeMobileMenu() {
             <span class="mobile-menu__icon">{{ item.icon }}</span>
             <span class="mobile-menu__label">{{ item.label }}</span>
           </router-link>
+
+          <a
+            class="mobile-menu__link"
+            :href="githubUrl"
+            target="_blank"
+            rel="noreferrer"
+            @click="closeMobileMenu"
+          >
+            <span class="mobile-menu__icon">GH</span>
+            <span class="mobile-menu__label">GitHub</span>
+          </a>
         </nav>
       </div>
     </Transition>
@@ -180,7 +202,7 @@ function closeMobileMenu() {
 .header__actions {
   display: flex;
   align-items: center;
-  gap: var(--space-4);
+  gap: var(--space-3);
   flex-shrink: 0;
 }
 
@@ -196,6 +218,36 @@ function closeMobileMenu() {
 
 .header__status-text {
   display: none;
+}
+
+.header__github {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 34px;
+  padding: 0 var(--space-3);
+  background: transparent;
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-sm);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1;
+  text-decoration: none;
+  white-space: nowrap;
+  transition:
+    border-color var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out);
+}
+
+.header__github:hover {
+  color: var(--green);
+  background: var(--green-bg);
+  border-color: var(--green);
+  text-decoration: none;
 }
 
 .header__lang {
@@ -215,7 +267,7 @@ function closeMobileMenu() {
   border-color: var(--green);
 }
 
-@media (min-width: 768px) {
+@media (min-width: 1481px) {
   .header__status-text {
     display: inline;
   }
@@ -344,7 +396,13 @@ function closeMobileMenu() {
 }
 
 /* ── Responsive ── */
-@media (max-width: 1180px) {
+@media (max-width: 1480px) {
+  .header__status {
+    display: none;
+  }
+}
+
+@media (max-width: 1260px) {
   .header__nav {
     display: none;
   }
@@ -359,7 +417,7 @@ function closeMobileMenu() {
     padding: 0 var(--space-4);
   }
 
-  .header__status {
+  .header__github {
     display: none;
   }
 }

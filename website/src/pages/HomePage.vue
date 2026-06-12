@@ -223,10 +223,6 @@ lead routes design requirement to the owner</code></pre>
 </template>
 
 <style scoped>
-.home {
-  padding-top: var(--header-h);
-}
-
 .hero {
   padding: clamp(72px, 12vw, 136px) 0 clamp(48px, 8vw, 96px);
   border-bottom: 1px solid var(--border-2);
@@ -238,7 +234,7 @@ lead routes design requirement to the owner</code></pre>
 
 .hero__grid,
 .section__container {
-  width: min(1180px, calc(100vw - 40px));
+  width: min(1180px, calc(100% - 40px));
   margin: 0 auto;
 }
 
@@ -275,6 +271,7 @@ lead routes design requirement to the owner</code></pre>
   margin-bottom: var(--space-8);
   font-size: clamp(1rem, 1.7vw, 1.25rem);
   color: var(--text-2);
+  overflow-wrap: anywhere;
 }
 
 .hero__actions {
@@ -328,6 +325,7 @@ lead routes design requirement to the owner</code></pre>
 }
 
 .brief-snapshot {
+  max-width: 100%;
   margin: 0;
   padding: 0;
   overflow-x: auto;
@@ -624,7 +622,17 @@ lead routes design requirement to the owner</code></pre>
 @media (max-width: 640px) {
   .hero__grid,
   .section__container {
-    width: min(100vw - 28px, 1180px);
+    width: calc(100% - 28px);
+  }
+
+  .hero h1 {
+    font-size: clamp(2.7rem, 12vw, 3.4rem);
+    line-height: 1.02;
+  }
+
+  .brief-snapshot code {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   .comparison__row,

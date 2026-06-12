@@ -27,6 +27,7 @@ defineProps<{
 
 <style scoped>
 .terminal {
+  min-width: 0;
   background: var(--bg-2);
   border: 1px solid var(--border-3);
   border-radius: var(--radius-xl);
@@ -66,6 +67,7 @@ defineProps<{
 }
 
 .terminal__body {
+  min-width: 0;
   padding: var(--space-5);
   font-family: var(--font-mono);
   font-size: var(--text-sm);

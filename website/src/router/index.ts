@@ -3,6 +3,8 @@
  */
 import { createRouter, createWebHashHistory } from 'vue-router'
 
+const anchorOffset = 88 // var(--header-h) + var(--space-8)
+
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
@@ -53,7 +55,7 @@ const router = createRouter({
   ],
   scrollBehavior(to) {
     if (to.hash) {
-      return { el: to.hash, behavior: 'smooth', top: 60 }
+      return { el: to.hash, behavior: 'smooth', top: anchorOffset }
     }
     return { top: 0 }
   },

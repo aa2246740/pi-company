@@ -21,7 +21,6 @@ import SideNav from '@/components/layout/SideNav.vue'
 .docs-layout {
   display: flex;
   min-height: calc(100vh - var(--header-h));
-  padding-top: var(--header-h);
 }
 
 .docs-layout__main {

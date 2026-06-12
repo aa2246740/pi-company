@@ -8,12 +8,19 @@ import AppHeader from '@/components/layout/AppHeader.vue'
 <template>
   <div class="app grid-bg">
     <AppHeader />
-    <router-view />
+    <div class="app__main">
+      <router-view />
+    </div>
   </div>
 </template>
 
 <style scoped>
 .app {
   min-height: 100vh;
+}
+
+.app__main {
+  min-height: 100vh;
+  padding-top: var(--header-h);
 }
 </style>
