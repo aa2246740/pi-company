@@ -43,6 +43,7 @@ const AGENT_STALE_MS = 5 * 60_000;
 const PENDING_MERGE_REMINDER_PREFIX = "[pi-company pending merge]";
 const RECOVERY_NOTICE_PREFIX = "[pi-company recovery]";
 const MAX_RECOVERY_EXCERPT_CHARS = 8_000;
+const CMUX_COMMAND_TIMEOUT_MS = 2_000;
 
 interface CmuxSurfaceInfo {
   ref: string;
@@ -497,7 +498,7 @@ export function sendCompanyMessage(
     ensureCompanyDirs(paths);
     const events = readEvents(paths);
     const state = stateForWrite(root, paths);
-    if (message.from !== "system" && !state.agents[message.from]) {
+    if (message.from !== "system" && message.from !== "human" && !state.agents[message.from]) {
       throw new Error(`Unknown message sender ${message.from}.`);
     }
     if (!state.agents[message.to]) {
@@ -956,14 +957,14 @@ export function recordHumanSteering(root: string, targetAgent: string, text: str
   const state = loadState(root);
   if (!state.agents[targetAgent]) throw new Error(`Unknown human steering target ${targetAgent}.`);
   const lead = state.config?.lead ?? "lead";
-  const event = makeEvent("human_steering.received", targetAgent, {
+  const event = makeEvent("human_steering.received", "human", {
     target_agent: targetAgent,
     text,
     streaming_behavior: streamingBehavior ?? null,
   });
   recordEvent(root, event);
   return sendCompanyMessage(root, {
-    from: targetAgent,
+    from: "human",
     to: lead,
     type: "human_steering",
     task: state.agents[targetAgent]?.current_task ?? null,
@@ -1709,10 +1710,13 @@ function runCmuxCommand(args: string[]): { status: number; stdout: string; stder
   const candidates = ["cmux", "/Applications/cmux.app/Contents/Resources/bin/cmux"];
   let last = { status: 127, stdout: "", stderr: "cmux not found" };
   for (const command of candidates) {
-    const result = spawnSync(command, args, { encoding: "utf8" });
+    const result = spawnSync(command, args, { encoding: "utf8", timeout: CMUX_COMMAND_TIMEOUT_MS });
     if (result.error && "code" in result.error && result.error.code === "ENOENT") {
       last = { status: 127, stdout: "", stderr: result.error.message };
       continue;
+    }
+    if (result.error && "code" in result.error && result.error.code === "ETIMEDOUT") {
+      return { status: 124, stdout: result.stdout ?? "", stderr: result.error.message };
     }
     return {
       status: result.status ?? 1,

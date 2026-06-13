@@ -122,6 +122,7 @@ const rateLimitKindSchema = Type.Union([
 const AUTOMATIC_RATE_LIMIT_DEDUPE_MS = 15_000;
 const BUSY_DELIVERY_BACKOFF_MS = 15_000;
 const WATCHDOG_FALLBACK_MS = 60_000;
+const CMUX_COMMAND_TIMEOUT_MS = 2_000;
 
 interface LiveCmuxSurface {
   ref: string;
@@ -1391,7 +1392,11 @@ function registerTools(pi: ExtensionAPI, runtime: {
         priority: params.priority ?? undefined,
       });
       await refreshUi(ctx);
-      return toolResult(`Sent ${message.id} to ${message.to} (${message.wake?.mode ?? "digest"}: ${message.wake?.reason ?? "no wake metadata"})`, { message });
+      const recipient = loadState(root).agents[message.to];
+      const offlineWarning = recipient && (recipient.status === "offline" || recipient.status === "planned")
+        ? `\nWarning: ${message.to} is ${recipient.status}; this message is queued, but no visible Pi pane will receive it until lead launches or relaunches that agent with company_spawn_agent. Do not wait silently for ${message.to}.`
+        : "";
+      return toolResult(`Sent ${message.id} to ${message.to} (${message.wake?.mode ?? "digest"}: ${message.wake?.reason ?? "no wake metadata"})${offlineWarning}`, { message, recipient_status: recipient?.status ?? "unknown" });
     },
   });
 
@@ -2611,10 +2616,13 @@ function runCmux(args: string[]): { status: number; stdout: string; stderr: stri
   const candidates = ["cmux", "/Applications/cmux.app/Contents/Resources/bin/cmux"];
   let last = { status: 127, stdout: "", stderr: "cmux not found" };
   for (const command of candidates) {
-    const result = spawnSync(command, args, { encoding: "utf8" });
+    const result = spawnSync(command, args, { encoding: "utf8", timeout: CMUX_COMMAND_TIMEOUT_MS });
     if (result.error && "code" in result.error && result.error.code === "ENOENT") {
       last = { status: 127, stdout: "", stderr: result.error.message };
       continue;
+    }
+    if (result.error && "code" in result.error && result.error.code === "ETIMEDOUT") {
+      return { status: 124, stdout: result.stdout ?? "", stderr: result.error.message };
     }
     return {
       status: result.status ?? 1,

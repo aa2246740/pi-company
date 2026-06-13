@@ -705,7 +705,7 @@ function messageParticipantsAreValid(state: CompanyState, event: CompanyEvent): 
   const dataFrom = typeof event.data.from === "string" ? event.data.from : from;
   return dataFrom === from &&
     isMailboxMessageType(event.data.type) &&
-    (from === "system" || Boolean(state.agents[from])) &&
+    (from === "system" || from === "human" || Boolean(state.agents[from])) &&
     Boolean(state.agents[to]);
 }
 

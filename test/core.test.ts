@@ -210,9 +210,11 @@ Rate limit 已过期，可以恢复正常工作`);
     const mirrored = recordHumanSteering(root, "coder-api", "Please keep this backwards compatible.", "steer");
     const state = loadState(root);
 
+    expect(mirrored?.from).toBe("human");
     expect(mirrored?.to).toBe("lead");
     expect(state.human_steering).toHaveLength(1);
     expect(state.inbox_counts.lead).toBe(1);
+    expect(listInbox(root, "lead")[0].from).toBe("human");
     expect(listInbox(root, "lead")[0].type).toBe("human_steering");
   });
 
@@ -223,9 +225,11 @@ Rate limit 已过期，可以恢复正常工作`);
     const delivered = recordHumanSteering(root, "lead", "Browser acceptance failed; create a follow-up issue.", "followUp");
     const state = loadState(root);
 
+    expect(delivered?.from).toBe("human");
     expect(delivered?.to).toBe("lead");
     expect(state.human_steering).toHaveLength(1);
     expect(state.inbox_counts.lead).toBe(1);
+    expect(listInbox(root, "lead")[0].from).toBe("human");
     expect(listInbox(root, "lead")[0].type).toBe("human_steering");
     expect(listInbox(root, "lead")[0].text).toContain("Browser acceptance failed");
   });

@@ -454,6 +454,10 @@ program.command("message")
       priority: opts.priority ?? undefined,
     });
     console.log(`Sent ${msg.id} to ${msg.to} (${msg.wake?.mode ?? "digest"}: ${msg.wake?.reason ?? "no wake metadata"})`);
+    const recipient = loadState(rootOpt()).agents[msg.to];
+    if (recipient && (recipient.status === "offline" || recipient.status === "planned")) {
+      console.log(`Warning: ${msg.to} is ${recipient.status}; the message is queued but no visible Pi pane will receive it until lead launches or relaunches that agent.`);
+    }
   });
 
 program.command("rate-limit")

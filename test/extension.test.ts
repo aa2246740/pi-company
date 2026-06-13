@@ -387,6 +387,35 @@ describe("pi-company extension", () => {
     expect(result.details.existing).toBe(true);
   });
 
+  it("warns when a mailbox message targets a worker without a live Pi pane", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-message-offline-warning" });
+    const { handlers, pi, tools } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx } = fakeContext(root);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const messageTool = tools.find((tool) => tool.name === "company_send_message");
+    if (!messageTool) throw new Error("company_send_message tool was not registered");
+    const result = await messageTool.execute("tool-1", {
+      to: "pm",
+      type: "assignment",
+      text: "Shape acceptance criteria.",
+      priority: "high",
+    }, undefined, undefined, ctx) as ToolResult;
+    await handlers.session_shutdown?.({}, ctx);
+
+    expect(result.content[0].text).toContain("Warning: pm is planned");
+    expect(result.content[0].text).toContain("no visible Pi pane will receive it");
+    expect(result.details.recipient_status).toBe("planned");
+    expect(loadState(root).inbox_counts.pm).toBe(1);
+    expect(listInbox(root, "pm")[0].from).toBe("lead");
+  });
+
   it("does not mark a cmux launch successful when the new terminal never becomes readable", async () => {
     const root = tempRoot();
     initCompany({ root, id: "extension-cmux-launch-health" });
