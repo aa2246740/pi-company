@@ -105,6 +105,26 @@ Sent msg_123 to lead (digest: organization rate-limit backoff until 2099-01-01T0
     expect(result).toBeNull();
   });
 
+  it("does not classify pi-company rate-limit report messages as fresh provider failures", () => {
+    const result = classifyRateLimitText(`Rate limit reported by lead: lead: until provider 429 error...") and provider 429 paused 429 error...").
+until provider 429 error...") and provider 429 error...") and. Organization paused 429 provider 429 error...")
+Organization paused until 2099-01-01T00:01:00.000Z. Resume agents gradually after cooldown.
+
+Reviewer approved clean at current head. Gates remaining: tester + acceptance.`);
+
+    expect(result).toBeNull();
+  });
+
+  it("still classifies a real provider failure after a pi-company rate-limit report block", () => {
+    const result = classifyRateLimitText(`Rate limit reported by lead: lead: until provider 429 error...") and provider 429 paused 429 error...").
+Organization paused until 2099-01-01T00:01:00.000Z. Resume agents gradually after cooldown.
+
+Error: 429 Too many requests`);
+
+    expect(result?.kind).toBe("provider_429");
+    expect(result?.reason).toBe("Error: 429 Too many requests");
+  });
+
   it("keeps historical pi-company rate-limit reasons out of fresh screen-scan incidents", () => {
     const result = classifyRateLimitText(`Rate Limit:
 - reason: old provider_429 storm from a previous scan
