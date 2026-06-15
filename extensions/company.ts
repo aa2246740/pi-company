@@ -724,6 +724,16 @@ function isCompanyToolName(toolName: string): boolean {
 }
 
 function leadToolBlockReason(event: { toolName: string; input: Record<string, unknown> }, root: string): string | null {
+  if (event.toolName === "read") {
+    const target = typeof event.input.path === "string" ? resolveToolPath(event.input.path, root) : "";
+    if (!target) return null;
+    if (isSafeTempDocumentationPath(target)) return null;
+    const rel = projectRelativePath(root, target);
+    if (rel && isNonRunnableDocumentationPath(rel)) return null;
+    if (rel && isRunnableOrBehaviorChangingPath(rel)) {
+      return "pi-company lead cannot read implementation/config/test/assets directly. Use company status/PR gate tools, then delegate investigation to coder/tester/reviewer so lead stays orchestration-focused.";
+    }
+  }
   if (event.toolName === "write" || event.toolName === "edit") {
     const target = typeof event.input.path === "string" ? resolveToolPath(event.input.path, root) : "";
     if (target && isSafeTempDocumentationPath(target)) return null;
@@ -753,10 +763,15 @@ function workerToolBlockReason(event: { toolName: string; input: Record<string, 
     if (!target) return null;
     if (isSafeTempDocumentationPath(target)) return null;
     if (agent.role === "coder" || agent.name.startsWith("coder")) {
-      if (!agent.worktree) return `pi-company coder ${agent.name} has no assigned worktree. Ask lead to spawn a coder with worktree isolation before writing implementation files.`;
-      const worktree = path.resolve(agent.worktree);
-      if (isPathInside(target, worktree)) return null;
-      return `pi-company coder ${agent.name} must write inside its assigned worktree (${worktree}). Use the same relative output path inside the worktree, not the project root.`;
+      const scope = coderMutationScope(agent, root);
+      if (!scope.allowed) return scope.reason;
+      if (!isPathInside(target, scope.root)) {
+        return `pi-company coder ${agent.name} can write only inside its ${scope.label} (${scope.root}).`;
+      }
+      if (scope.rootScoped && isProtectedProjectControlPath(root, target)) {
+        return `pi-company root-scoped coder ${agent.name} cannot write pi-company or git control paths.`;
+      }
+      return null;
     }
     const allowed = nonCoderAllowedWriteReason(agent, target, root);
     if (!allowed.allowed) return allowed.reason;
@@ -765,7 +780,7 @@ function workerToolBlockReason(event: { toolName: string; input: Record<string, 
     const command = typeof event.input.command === "string" ? event.input.command : "";
     if (isAllowedTempDocumentationBashCommand(command)) return null;
     if (agent.role === "coder" || agent.name.startsWith("coder")) {
-      return coderBashBlockReason(command, agent);
+      return coderBashBlockReason(command, agent, root);
     }
     if (isAllowedNonCoderDocBashCommand(command)) return null;
     if (isAllowedNonCoderOperationalBashCommand(command)) return null;
@@ -777,23 +792,64 @@ function workerToolBlockReason(event: { toolName: string; input: Record<string, 
   return null;
 }
 
-function coderBashBlockReason(command: string, agent: AgentRecord): string | null {
+type CoderMutationScope =
+  | { allowed: true; root: string; label: string; rootScoped: boolean }
+  | { allowed: false; reason: string };
+
+function coderMutationScope(agent: AgentRecord, root: string): CoderMutationScope {
+  if (agent.worktree) {
+    const worktree = path.resolve(agent.worktree);
+    return { allowed: true, root: worktree, label: "assigned worktree", rootScoped: false };
+  }
+  const projectRoot = path.resolve(root);
+  const cwd = path.resolve(agent.cwd || root);
+  if (cwd === projectRoot) {
+    return { allowed: true, root: projectRoot, label: "project root", rootScoped: true };
+  }
+  return {
+    allowed: false,
+    reason: `pi-company coder ${agent.name} has no assigned worktree and is not rooted at the project root. Ask lead to relaunch it with a valid worktree or explicit root maintenance scope.`,
+  };
+}
+
+function coderBashBlockReason(command: string, agent: AgentRecord, root: string): string | null {
   if (!isMutatingLeadBashCommand(command)) return null;
   if (isAllowedTempDocumentationBashCommand(command)) return null;
-  if (!agent.worktree) {
-    return `pi-company coder ${agent.name} has no assigned worktree. Ask lead to spawn a coder with worktree isolation before mutating files or git state.`;
+  const scope = coderMutationScope(agent, root);
+  if (!scope.allowed) return scope.reason;
+  if (scope.rootScoped && isMutatingGitCommand(command)) {
+    return `pi-company root-scoped coder ${agent.name} cannot mutate git state from the project root. Use pi-company PR/merge tools or a worktree coder.`;
   }
-  const worktree = path.resolve(agent.worktree);
-  const cwd = path.resolve(agent.cwd || worktree);
-  for (const token of shellWordsLite(command)) {
-    const candidate = pathCandidateFromShellToken(token);
+  const cwd = path.resolve(agent.cwd || scope.root);
+  for (const candidate of bashPathCandidates(command)) {
     if (!candidate) continue;
     const resolved = path.isAbsolute(candidate) ? path.resolve(candidate) : path.resolve(cwd, candidate);
-    if (!isPathInside(resolved, worktree)) {
-      return `pi-company coder ${agent.name} can mutate files and git state only inside its assigned worktree (${worktree}). The bash command references ${candidate}, which resolves outside that worktree.`;
+    if (!isPathInside(resolved, scope.root)) {
+      return `pi-company coder ${agent.name} can mutate files only inside its ${scope.label} (${scope.root}). The bash command references ${candidate}, which resolves outside that scope.`;
+    }
+    if (scope.rootScoped && isProtectedProjectControlPath(root, resolved)) {
+      return `pi-company root-scoped coder ${agent.name} cannot mutate pi-company or git control paths. The bash command references ${candidate}.`;
     }
   }
   return null;
+}
+
+function bashPathCandidates(command: string): string[] {
+  const candidates = new Set<string>();
+  for (const token of shellWordsLite(command)) {
+    const candidate = pathCandidateFromShellToken(token);
+    if (candidate) candidates.add(candidate);
+  }
+  for (const candidate of [
+    ...extractRedirectTargets(command),
+    ...extractTeeTargets(command),
+    ...extractTouchTargets(command),
+    ...extractMkdirTargets(command),
+    ...extractRmTargets(command),
+  ]) {
+    if (candidate) candidates.add(candidate);
+  }
+  return [...candidates];
 }
 
 function shellWordsLite(command: string): string[] {
@@ -846,6 +902,14 @@ function pathCandidateFromShellToken(token: string): string | null {
 function isPathInside(target: string, parent: string): boolean {
   const relative = path.relative(parent, target);
   return relative === "" || Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+function isProtectedProjectControlPath(root: string, target: string): boolean {
+  const rel = projectRelativePath(root, target);
+  return rel === ".git" ||
+    rel?.startsWith(".git/") === true ||
+    rel === ".pi-company" ||
+    rel?.startsWith(".pi-company/") === true;
 }
 
 function nonCoderAllowedWriteReason(agent: AgentRecord, target: string, root: string): { allowed: true } | { allowed: false; reason: string } {
@@ -1147,6 +1211,15 @@ function isMutatingLeadBashCommand(command: string): boolean {
     || extractTeeTargets(normalized).length > 0;
 }
 
+function isMutatingGitCommand(command: string): boolean {
+  const normalized = command
+    .replace(/\\\n/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return false;
+  return /(^|[;&|]\s*)git\s+(init|add|commit|merge|rebase|checkout|switch|reset|clean|stash|restore|rm|mv|worktree\s+(add|remove|prune|move|repair))\b/i.test(normalized);
+}
+
 function isAgentBusyError(error: unknown): boolean {
   return /already processing/i.test(errorMessage(error));
 }
@@ -1391,12 +1464,38 @@ function registerTools(pi: ExtensionAPI, runtime: {
         text: params.text,
         priority: params.priority ?? undefined,
       });
-      await refreshUi(ctx);
       const recipient = loadState(root).agents[message.to];
-      const offlineWarning = recipient && (recipient.status === "offline" || recipient.status === "planned")
+      let cmuxLaunch: CmuxLaunchResult | null = null;
+      let launchError: string | null = null;
+      if (
+        agentName === lead &&
+        recipient &&
+        recipient.name !== lead &&
+        (recipient.status === "offline" || recipient.status === "planned") &&
+        message.wake?.mode === "immediate"
+      ) {
+        try {
+          cmuxLaunch = launchInCmux(root, agentName, recipient.name, launchCommand(root, recipient.name, currentExtensionPath));
+        } catch (error) {
+          launchError = errorMessage(error);
+        }
+      }
+      await refreshUi(ctx);
+      const offlineWarning = recipient && !cmuxLaunch && (recipient.status === "offline" || recipient.status === "planned")
         ? `\nWarning: ${message.to} is ${recipient.status}; this message is queued, but no visible Pi pane will receive it until lead launches or relaunches that agent with company_spawn_agent. Do not wait silently for ${message.to}.`
         : "";
-      return toolResult(`Sent ${message.id} to ${message.to} (${message.wake?.mode ?? "digest"}: ${message.wake?.reason ?? "no wake metadata"})${offlineWarning}`, { message, recipient_status: recipient?.status ?? "unknown" });
+      const launchNotice = cmuxLaunch
+        ? `\nAuto-launched ${message.to} in ${cmuxLaunch.surface}.`
+        : launchError
+          ? `\nAuto-launch failed for ${message.to}: ${launchError}`
+          : "";
+      return toolResult(`Sent ${message.id} to ${message.to} (${message.wake?.mode ?? "digest"}: ${message.wake?.reason ?? "no wake metadata"})${launchNotice}${offlineWarning}`, {
+        message,
+        recipient_status: recipient?.status ?? "unknown",
+        cmux: cmuxLaunch?.surface ?? null,
+        cmux_reused: cmuxLaunch?.reused ?? false,
+        launch_error: launchError,
+      });
     },
   });
 
@@ -1535,10 +1634,12 @@ function registerTools(pi: ExtensionAPI, runtime: {
         }
         return toolResult(command, { plan: existing, command, cmux, cmux_reused: false, existing: true, briefing, assigned_issue: assignedIssue });
       }
-      const plan = planAgentSpawn(root, params.role, params.name, params.mission ?? null, { allowUnknownRole: params.force_role === true });
-      const shouldCreateWorktree = (params.role === "coder" || params.name.startsWith("coder")) && params.create_worktree !== false;
+      const useCoderWorktree = !(params.role === "coder" && params.create_worktree === false);
+      const spawnOptions = { allowUnknownRole: params.force_role === true, useCoderWorktree };
+      const plan = planAgentSpawn(root, params.role, params.name, params.mission ?? null, spawnOptions);
+      const shouldCreateWorktree = params.role === "coder" && useCoderWorktree;
       if (shouldCreateWorktree) ensureCoderWorktree(root, plan, true);
-      requestAgentSpawn(root, agentName, params.role, params.name, params.mission ?? null, { allowUnknownRole: params.force_role === true });
+      requestAgentSpawn(root, agentName, params.role, params.name, params.mission ?? null, spawnOptions);
       registerAgent(root, {
         name: plan.name,
         role: plan.role,

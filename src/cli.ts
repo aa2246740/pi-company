@@ -116,6 +116,7 @@ program.command("spawn")
   .option("--mission-file <path>", "Read agent mission from a file")
   .option("--mission-stdin", "Read agent mission from stdin")
   .option("--yes", "Allow creating git worktrees")
+  .option("--no-worktree", "For coder agents, launch in the project root instead of creating a git worktree")
   .option("--cmux", "Launch in cmux if cmux is available")
   .option("--manual", "Only print launch command")
   .option("--force-role", "Allow spawning a custom role without an existing .pi-company/roles/<role>.md file")
@@ -141,11 +142,13 @@ program.command("spawn")
     // Only the new-agent path uses a mission; reading stdin earlier would block
     // (and discard the value) when relaunching an already-existing agent.
     const mission = readTextOption(opts.mission, opts.missionFile, opts.missionStdin === true, "mission", false);
-    const plan = planAgentSpawn(root, role, name, mission, { allowUnknownRole: opts.forceRole === true });
-    if (role === "coder") {
+    const useCoderWorktree = !(role === "coder" && opts.worktree === false);
+    const spawnOptions = { allowUnknownRole: opts.forceRole === true, useCoderWorktree };
+    const plan = planAgentSpawn(root, role, name, mission, spawnOptions);
+    if (role === "coder" && useCoderWorktree) {
       ensureCoderWorktree(root, plan, opts.yes === true);
     }
-    requestAgentSpawn(root, currentLead(root), role, name, mission, { allowUnknownRole: opts.forceRole === true });
+    requestAgentSpawn(root, currentLead(root), role, name, mission, spawnOptions);
     registerAgent(root, {
       name: plan.name,
       role: plan.role,

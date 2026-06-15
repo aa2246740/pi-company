@@ -1612,6 +1612,42 @@ Rate limit 已过期，可以恢复正常工作`);
     });
   }, 20_000);
 
+  it("does not hibernate busy workers that have no assigned issue", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "busy-worker-no-task-demo" });
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder-busy", "Explore implementation.");
+    registerAgent(root, {
+      ...plan,
+      status: "online",
+    });
+    recordAgentLaunch(root, "lead", "coder-busy", "surface:coder-busy");
+    recordAgentRuntime(root, "coder-busy", {
+      status: "busy",
+      cmux_surface: "surface:coder-busy",
+      current_task: null,
+      progress: true,
+    }, "2099-01-01T00:00:00.000Z");
+    recordAgentRuntime(root, "coder-busy", {
+      status: "busy",
+      cmux_surface: "surface:coder-busy",
+      current_task: null,
+      turn_started: true,
+    }, "2099-01-01T00:09:55.000Z");
+    const closeLog = path.join(root, "close.log");
+
+    withFakeCmux({
+      liveSurfaces: ["surface:lead", "surface:coder-busy"],
+      titles: { "surface:coder-busy": "pi-company coder-busy" },
+      screens: { "surface:coder-busy": "still thinking\n" },
+      closeLog,
+    }, () => {
+      const result = maintainCompany(root, "lead", "2099-01-01T00:10:00.000Z");
+      expect(result.hibernated).not.toContain("coder-busy");
+      expect(readAgentRuntime(root, "coder-busy")?.status).toBe("busy");
+      expect(fs.existsSync(closeLog) ? fs.readFileSync(closeLog, "utf8") : "").not.toContain("surface:coder-busy");
+    });
+  }, 20_000);
+
   it("closes duplicate live cmux surfaces for the same agent and keeps the recorded surface", () => {
     const root = tempRoot();
     initCompany({ root, id: "duplicate-surface-demo" });
@@ -1689,6 +1725,129 @@ Rate limit 已过期，可以恢复正常工作`);
       const runtime = readAgentRuntime(root, "coder-resume");
       expect(runtime?.status).toBe("idle");
       expect(runtime?.note).toBeNull();
+    });
+  }, 20_000);
+
+  it("uses runtime cmux surface when the persisted agent surface is stale", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "runtime-surface-fallback-demo" });
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder-live", "Runtime surface fallback.");
+    registerAgent(root, {
+      ...plan,
+      status: "online",
+    });
+    recordAgentLaunch(root, "lead", "coder-live", "surface:old");
+    recordAgentRuntime(root, "coder-live", {
+      status: "idle",
+      cmux_surface: "surface:new",
+      current_task: null,
+      progress: true,
+    }, "2099-01-01T00:00:00.000Z");
+
+    withFakeCmux({
+      liveSurfaces: ["surface:new"],
+      titles: {
+        "surface:new": "pi-company coder-live",
+      },
+      screens: {
+        "surface:new": "pi-company runtime-surface-fallback-demo | coder-live (coder)\n",
+      },
+    }, () => {
+      const state = loadState(root);
+      expect(state.agents["coder-live"].status).toBe("idle");
+      expect(state.agents["coder-live"].cmux_surface).toBe("surface:new");
+    });
+  }, 20_000);
+
+  it("discovers a live cmux surface by agent title when persisted state points at a stale surface", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "title-surface-fallback-demo" });
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder-title", "Title surface fallback.");
+    registerAgent(root, {
+      ...plan,
+      status: "online",
+    });
+    recordAgentLaunch(root, "lead", "coder-title", "surface:stale");
+
+    withFakeCmux({
+      liveSurfaces: ["surface:fresh"],
+      titles: {
+        "surface:fresh": "pi-company coder-title",
+      },
+      screens: {
+        "surface:fresh": "pi-company title-surface-fallback-demo | coder-title (coder)\nready\n",
+      },
+    }, () => {
+      const state = loadState(root);
+      expect(state.agents["coder-title"].status).toBe("online");
+      expect(state.agents["coder-title"].cmux_surface).toBe("surface:fresh");
+    });
+  }, 20_000);
+
+  it("treats a live cmux surface showing Pi Working as running even if runtime state is stale", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "working-screen-status-demo" });
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder-working", "Working screen status.");
+    registerAgent(root, {
+      ...plan,
+      status: "online",
+    });
+    const issue = createIssue(root, "lead", "Keep working", "Feature brief.", { work_type: "implementation" });
+    assignIssue(root, "lead", issue.id, "coder-working");
+    startTask(root, "coder-working", issue.id, "Starting.");
+    recordAgentLaunch(root, "lead", "coder-working", "surface:old");
+
+    withFakeCmux({
+      liveSurfaces: ["surface:new"],
+      titles: {
+        "surface:new": "pi-company coder-working",
+      },
+      screens: {
+        "surface:new": "pi-company working-screen-status-demo | coder-working (coder)\n⠼ Working...\n",
+      },
+    }, () => {
+      const state = loadState(root);
+      expect(state.agents["coder-working"].status).toBe("running");
+      expect(state.agents["coder-working"].cmux_surface).toBe("surface:new");
+    });
+  }, 20_000);
+
+  it("reports visible provider throttling from cmux watchdog snapshots once", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "watchdog-rate-limit-demo" });
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder-throttled", "Watchdog rate-limit scan.");
+    registerAgent(root, {
+      ...plan,
+      status: "online",
+    });
+    const issue = createIssue(root, "lead", "Handle throttling", "Feature brief.", { work_type: "implementation" });
+    assignIssue(root, "lead", issue.id, "coder-throttled");
+    startTask(root, "coder-throttled", issue.id, "Starting.");
+    recordAgentLaunch(root, "lead", "coder-throttled", "surface:coder");
+
+    withFakeCmux({
+      liveSurfaces: ["surface:coder"],
+      titles: {
+        "surface:coder": "pi-company coder-throttled",
+      },
+      screens: {
+        "surface:coder": "pi-company watchdog-rate-limit-demo | coder-throttled (coder)\nError: Retry failed after 3 attempts: 429 Too many requests\n",
+      },
+    }, () => {
+      const first = maintainCompany(root, "lead", "2099-01-01T00:00:00.000Z");
+      expect(first.actions).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          type: "rate_limit",
+          agent: "coder-throttled",
+          cmux_surface: "surface:coder",
+        }),
+      ]));
+      expect(loadState(root).rate_limit?.kind).toBe("provider_429");
+      expect(loadState(root).rate_limit?.reason).toContain("coder-throttled");
+
+      const second = maintainCompany(root, "lead", "2099-01-01T00:02:00.000Z");
+      expect(second.actions.some((action) => action.type === "rate_limit")).toBe(false);
+      expect(loadState(root).rate_limit?.incidents).toBe(1);
     });
   }, 20_000);
 
@@ -3298,6 +3457,26 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(state.agents["coder-extra"].status).toBe("planned");
   });
 
+  it("plans explicit root-scoped coders without a worktree", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "root-scoped-coder-demo" });
+
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder-root", "Clean root-level blockers.", {
+      useCoderWorktree: false,
+    });
+    const state = loadState(root);
+    const command = launchCommand(root, "coder-root", "/tmp/company.js");
+
+    expect(plan.cwd).toBe(root);
+    expect(plan.worktree).toBeNull();
+    expect(plan.branch).toBeNull();
+    expect(state.agents["coder-root"].cwd).toBe(root);
+    expect(state.agents["coder-root"].worktree).toBeNull();
+    expect(state.agents["coder-root"].branch).toBeNull();
+    expect(command).toContain(`cd '${root}'`);
+    expect(command).not.toContain(".pi-company/worktrees/coder-root");
+  });
+
   it("rejects unknown spawn roles unless a custom role pack exists or lead forces it", () => {
     const root = tempRoot();
     initCompany({ root, id: "spawn-role-validation-demo" });
@@ -3430,6 +3609,33 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("PI_COMPANY_AGENT='coder-repeat'");
     expect(fs.existsSync(plan.worktree ?? "")).toBe(true);
+  });
+
+  it("creates root-scoped coders from CLI spawn --no-worktree", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "cli-spawn-no-worktree-demo" });
+
+    const result = spawnSync(process.execPath, [
+      "--import",
+      "tsx",
+      path.join(process.cwd(), "src/cli.ts"),
+      "--root",
+      root,
+      "spawn",
+      "coder",
+      "--name",
+      "coder-root",
+      "--no-worktree",
+      "--manual",
+    ], { encoding: "utf8" });
+
+    const state = loadState(root);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(`cd '${root}'`);
+    expect(result.stdout).not.toContain(".pi-company/worktrees/coder-root");
+    expect(state.agents["coder-root"].cwd).toBe(root);
+    expect(state.agents["coder-root"].worktree).toBeNull();
+    expect(state.agents["coder-root"].branch).toBeNull();
   });
 
   it("rejects unplanned agent registration and ignores rogue spawn events", () => {

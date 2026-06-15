@@ -38,6 +38,7 @@ import { makeEvent } from "./events.js";
 import { newId, nowIso, slug } from "./id.js";
 import { withCompanyLock } from "./lock.js";
 import { evaluatePrGates, evidenceHasGateCaveat, reduceEvents } from "./reducer.js";
+import { classifyRateLimitText } from "./rate-limit.js";
 
 const AGENT_STALE_MS = 5 * 60_000;
 const PENDING_MERGE_REMINDER_PREFIX = "[pi-company pending merge]";
@@ -1137,7 +1138,12 @@ function assertValidAgentName(name: string): void {
   }
 }
 
-export function planAgentSpawn(root: string, role: AgentRole, name: string, mission?: string | null, options: { allowUnknownRole?: boolean } = {}): {
+export interface AgentSpawnOptions {
+  allowUnknownRole?: boolean;
+  useCoderWorktree?: boolean;
+}
+
+export function planAgentSpawn(root: string, role: AgentRole, name: string, mission?: string | null, options: AgentSpawnOptions = {}): {
   name: string;
   role: AgentRole;
   cwd: string;
@@ -1150,8 +1156,9 @@ export function planAgentSpawn(root: string, role: AgentRole, name: string, miss
   const config = loadConfig(root);
   const projectId = config?.id ?? slug(path.basename(root));
   const isCoder = role === "coder";
-  const branch = isCoder ? `pi-company/${slug(name)}` : null;
-  const worktree = isCoder ? defaultCoderWorktree(root, name) : null;
+  const usesCoderWorktree = isCoder && options.useCoderWorktree !== false;
+  const branch = usesCoderWorktree ? `pi-company/${slug(name)}` : null;
+  const worktree = usesCoderWorktree ? defaultCoderWorktree(root, name) : null;
   return {
     name,
     role,
@@ -1162,7 +1169,7 @@ export function planAgentSpawn(root: string, role: AgentRole, name: string, miss
   };
 }
 
-export function requestAgentSpawn(root: string, actor: string, role: AgentRole, name: string, mission?: string | null, options: { allowUnknownRole?: boolean } = {}): ReturnType<typeof planAgentSpawn> {
+export function requestAgentSpawn(root: string, actor: string, role: AgentRole, name: string, mission?: string | null, options: AgentSpawnOptions = {}): ReturnType<typeof planAgentSpawn> {
   requireLead(root, actor, "spawn agents");
   if (loadState(root).agents[name]) {
     throw new Error(`Agent ${name} already exists. Use launch-command to start existing agents.`);
@@ -1629,17 +1636,33 @@ function refreshAgentLiveness(root: string, state: CompanyState, now = nowIso())
   const companyId = state.config?.id ?? "not initialized";
   const current = Date.parse(now);
   if (!Number.isFinite(current)) return;
+  agentLoop:
   for (const agent of Object.values(state.agents)) {
     const runtime = readAgentRuntime(root, agent.name);
-    if (agent.cmux_surface && liveCmuxSurfaceInfos) {
-      const surface = liveCmuxSurfaceByRef.get(agent.cmux_surface);
-      if (!surface) {
+    if (liveCmuxSurfaceInfos) {
+      const matches = liveCmuxSurfacesForAgent(root, companyId, agent, liveCmuxSurfaceInfos);
+      const preferred = preferredLiveSurfaceForAgent(agent, runtime, matches);
+      if (preferred) {
+        agent.cmux_surface = preferred.ref;
+        if (runtime?.cmux_surface === preferred.ref && runtime.current_task !== undefined) {
+          agent.current_task = runtime.current_task;
+        }
+        if (agent.status !== "planned") {
+          agent.status = liveSurfaceAgentStatus(runtime?.status, agent, readCmuxScreen(preferred, 40));
+          continue agentLoop;
+        }
+      }
+      const refs = uniqueStrings([runtime?.cmux_surface ?? null, agent.cmux_surface ?? null]);
+      if (refs.length > 0) {
         agent.status = "offline";
         continue;
       }
-      if (surfaceBelongsToRecordedAgent(root, companyId, agent, surface)) {
+    }
+    if (agent.cmux_surface && liveCmuxSurfaceInfos) {
+      const surface = liveCmuxSurfaceByRef.get(agent.cmux_surface);
+      if (surface && surfaceBelongsToRecordedAgent(root, companyId, agent, surface)) {
         if (agent.status !== "planned") {
-          agent.status = liveSurfaceAgentStatus(runtime?.status, agent);
+          agent.status = liveSurfaceAgentStatus(runtime?.status, agent, readCmuxScreen(surface, 40));
           continue;
         }
       } else {
@@ -1669,7 +1692,12 @@ function refreshAgentLiveness(root: string, state: CompanyState, now = nowIso())
   }
 }
 
-function liveSurfaceAgentStatus(runtimeStatus: AgentRuntimeStatus | undefined, agent: AgentRecord): AgentRecord["status"] {
+function uniqueStrings(values: Array<string | null | undefined>): string[] {
+  return [...new Set(values.filter((value): value is string => typeof value === "string" && value.length > 0))];
+}
+
+function liveSurfaceAgentStatus(runtimeStatus: AgentRuntimeStatus | undefined, agent: AgentRecord, screenExcerpt?: string | null): AgentRecord["status"] {
+  if (screenLooksBusy(screenExcerpt)) return "running";
   if (runtimeStatus !== "offline" && runtimeStatus !== "paused" && runtimeStatus !== "unknown") {
     return agentRuntimeStatusToAgentStatus(runtimeStatus, agent.status === "offline" ? "online" : agent.status);
   }
@@ -1753,6 +1781,25 @@ function sanitizeRecoveryText(text: string): string {
   return redacted.length > MAX_RECOVERY_EXCERPT_CHARS
     ? redacted.slice(redacted.length - MAX_RECOVERY_EXCERPT_CHARS)
     : redacted;
+}
+
+function screenLooksBusy(screenExcerpt?: string | null): boolean {
+  if (!screenExcerpt) return false;
+  const tail = screenExcerpt.split(/\r?\n/).slice(-60).join("\n");
+  return /^[\s┃│]*(?:[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|[-\\|/])\s*Working\.\.\./m.test(tail) ||
+    /\bAgent is already processing\. Wait for completion before continuing\b/.test(tail);
+}
+
+function maybeReportScreenRateLimit(root: string, state: CompanyState, actor: string, screenExcerpt: string | null, now: string): string | null {
+  if (!screenExcerpt) return null;
+  const classification = classifyRateLimitText(screenExcerpt);
+  if (!classification) return null;
+  const reason = `${actor}: ${classification.reason}`.slice(0, 1000);
+  if (state.rate_limit?.reason === reason) return null;
+  if (rateLimitIsActive(state, now)) return null;
+  const reported = reportRateLimit(root, actor, reason, classification.kind, now);
+  state.rate_limit = reported.rate_limit;
+  return reason;
 }
 
 function collectCmuxOwnedLiveSurfaces(state: CompanyState, liveSurfaces: Set<string> | null): string[] {
@@ -1871,19 +1918,26 @@ function agentHasOpenPr(state: CompanyState, agentName: string): boolean {
 function runtimeIdleTime(root: string, agent: AgentRecord): number {
   const runtime = readAgentRuntime(root, agent.name);
   const candidates = [
+    runtime?.turn_started_at,
     runtime?.last_progress_at,
     runtime?.last_seen_at,
     agent.last_seen_at,
     agent.last_launch_at,
-  ];
-  for (const candidate of candidates) {
-    const parsed = candidate ? Date.parse(candidate) : Number.NaN;
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return 0;
+  ]
+    .map((candidate) => candidate ? Date.parse(candidate) : Number.NaN)
+    .filter(Number.isFinite);
+  return candidates.length > 0 ? Math.max(...candidates) : 0;
 }
 
-function keepWarmAgents(state: CompanyState, liveSurfaces: Set<string>, policy: LifecyclePolicy): Set<string> {
+function agentIsBusyForLifecycle(root: string, agent: AgentRecord): boolean {
+  const runtime = readAgentRuntime(root, agent.name);
+  return agent.status === "running" ||
+    runtime?.status === "busy" ||
+    (runtime?.status as string | undefined) === "running" ||
+    Boolean(runtime?.turn_started_at);
+}
+
+function keepWarmAgents(root: string, state: CompanyState, liveSurfaces: Set<string>, policy: LifecyclePolicy): Set<string> {
   const keep = new Set<string>();
   for (const role of policy.keep_warm_roles) {
     const candidate = Object.values(state.agents)
@@ -1891,6 +1945,7 @@ function keepWarmAgents(state: CompanyState, liveSurfaces: Set<string>, policy: 
         agent.role === role &&
         agent.cmux_surface &&
         liveSurfaces.has(agent.cmux_surface) &&
+        !agentIsBusyForLifecycle(root, agent) &&
         !agent.current_task &&
         incompleteIssuesForAgent(state, agent.name).length === 0 &&
         !agentHasOpenPr(state, agent.name)
@@ -2009,10 +2064,20 @@ export function maintainCompany(root: string, actor = "system", now = nowIso()):
       if (preferred) {
         const excerpt = readCmuxScreen(preferred, policy.recovery_snapshot_lines);
         captureAgentRecoverySnapshot(root, state, agent, "watchdog", excerpt, now);
+        const rateLimitReason = maybeReportScreenRateLimit(root, state, agent.name, excerpt, now);
+        if (rateLimitReason) {
+          actions.push({
+            type: "rate_limit",
+            agent: agent.name,
+            reason: rateLimitReason,
+            issue_id: agent.current_task ?? runtime?.current_task ?? null,
+            cmux_surface: preferred.ref,
+          });
+        }
         const liveStatus = runtime?.status && runtime.status !== "offline" && runtime.status !== "paused" && runtime.status !== "unknown"
-          ? runtime.status
+          ? (screenLooksBusy(excerpt) ? "busy" : runtime.status)
           : agent.current_task
-            ? "idle"
+            ? (screenLooksBusy(excerpt) ? "busy" : "idle")
             : "online";
         recordAgentRuntime(root, agent.name, {
           status: liveStatus,
@@ -2108,7 +2173,7 @@ export function maintainCompany(root: string, actor = "system", now = nowIso()):
   }
 
   if (policy.auto_hibernate && liveSurfaces) {
-    const warm = keepWarmAgents(state, liveSurfaces, policy);
+    const warm = keepWarmAgents(root, state, liveSurfaces, policy);
     const candidates = Object.values(state.agents)
       .filter((agent) =>
         agent.name !== lead &&

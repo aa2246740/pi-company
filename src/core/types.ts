@@ -197,7 +197,7 @@ export interface AgentRecoverySnapshot {
 }
 
 export interface CompanyMaintenanceAction {
-  type: "snapshot" | "hibernate" | "duplicate_surface" | "offline" | "stale_task" | "lead_notice";
+  type: "snapshot" | "hibernate" | "duplicate_surface" | "offline" | "stale_task" | "lead_notice" | "rate_limit";
   agent: string;
   reason: string;
   issue_id?: string | null;

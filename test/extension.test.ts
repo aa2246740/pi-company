@@ -387,31 +387,45 @@ describe("pi-company extension", () => {
     expect(result.details.existing).toBe(true);
   });
 
-  it("warns when a mailbox message targets a worker without a live Pi pane", async () => {
+  it("auto-launches an offline worker for immediate lead messages", async () => {
     const root = tempRoot();
     initCompany({ root, id: "extension-message-offline-warning" });
-    const { handlers, pi, tools } = fakePi({
-      "company-root": root,
-      "company-agent": "lead",
-      "company-role": "lead",
+    const cmuxLog = path.join(root, "cmux.log");
+    const results: ToolResult[] = [];
+
+    await withFakeCmux({
+      callerSurface: "surface:lead",
+      surfaces: [
+        { ref: "surface:lead", title: "pi-company lead", screen: `${root}\npi-company extension-message-offline-warning | lead (lead)\n` },
+      ],
+      logPath: cmuxLog,
+    }, async () => {
+      const { handlers, pi, tools } = fakePi({
+        "company-root": root,
+        "company-agent": "lead",
+        "company-role": "lead",
+      });
+      const { ctx } = fakeContext(root);
+
+      companyExtension(pi);
+      await handlers.session_start?.({}, ctx);
+      const messageTool = tools.find((tool) => tool.name === "company_send_message");
+      if (!messageTool) throw new Error("company_send_message tool was not registered");
+      results.push(await messageTool.execute("tool-1", {
+        to: "pm",
+        type: "assignment",
+        text: "Shape acceptance criteria.",
+        priority: "high",
+      }, undefined, undefined, ctx) as ToolResult);
+      await handlers.session_shutdown?.({}, ctx);
     });
-    const { ctx } = fakeContext(root);
 
-    companyExtension(pi);
-    await handlers.session_start?.({}, ctx);
-    const messageTool = tools.find((tool) => tool.name === "company_send_message");
-    if (!messageTool) throw new Error("company_send_message tool was not registered");
-    const result = await messageTool.execute("tool-1", {
-      to: "pm",
-      type: "assignment",
-      text: "Shape acceptance criteria.",
-      priority: "high",
-    }, undefined, undefined, ctx) as ToolResult;
-    await handlers.session_shutdown?.({}, ctx);
-
-    expect(result.content[0].text).toContain("Warning: pm is planned");
-    expect(result.content[0].text).toContain("no visible Pi pane will receive it");
+    const result = results[0];
+    if (!result) throw new Error("message result missing");
+    expect(result.content[0].text).toContain("Auto-launched pm in surface:new");
     expect(result.details.recipient_status).toBe("planned");
+    expect(result.details.cmux).toBe("surface:new");
+    expect(fs.readFileSync(cmuxLog, "utf8")).toContain("--json new-pane");
     expect(loadState(root).inbox_counts.pm).toBe(1);
     expect(listInbox(root, "pm")[0].from).toBe("lead");
   });
@@ -584,6 +598,11 @@ describe("pi-company extension", () => {
     const state = loadState(root);
     const inbox = listInbox(root, "coder");
     expect(state.issues[issue.id].owner).toBe("coder");
+    expect(state.agents.coder.cwd).toBe(root);
+    expect(state.agents.coder.worktree).toBeNull();
+    expect(state.agents.coder.branch).toBeNull();
+    expect(result.details.command).toContain(`cd '${root}'`);
+    expect(result.details.command).not.toContain(".pi-company/worktrees/coder");
     expect(result.details.assigned_issue).toMatchObject({ id: issue.id, owner: "coder" });
     expect(result.details.briefing).toMatchObject({
       to: "coder",
@@ -1152,6 +1171,24 @@ describe("pi-company extension", () => {
 
     companyExtension(pi);
     await handlers.session_start?.({}, ctx);
+    const docRead = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-0a",
+      toolName: "read",
+      input: { path: path.join(root, "README.md") },
+    }, ctx);
+    const sourceRead = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-0b",
+      toolName: "read",
+      input: { path: path.join(root, "src", "App.tsx") },
+    }, ctx);
+    const worktreeSourceRead = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-0c",
+      toolName: "read",
+      input: { path: path.join(root, ".pi-company", "worktrees", "coder", "src", "App.tsx") },
+    }, ctx);
     const writeResult = await handlers.tool_call?.({
       type: "tool_call",
       toolCallId: "tool-1",
@@ -1226,6 +1263,9 @@ describe("pi-company extension", () => {
     }, ctx);
     await handlers.session_shutdown?.({ reason: "quit" }, ctx);
 
+    expect(docRead).toBeUndefined();
+    expect(sourceRead).toMatchObject({ block: true });
+    expect(worktreeSourceRead).toMatchObject({ block: true });
     expect(writeResult).toMatchObject({ block: true });
     expect(governanceDoc).toBeUndefined();
     expect(docsBash).toBeUndefined();
@@ -1574,6 +1614,64 @@ describe("pi-company extension", () => {
     expect(outsideEdit).toMatchObject({ block: true });
     expect(tempHandoffWrite).toBeUndefined();
     expect(tempCodeWrite).toMatchObject({ block: true });
+  });
+
+  it("allows root-scoped coder cleanup while protecting control paths", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-root-scoped-coder-guard" });
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder-root", "Clean root-level blockers.", {
+      useCoderWorktree: false,
+    });
+    registerAgent(root, {
+      ...plan,
+      status: "online",
+    });
+    const { handlers, pi } = fakePi({
+      "company-root": root,
+      "company-agent": "coder-root",
+      "company-role": "coder",
+    });
+    const { ctx } = fakeContext(root);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const rootCleanup = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-1",
+      toolName: "bash",
+      input: { command: "rm -rf docs/product docs/design/secbrain-v0.3-chat-first.md" },
+    }, ctx);
+    const controlCleanup = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-2",
+      toolName: "bash",
+      input: { command: "rm -rf .pi-company" },
+    }, ctx);
+    const gitMutation = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-3",
+      toolName: "bash",
+      input: { command: "git add -A" },
+    }, ctx);
+    const outsideCleanup = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-4",
+      toolName: "bash",
+      input: { command: "rm -rf ../outside-project" },
+    }, ctx);
+    const controlWrite = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "tool-5",
+      toolName: "write",
+      input: { path: path.join(root, ".pi-company", "state.json"), content: "{}\n" },
+    }, ctx);
+    await handlers.session_shutdown?.({ reason: "quit" }, ctx);
+
+    expect(rootCleanup).toBeUndefined();
+    expect(controlCleanup).toMatchObject({ block: true });
+    expect(gitMutation).toMatchObject({ block: true });
+    expect(outsideCleanup).toMatchObject({ block: true });
+    expect(controlWrite).toMatchObject({ block: true });
   });
 
   it("records provider 429 responses from Pi provider hooks", async () => {
