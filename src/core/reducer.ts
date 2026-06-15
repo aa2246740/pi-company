@@ -440,6 +440,9 @@ export function reduceEvents(events: CompanyEvent[]): CompanyState {
         state.rate_limit = {
           kind: isRateLimitKind(event.data.kind) ? event.data.kind : "provider_429",
           reason: String(event.data.reason ?? "rate limit reported"),
+          provider: typeof event.data.provider === "string" && event.data.provider.trim()
+            ? event.data.provider.trim()
+            : null,
           reported_by: event.actor,
           reported_at: event.ts,
           paused_until: pausedUntil,

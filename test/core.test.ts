@@ -40,6 +40,7 @@ import {
   requestAgentSpawn,
   requestMerge,
   normalizeMessagePolicy,
+  rateLimitAppliesToProvider,
   rateLimitIsActive,
   reportRateLimit,
   resolveGitHead,
@@ -647,6 +648,91 @@ Rate limit 已过期，可以恢复正常工作`);
 
     expect(command).toContain("--provider 'xiaomi-token-plan-cn'");
     expect(command).toContain("--model 'mimo-v2.5-pro'");
+  });
+
+  it("launches with a global fallback model while the primary provider is in backoff", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "launch-fallback-model-demo" });
+    setModelPolicy(root, "lead", "role", "tester", {
+      provider: "zhipu",
+      model: "glm-5.2",
+    });
+    setModelPolicy(root, "lead", "fallback", "0", {
+      provider: "xiaomi-token-plan-cn",
+      model: "mimo-v2.5-pro",
+    });
+
+    reportRateLimit(root, "tester", "Provider HTTP 429 from zhipu.", "provider_429", "2099-01-01T00:00:00.000Z", {
+      provider: "zhipu",
+    });
+    const command = launchCommand(root, "tester", "/tmp/company.js");
+
+    expect(command).toContain("--provider 'xiaomi-token-plan-cn'");
+    expect(command).toContain("--model 'mimo-v2.5-pro'");
+    expect(command).not.toContain("--provider 'zhipu'");
+    expect(loadState(root).rate_limit?.provider).toBe("zhipu");
+  });
+
+  it("keeps the primary model when the active backoff is for a different provider", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "launch-provider-specific-model-demo" });
+    setModelPolicy(root, "lead", "role", "tester", {
+      provider: "zhipu",
+      model: "glm-5.2",
+    });
+    setModelPolicy(root, "lead", "fallback", "0", {
+      provider: "xiaomi-token-plan-cn",
+      model: "mimo-v2.5-pro",
+    });
+
+    reportRateLimit(root, "system", "Provider HTTP 429 from openai-codex.", "provider_429", "2099-01-01T00:00:00.000Z", {
+      provider: "openai-codex",
+    });
+    const command = launchCommand(root, "tester", "/tmp/company.js");
+
+    expect(command).toContain("--provider 'zhipu'");
+    expect(command).toContain("--model 'glm-5.2'");
+  });
+
+  it("lets fallback-capable agents wake during provider-specific backoff", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "fallback-wake-demo" });
+    setModelPolicy(root, "lead", "role", "tester", {
+      provider: "zhipu",
+      model: "glm-5.2",
+    });
+    setModelPolicy(root, "lead", "fallback", "0", {
+      provider: "xiaomi-token-plan-cn",
+      model: "mimo-v2.5-pro",
+    });
+    const state = reportRateLimit(root, "tester", "Provider HTTP 429 from zhipu.", "provider_429", "2099-01-01T00:00:00.000Z", {
+      provider: "zhipu",
+    });
+    const message = sendCompanyMessage(root, {
+      from: "lead",
+      to: "tester",
+      type: "assignment",
+      text: "Continue with fallback.",
+    });
+
+    expect(agentRateLimitResumeAt(state, "tester")).toBeNull();
+    expect(shouldAutoDeliverMessage(message, loadState(root), "tester", "2099-01-01T00:00:01.000Z")).toBe(true);
+  });
+
+  it("applies provider-specific backoff only to the unhealthy provider", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "provider-specific-backoff-demo" });
+
+    const providerState = reportRateLimit(root, "system", "Provider HTTP 429 from zhipu.", "provider_429", "2099-01-01T00:00:00.000Z", {
+      provider: "zhipu",
+    });
+
+    expect(rateLimitAppliesToProvider(providerState, "zhipu", "2099-01-01T00:00:01.000Z")).toBe(true);
+    expect(rateLimitAppliesToProvider(providerState, "xiaomi-token-plan-cn", "2099-01-01T00:00:01.000Z")).toBe(false);
+
+    const manualState = reportRateLimit(root, "system", "Human pause.", "manual", "2099-01-01T00:00:02.000Z");
+
+    expect(rateLimitAppliesToProvider(manualState, "xiaomi-token-plan-cn", "2099-01-01T00:00:03.000Z")).toBe(true);
   });
 
   it("requires self-test, automated tests, review, tester pass, and product acceptance before merge", () => {

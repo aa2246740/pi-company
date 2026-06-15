@@ -77,6 +77,12 @@ export interface ModelPolicy {
   defaults?: PiModelConfig | null;
   roles?: Record<string, PiModelConfig | null> | null;
   agents?: Record<string, PiModelConfig | null> | null;
+  /**
+   * Organization-wide fallback models, tried in order when a provider-level
+   * rate-limit or quota incident makes an agent's primary model unavailable.
+   * Keep this short; pi-company only uses the first two entries.
+   */
+  fallbacks?: PiModelConfig[] | null;
 }
 
 export interface MessagePolicy {
@@ -145,6 +151,7 @@ export interface LifecyclePolicy {
 export interface RateLimitState {
   kind: RateLimitKind;
   reason: string;
+  provider?: string | null;
   reported_by: string;
   reported_at: string;
   paused_until: string;

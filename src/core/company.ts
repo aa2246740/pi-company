@@ -174,7 +174,9 @@ function normalizeQualityGates(gates?: Partial<CompanyConfig["quality_gates"]> |
   };
 }
 
-export function setModelPolicy(root: string, actor: string, target: "defaults" | "role" | "agent", name: string | null, model: PiModelConfig | null): CompanyConfig {
+export type ModelPolicyTarget = "defaults" | "role" | "agent" | "fallback";
+
+export function setModelPolicy(root: string, actor: string, target: ModelPolicyTarget, name: string | null, model: PiModelConfig | null): CompanyConfig {
   requireLead(root, actor, "configure model policy");
   const paths = companyPaths(root);
   const config = loadConfig(root) ?? defaultConfig(root, slug(path.basename(root)));
@@ -182,6 +184,7 @@ export function setModelPolicy(root: string, actor: string, target: "defaults" |
     defaults: config.model_policy?.defaults ?? null,
     roles: { ...(config.model_policy?.roles ?? {}) },
     agents: { ...(config.model_policy?.agents ?? {}) },
+    fallbacks: normalizeModelFallbacks(config.model_policy?.fallbacks ?? null),
   };
 
   if (target === "defaults") {
@@ -189,9 +192,17 @@ export function setModelPolicy(root: string, actor: string, target: "defaults" |
   } else if (target === "role") {
     if (!name) throw new Error("Role name is required for role model policy.");
     policy.roles[name] = normalizeModelConfig(model);
-  } else {
+  } else if (target === "agent") {
     if (!name) throw new Error("Agent name is required for agent model policy.");
     policy.agents[name] = normalizeModelConfig(model);
+  } else {
+    const index = Number(name);
+    if (!Number.isInteger(index) || index < 0 || index > 1) throw new Error("Fallback model index must be 0 or 1.");
+    const nextFallbacks = [...policy.fallbacks];
+    const normalized = normalizeModelConfig(model);
+    if (normalized) nextFallbacks[index] = normalized;
+    else nextFallbacks.splice(index, 1);
+    policy.fallbacks = normalizeModelFallbacks(nextFallbacks);
   }
 
   const next = { ...config, model_policy: policy };
@@ -199,16 +210,27 @@ export function setModelPolicy(root: string, actor: string, target: "defaults" |
   return next;
 }
 
-export function resolveAgentModelConfig(root: string, agentName: string): PiModelConfig | null {
+export function resolveAgentModelConfig(root: string, agentName: string, options: { ignoreRateLimit?: boolean } = {}): PiModelConfig | null {
   const state = loadState(root);
   const config = loadConfig(root) ?? state.config;
+  return resolveAgentModelConfigFromState(state, config, agentName, options);
+}
+
+function resolveAgentModelConfigFromState(
+  state: CompanyState,
+  config: CompanyConfig | null | undefined,
+  agentName: string,
+  options: { ignoreRateLimit?: boolean } = {},
+): PiModelConfig | null {
   const agent = state.agents[agentName];
   if (!config || !agent) return null;
-  return mergeModelConfigs(
+  const primary = mergeModelConfigs(
     config.model_policy?.defaults ?? null,
     config.model_policy?.roles?.[agent.role] ?? null,
     config.model_policy?.agents?.[agent.name] ?? null,
   );
+  if (options.ignoreRateLimit === true) return primary;
+  return fallbackModelForRateLimit(state, config, agentName, primary) ?? primary;
 }
 
 export function loadState(root = process.cwd()): CompanyState {
@@ -598,13 +620,20 @@ export function reportRateLimit(
   actor: string,
   reason: string,
   kind: RateLimitKind = "provider_429",
-  now = nowIso(),
+  now: string | undefined = nowIso(),
+  options: { provider?: string | null } = {},
 ): CompanyState {
   const state = loadState(root);
   if (actor !== "system" && !state.agents[actor]) throw new Error(`Unknown rate-limit reporter ${actor}.`);
   if (!isRateLimitKind(kind)) throw new Error(`Invalid rate-limit kind ${kind}.`);
   const policy = normalizeRateLimitPolicy(state.config?.rate_limit_policy);
-  const active = rateLimitIsActive(state, now);
+  const reportedAt = now ?? nowIso();
+  const provider = normalizeProviderName(
+    options.provider ??
+    (actor !== "system" ? resolveAgentModelConfigFromState(state, state.config, actor, { ignoreRateLimit: true })?.provider : null) ??
+    null,
+  );
+  const active = rateLimitIsActive(state, reportedAt);
   const previous = active ? state.rate_limit?.retry_after_ms ?? 0 : 0;
   const retryAfterMs = kind === "quota_exhausted"
     ? Math.max(policy.quota_backoff_ms, previous > 0 ? Math.min(previous * 2, policy.max_backoff_ms) : 0)
@@ -615,8 +644,9 @@ export function reportRateLimit(
   const reported = recordEvent(root, makeEvent("rate_limit.reported", actor, {
     kind,
     reason,
+    provider,
     retry_after_ms: retryAfterMs,
-    paused_until: new Date(Date.parse(now) + retryAfterMs).toISOString(),
+    paused_until: new Date(Date.parse(reportedAt) + retryAfterMs).toISOString(),
     incidents,
   }));
   const lead = reported.config?.lead ?? "lead";
@@ -659,8 +689,20 @@ export function rateLimitIsActive(state: CompanyState, now = nowIso()): boolean 
   return Number.isFinite(pausedUntil) && Number.isFinite(current) && current < pausedUntil;
 }
 
+export function rateLimitAppliesToProvider(state: CompanyState, provider: string | null | undefined, now = nowIso()): boolean {
+  if (!rateLimitIsActive(state, now)) return false;
+  if (state.rate_limit?.kind === "manual") return true;
+  const limitedProvider = normalizeProviderName(state.rate_limit?.provider ?? null);
+  if (!limitedProvider) return true;
+  const requestProvider = normalizeProviderName(provider ?? null);
+  return requestProvider === limitedProvider;
+}
+
 export function agentRateLimitResumeAt(state: CompanyState, agentName: string): string | null {
   if (!state.rate_limit) return null;
+  if (fallbackModelForRateLimit(state, state.config, agentName, resolveAgentModelConfigFromState(state, state.config, agentName, { ignoreRateLimit: true }))) {
+    return null;
+  }
   const pausedUntil = Date.parse(state.rate_limit.paused_until);
   if (!Number.isFinite(pausedUntil)) return null;
   const policy = normalizeRateLimitPolicy(state.config?.rate_limit_policy);
@@ -3083,6 +3125,28 @@ function normalizeModelConfig(model: PiModelConfig | null): PiModelConfig | null
   return Object.keys(normalized).length > 0 ? normalized : null;
 }
 
+function normalizeModelFallbacks(models: Array<PiModelConfig | null | undefined> | null | undefined): PiModelConfig[] {
+  if (!Array.isArray(models)) return [];
+  const seen = new Set<string>();
+  const fallbacks: PiModelConfig[] = [];
+  for (const model of models) {
+    const normalized = normalizeModelConfig(model ?? null);
+    if (!normalized) continue;
+    const key = `${normalized.provider ?? ""}/${normalized.model ?? ""}/${normalized.models ?? ""}/${normalized.thinking ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    fallbacks.push(normalized);
+    if (fallbacks.length >= 2) break;
+  }
+  return fallbacks;
+}
+
+function normalizeProviderName(provider: string | null | undefined): string | null {
+  if (typeof provider !== "string") return null;
+  const trimmed = provider.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 function mergeModelConfigs(...configs: Array<PiModelConfig | null | undefined>): PiModelConfig | null {
   const merged: PiModelConfig = {};
   for (const config of configs) {
@@ -3091,6 +3155,40 @@ function mergeModelConfigs(...configs: Array<PiModelConfig | null | undefined>):
     Object.assign(merged, normalized);
   }
   return Object.keys(merged).length > 0 ? merged : null;
+}
+
+function fallbackModelForRateLimit(
+  state: CompanyState,
+  config: CompanyConfig | null | undefined,
+  agentName: string,
+  primary: PiModelConfig | null,
+): PiModelConfig | null {
+  if (!config?.model_policy?.fallbacks || !rateLimitIsActive(state)) return null;
+  const kind = state.rate_limit?.kind ?? "manual";
+  if (kind !== "provider_429" && kind !== "quota_exhausted") return null;
+  const agent = state.agents[agentName];
+  if (!agent) return null;
+  const primaryProvider = normalizeProviderName(primary?.provider ?? null);
+  const limitedProvider = normalizeProviderName(state.rate_limit?.provider ?? null) ?? primaryProvider;
+  if (limitedProvider && primaryProvider && primaryProvider !== limitedProvider) return null;
+  const fallbacks = normalizeModelFallbacks(config.model_policy.fallbacks);
+  for (const fallback of fallbacks) {
+    const fallbackProvider = normalizeProviderName(fallback.provider ?? null);
+    if (limitedProvider && fallbackProvider === limitedProvider) continue;
+    if (sameModelConfig(primary, fallback)) continue;
+    return fallback;
+  }
+  return null;
+}
+
+function sameModelConfig(left: PiModelConfig | null | undefined, right: PiModelConfig | null | undefined): boolean {
+  const l = normalizeModelConfig(left ?? null);
+  const r = normalizeModelConfig(right ?? null);
+  if (!l || !r) return false;
+  return (l.provider ?? "") === (r.provider ?? "") &&
+    (l.model ?? "") === (r.model ?? "") &&
+    (l.models ?? "") === (r.models ?? "") &&
+    (l.thinking ?? "") === (r.thinking ?? "");
 }
 
 function modelArgs(config: PiModelConfig | null): string[] {

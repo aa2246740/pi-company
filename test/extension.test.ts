@@ -927,6 +927,7 @@ describe("pi-company extension", () => {
 
     const targetOptions = ui.select.mock.calls[0]?.[1] as string[] | undefined;
     expect(targetOptions).toContain("Default model (future and unconfigured roles) [current: xiaomi-token-plan-cn/mimo-v2.5-pro:high]");
+    expect(targetOptions).toContain("Global fallback 1 [current: not configured]");
     expect(targetOptions).toContain("Role default: coder [current: openai-codex/gpt-5.4-mini:medium]");
     expect(targetOptions).toContain("Role default: tester [current: inherits default xiaomi-token-plan-cn/mimo-v2.5-pro:high]");
     expect(targetOptions).not.toContain("Agent: coder-docs");
@@ -938,6 +939,49 @@ describe("pi-company extension", () => {
       model: "gpt-5.4-mini",
       thinking: "low",
     });
+  });
+
+  it("configures global fallback models through Pi UI model choices", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-model-fallback-policy" });
+    const { handlers, pi, tools } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx, ui } = fakeContext(root);
+    ctx.modelRegistry = {
+      getAvailable: vi.fn(() => [
+        {
+          provider: "xiaomi-token-plan-cn",
+          id: "mimo-v2.5-pro",
+          name: "mimo-v2.5-pro",
+          reasoning: true,
+          contextWindow: 1000000,
+        },
+      ]),
+    } as never;
+    ui.select
+      .mockResolvedValueOnce("Global fallback 1 [current: not configured]")
+      .mockResolvedValueOnce("xiaomi-token-plan-cn/mimo-v2.5-pro context:1M thinking:yes")
+      .mockResolvedValueOnce("high")
+      .mockResolvedValueOnce("Done");
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const tool = tools.find((tool) => tool.name === "company_configure_model_policy");
+    if (!tool) throw new Error("company_configure_model_policy tool was not registered");
+    const result = await tool.execute("tool-1", {}, undefined, undefined, ctx) as ToolResult;
+    await handlers.session_shutdown?.({ reason: "quit" }, ctx);
+
+    expect(result.content[0].text).toContain("Configured Global fallback 1 to xiaomi-token-plan-cn/mimo-v2.5-pro:high.");
+    expect(loadConfig(root)?.model_policy?.fallbacks).toEqual([
+      {
+        provider: "xiaomi-token-plan-cn",
+        model: "mimo-v2.5-pro",
+        thinking: "high",
+      },
+    ]);
   });
 
   it("uses explicit Pi flags before ambient PI_COMPANY environment variables", async () => {

@@ -246,7 +246,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
     });
   }
 
-  function reportAutomaticRateLimit(kind: "provider_429" | "quota_exhausted", reason: string) {
+  function reportAutomaticRateLimit(kind: "provider_429" | "quota_exhausted", reason: string, provider?: string | null) {
     const now = Date.now();
     if (now - lastAutomaticRateLimitReportAt < AUTOMATIC_RATE_LIMIT_DEDUPE_MS) {
       return loadState(root);
@@ -254,7 +254,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
     // Stamp the dedupe window only after a successful report. If reportRateLimit
     // throws (e.g. lock contention), a failed report must not suppress the next
     // 429 and leave the org hammering a rate-limited provider with no backoff.
-    const state = reportRateLimit(root, agentName, reason, kind);
+    const state = reportRateLimit(root, agentName, reason, kind, undefined, { provider });
     lastAutomaticRateLimitReportAt = now;
     return state;
   }
@@ -411,10 +411,10 @@ export default function companyExtension(pi: ExtensionAPI): void {
   pi.on("before_provider_request", async (event, ctx) => {
     if (!isCompanyActive()) return undefined;
     if (companyPaused) return undefined;
-    await waitForProviderBackoff(ctx);
+    const provider = providerNameFromRequest(event, ctx);
+    await waitForProviderBackoff(ctx, provider);
     recordLiveRuntime({ status: "busy", turn_started: true });
     const state = loadState(root);
-    const provider = providerNameFromRequest(event, ctx);
     const lease = await acquireProviderRequestLease(root, provider, agentName, state.config?.provider_request_policy);
     activeProviderLeases.push(lease);
     // The acquire can block for seconds behind the concurrency/spacing gate. If
@@ -443,7 +443,8 @@ export default function companyExtension(pi: ExtensionAPI): void {
     const retryAfter = typeof event.headers?.["retry-after"] === "string"
       ? ` retry-after=${event.headers["retry-after"]}`
       : "";
-    const state = reportAutomaticRateLimit("provider_429", `Provider HTTP 429.${retryAfter}`.trim());
+    const provider = providerNameFromRequest(event, ctx);
+    const state = reportAutomaticRateLimit("provider_429", `Provider HTTP 429 from ${provider}.${retryAfter}`.trim(), provider);
     await refreshUi(ctx);
     if (ctx.hasUI) {
       ctx.ui.setStatus("pi-company", `rate-limit: paused until ${state.rate_limit?.paused_until ?? "unknown"}`);
@@ -518,9 +519,10 @@ ${renderCompanySystemPrompt(root, agentName, role, lead)}`,
     };
   });
 
-  async function waitForProviderBackoff(ctx: ExtensionContext): Promise<void> {
+  async function waitForProviderBackoff(ctx: ExtensionContext, provider: string): Promise<void> {
     for (;;) {
       const state = loadState(root);
+      if (!providerBackoffAppliesToRequest(state, provider)) return;
       const resumeAt = agentRateLimitResumeAt(state, agentName) ?? state.rate_limit?.paused_until ?? null;
       const resumeAtMs = resumeAt ? Date.parse(resumeAt) : Number.NaN;
       const waitMs = Number.isFinite(resumeAtMs) ? resumeAtMs - Date.now() : 0;
@@ -2062,7 +2064,7 @@ async function configureModelPolicyInteractively(root: string, agentName: string
 interface ModelPolicyTargetOption {
   label: string;
   title: string;
-  scope: "defaults" | "role";
+  scope: "defaults" | "role" | "fallback";
   name: string | null;
   currentSummary: string;
 }
@@ -2079,8 +2081,16 @@ function modelPolicyTargetOptions(state: CompanyState): ModelPolicyTargetOption[
   ])].sort();
   const defaults = state.config?.model_policy?.defaults ?? null;
   const defaultSummary = formatModelPolicyConfig(defaults) ?? "Pi/lead current model";
+  const fallbacks = state.config?.model_policy?.fallbacks ?? [];
+  const fallbackOptions = [
+    modelPolicyTargetOption("Global fallback 1", "fallback", "0", formatModelPolicyConfig(fallbacks[0]) ?? "not configured"),
+    ...(fallbacks[0] || fallbacks[1]
+      ? [modelPolicyTargetOption("Global fallback 2", "fallback", "1", formatModelPolicyConfig(fallbacks[1]) ?? "not configured")]
+      : []),
+  ];
   return [
     modelPolicyTargetOption("Default model (future and unconfigured roles)", "defaults", null, defaultSummary),
+    ...fallbackOptions,
     ...roles.map((role) => {
       const roleConfig = state.config?.model_policy?.roles?.[role] ?? null;
       const roleSummary = formatModelPolicyConfig(roleConfig)
@@ -2092,7 +2102,7 @@ function modelPolicyTargetOptions(state: CompanyState): ModelPolicyTargetOption[
 
 function modelPolicyTargetOption(
   title: string,
-  scope: "defaults" | "role",
+  scope: "defaults" | "role" | "fallback",
   name: string | null,
   currentSummary: string,
 ): ModelPolicyTargetOption {
@@ -2114,7 +2124,9 @@ async function configureOneModelPolicy(
 ): Promise<string> {
   const clearLabel = target.scope === "defaults"
     ? "Use Pi/lead current model by default"
-    : "Inherit default / clear this role override";
+    : target.scope === "fallback"
+      ? "Clear this global fallback"
+      : "Inherit default / clear this role override";
   const modelChoice = await selectRequired(ctx, `Choose Pi model for ${target.title} (current: ${target.currentSummary}):`, [clearLabel, ...modelOptions.map((option) => option.label)]);
   if (modelChoice === clearLabel) {
     setModelPolicy(root, agentName, target.scope, target.name, null);
@@ -2221,6 +2233,20 @@ function providerNameFromRequest(event: unknown, ctx: ExtensionContext): string 
   ];
   const provider = candidates.find((value): value is string => typeof value === "string" && value.trim().length > 0);
   return provider?.trim() ?? "unknown-provider";
+}
+
+function providerBackoffAppliesToRequest(state: CompanyState, provider: string): boolean {
+  if (!state.rate_limit) return false;
+  if (state.rate_limit.kind === "manual") return true;
+  const limitedProvider = normalizeProviderForComparison(state.rate_limit.provider ?? null);
+  if (!limitedProvider) return true;
+  return normalizeProviderForComparison(provider) === limitedProvider;
+}
+
+function normalizeProviderForComparison(provider: string | null | undefined): string | null {
+  if (typeof provider !== "string") return null;
+  const trimmed = provider.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -2374,6 +2400,8 @@ function renderStatus(root: string, state: ReturnType<typeof loadState>): string
   const rateLimit = state.rate_limit
     ? `- ${rateLimitIsActive(state) ? "active" : "recent"} ${state.rate_limit.kind} until ${state.rate_limit.paused_until} (${state.rate_limit.retry_after_ms}ms)
 - incidents=${state.rate_limit.incidents} reported_by=${state.rate_limit.reported_by}
+- provider=${state.rate_limit.provider ?? "unknown"}
+- model fallbacks=${formatModelFallbacksForStatus(state)}
 - reason: ${state.rate_limit.reason}`
     : "- none";
   return `Company: ${state.config?.id ?? "not initialized"}
@@ -2397,7 +2425,16 @@ ${rateLimit}`;
 function renderRateLimitPanelLine(state: ReturnType<typeof loadState>): string | null {
   if (!state.rate_limit) return null;
   const status = rateLimitIsActive(state) ? "active" : "recent";
-  return `rate-limit: ${status} ${state.rate_limit.kind} until ${state.rate_limit.paused_until}`;
+  const provider = state.rate_limit.provider ? ` ${state.rate_limit.provider}` : "";
+  return `rate-limit: ${status} ${state.rate_limit.kind}${provider} until ${state.rate_limit.paused_until}`;
+}
+
+function formatModelFallbacksForStatus(state: ReturnType<typeof loadState>): string {
+  const fallbacks = (state.config?.model_policy?.fallbacks ?? [])
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((config) => formatModelPolicyConfig(config));
+  return fallbacks.length > 0 ? fallbacks.join(" -> ") : "none";
 }
 
 function formatMailboxMessage(message: MailboxMessage): string {

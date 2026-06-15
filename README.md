@@ -232,6 +232,7 @@ Lead opens a choice-based wizard. The human does not need to know role names
 ahead of time. The wizard lists each target with its current setting:
 
 - default model for future and unconfigured roles
+- up to two global fallback models for provider failures
 - all built-in supported roles: lead, pm, designer, researcher, coder, reviewer, tester
 
 Targets show whether they are explicitly configured, inheriting the default, or
@@ -239,7 +240,7 @@ falling back to Pi's current startup model before the human changes anything.
 
 For each target, lead chooses one model from Pi's configured models, then an
 optional thinking level. After one target is configured, the wizard asks whether
-to configure another role or default.
+to configure another role, default, or fallback.
 
 The selection is saved to `.pi-company/company.yaml` under `model_policy`.
 For example:
@@ -254,12 +255,25 @@ model_policy:
     tester:
       provider: xiaomi-token-plan-cn
       model: mimo-v2.5-pro
+  fallbacks:
+    - provider: xiaomi-token-plan-cn
+      model: mimo-v2.5-pro
+    - provider: openai-codex
+      model: gpt-5.5
+      thinking: high
 ```
 
 If no explicit default is configured, agents inherit Pi's normal startup model,
 which is usually the same model the lead pane was launched with. If default is
 changed, dynamically added agents inherit that default unless their role has a
 role model policy.
+
+Fallbacks are global, not per-role. When a provider-specific `429`, quota, or
+similar service incident is active, newly launched or relaunched agents keep
+their role's main model unless that model uses the unhealthy provider. If it
+does, pi-company tries the first configured fallback whose provider is different,
+then the second. This keeps recovery simple: configure role primaries once, then
+keep one or two organization-wide backup providers.
 
 Pi-company intentionally keeps this as an organization-level policy. If one
 specific running agent needs a temporary model change, switch it in that agent's

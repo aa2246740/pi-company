@@ -468,13 +468,15 @@ program.command("rate-limit")
   .requiredOption("--actor <agent>")
   .requiredOption("--reason <text>")
   .option("--kind <kind>", "provider_429 | quota_exhausted | manual", "provider_429")
+  .option("--provider <provider>", "provider that is unhealthy; inferred from actor model policy when omitted")
   .action((opts) => {
     if (!["provider_429", "quota_exhausted", "manual"].includes(opts.kind)) {
       throw new Error("kind must be provider_429, quota_exhausted, or manual");
     }
-    const state = reportRateLimit(rootOpt(), opts.actor, opts.reason, opts.kind);
+    const state = reportRateLimit(rootOpt(), opts.actor, opts.reason, opts.kind, undefined, { provider: opts.provider ?? null });
     console.log(`Rate-limit backoff active until ${state.rate_limit?.paused_until ?? "unknown"}`);
     console.log(`Retry after: ${state.rate_limit?.retry_after_ms ?? 0}ms`);
+    if (state.rate_limit?.provider) console.log(`Provider: ${state.rate_limit.provider}`);
   });
 
 program.command("rate-limit-clear")
@@ -554,6 +556,7 @@ program.command("cmux-rate-limit-scan")
     const state = reportRateLimit(root, opts.actor, reason, kind);
     console.log(`Rate-limit backoff active until ${state.rate_limit?.paused_until ?? "unknown"}`);
     console.log(`Retry after: ${state.rate_limit?.retry_after_ms ?? 0}ms`);
+    if (state.rate_limit?.provider) console.log(`Provider: ${state.rate_limit.provider}`);
     for (const incident of incidents) {
       console.log(`- ${incident.surface} ${incident.title}: ${incident.kind}`);
     }
@@ -659,8 +662,21 @@ function printStatus(root: string, state: ReturnType<typeof loadState>): void {
     console.log("");
     console.log(active ? "Rate Limit:" : "Recent Rate Limit:");
     console.log(`- ${active ? "active" : "expired"} ${state.rate_limit.kind} until ${state.rate_limit.paused_until} (${state.rate_limit.retry_after_ms}ms)`);
+    if (state.rate_limit.provider) console.log(`- provider: ${state.rate_limit.provider}`);
     console.log(`- reason: ${state.rate_limit.reason}`);
+    const fallbacks = (state.config?.model_policy?.fallbacks ?? [])
+      .filter(Boolean)
+      .slice(0, 2)
+      .map(formatModelConfigForCli);
+    if (fallbacks.length > 0) console.log(`- model fallbacks: ${fallbacks.join(" -> ")}`);
   }
+}
+
+function formatModelConfigForCli(config: { provider?: string | null; model?: string | null; models?: string | null; thinking?: string | null }): string {
+  const model = config.models
+    ? `models=${config.models}`
+    : [config.provider, config.model].filter(Boolean).join("/");
+  return config.thinking ? `${model}:${config.thinking}` : model;
 }
 
 function printMessages(messages: MailboxMessage[]): void {
