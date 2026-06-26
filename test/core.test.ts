@@ -179,11 +179,31 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(state.agents.tester.role).toBe("tester");
     expect(fs.existsSync(companyPaths(root).events)).toBe(true);
     expect(fs.existsSync(path.join(companyPaths(root).rolesDir, "coder.md"))).toBe(true);
+    expect(fs.existsSync(companyPaths(root).initLock)).toBe(true);
+    expect(fs.existsSync(path.join(companyPaths(root).okfProjectDir, "bundle.md"))).toBe(true);
+    expect(fs.existsSync(path.join(companyPaths(root).okfProjectDir, "roles", "tester.md"))).toBe(true);
+    expect(fs.existsSync(path.join(companyPaths(root).okfDeliveryDir, "bundle.md"))).toBe(true);
+    expect(fs.existsSync(path.join(companyPaths(root).okfImportedDir, "bundle.md"))).toBe(true);
+    const testerProfile = fs.readFileSync(path.join(companyPaths(root).okfProjectDir, "roles", "tester.md"), "utf8");
+    expect(testerProfile).toContain("type: RoleProfile");
+    expect(testerProfile).toContain("strategy_mode: descriptive");
+    expect(testerProfile).toContain("Adversarial evaluator");
     expect(leadRole).toContain("treat PM as product staff, not the final client");
     expect(leadRole).toContain("do not bounce routine scope, copy, flow, style, or acceptance-criteria defaults back to the human");
     expect(leadRole).toContain("execute the local merge instead of stopping at a merge request");
     expect(pmRole).toContain("ask lead once with your recommended default and fallback");
     expect(fs.readFileSync(path.join(root, ".gitignore"), "utf8")).toContain(".pi-company/");
+  });
+
+  it("does not overwrite seeded OKF project knowledge when init is run again", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "okf-idempotency" });
+    const profilePath = path.join(companyPaths(root).okfProjectDir, "roles", "tester.md");
+    fs.writeFileSync(profilePath, "custom tester profile\n", "utf8");
+
+    initCompany({ root, id: "second" });
+
+    expect(fs.readFileSync(profilePath, "utf8")).toBe("custom tester profile\n");
   });
 
   it("does not reset an existing company when init is run again", () => {

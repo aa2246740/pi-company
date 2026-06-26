@@ -80,6 +80,11 @@ export function ensureCompanyDirs(paths: CompanyPaths): void {
     paths.runtimeDir,
     paths.runtimeAgentsDir,
     paths.runtimeRecoveryDir,
+    paths.metaDir,
+    paths.okfDir,
+    paths.okfProjectDir,
+    paths.okfDeliveryDir,
+    paths.okfImportedDir,
   ]) {
     ensureDir(dir);
   }

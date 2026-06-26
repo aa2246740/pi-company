@@ -2,7 +2,7 @@
 
 Branch: `feat/okf-operating-layer-v0.2`
 
-Working directory: `/Users/wu/Documents/cmux/pi-company-okf-v0.2`
+Working directory: `~/Documents/cmux/pi-company-okf-v0.2`
 
 ## Guardrail
 

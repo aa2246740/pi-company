@@ -37,6 +37,7 @@ import { defaultCoderWorktree, defaultConfig, DEFAULT_LIFECYCLE_POLICY, DEFAULT_
 import { makeEvent } from "./events.js";
 import { newId, nowIso, slug } from "./id.js";
 import { withCompanyLock } from "./lock.js";
+import { seedOkfBundles } from "./okf.js";
 import { evaluatePrGates, evidenceHasGateCaveat, reduceEvents } from "./reducer.js";
 import { classifyRateLimitText } from "./rate-limit.js";
 
@@ -123,6 +124,7 @@ export function initCompany(options: InitOptions = {}): CompanyState {
 
   writeYaml(paths.config, config);
   writeYaml(paths.roster, roster);
+  seedOkfBundles(root, config, roster);
   for (const [role, body] of Object.entries(DEFAULT_ROLES)) {
     const file = path.join(paths.rolesDir, `${role}.md`);
     if (!fs.existsSync(file)) atomicWriteText(file, body);
