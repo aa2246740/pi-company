@@ -44,22 +44,32 @@ Validation:
 - idempotent init test checks customized OKF files are not overwritten;
 - `npm run check`.
 
-## Milestone 2: descriptive RoleProfile context
+## Milestone 2: role resolution layer, no prompt injection yet
 
-Goal: extension includes current role profile as descriptive context.
+Goal: parse and resolve the current role context while preserving authority order.
+
+Advisor consensus for this milestone:
+
+- OKF RoleProfile is lowest-authority contextual augmentation.
+- Legacy `.pi-company/roles/*.md` remains the stable behavioral contract.
+- System/extension prompt remains highest authority.
+- Conflicts or directive-like OKF text must be tagged, not silently merged.
 
 Implementation sketch:
 
 - parse OKF concept frontmatter safely;
 - load current role profile from `.pi-company/okf/project/roles/<role>.md`;
-- include it under an explicit heading: `Project OKF RoleProfile (descriptive, not executable policy)`;
-- skip missing/invalid profiles without failing startup.
+- load legacy role card from `.pi-company/roles/<role>.md`;
+- return a structured role resolution object with `legacy`, `okf`, and `conflicts`;
+- provide a debug/preview renderer;
+- skip missing/invalid profiles without failing startup;
+- do not inject OKF RoleProfile into live agent prompt in this milestone.
 
 Validation:
 
-- extension test asserts context contains current role profile;
-- extension test asserts inactive ordinary sessions do not create OKF;
-- no tool permission changes.
+- core tests assert legacy and OKF sources are resolved;
+- core tests assert directive-like OKF conflicts are tagged;
+- no extension behavior or tool permission changes.
 
 ## Milestone 3: sprint contract templates and read path
 

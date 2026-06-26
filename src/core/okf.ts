@@ -12,6 +12,33 @@ export interface OkfSeedResult {
   skipped: string[];
 }
 
+export interface OkfConcept {
+  file: string;
+  frontmatter: Record<string, unknown>;
+  body: string;
+}
+
+export interface RoleContextSource {
+  source: "legacy-role-card" | "okf-role-profile";
+  file: string;
+  exists: boolean;
+  content: string;
+  frontmatter?: Record<string, unknown>;
+}
+
+export interface RoleResolutionConflict {
+  kind: "okf-directive-review" | "okf-influence-enabled" | "okf-role-mismatch";
+  message: string;
+  line?: string;
+}
+
+export interface RoleContextResolution {
+  role: string;
+  legacy: RoleContextSource;
+  okf: RoleContextSource | null;
+  conflicts: RoleResolutionConflict[];
+}
+
 const OKF_PROFILE_ID = "works.pi-company.project-company";
 const OKF_PROFILE_VERSION = "0.1.0";
 const OKF_BUNDLE_VERSION = "0.1.0";
@@ -145,6 +172,108 @@ function seedDeliveryBundle(bundleDir: string, config: CompanyConfig, result: Ok
   seedSubdirIndex(bundleDir, "evaluations", "Evaluations", "Tester, reviewer, PM, and system findings can be recorded here as supporting evidence.", result);
   seedSubdirIndex(bundleDir, "handoffs", "Structured handoffs", "Role/session handoffs preserve current facts, blockers, evidence, and next owners.", result);
   seedSubdirIndex(bundleDir, "traces", "Verification traces", "Commands, browser checks, screenshots, simulator checks, and other verification traces can be summarized here.", result);
+}
+
+export function resolveRoleContext(root: string, role: string): RoleContextResolution {
+  const paths = companyPaths(root);
+  const legacyFile = path.join(paths.rolesDir, `${role}.md`);
+  const okfFile = path.join(paths.okfProjectDir, "roles", `${role}.md`);
+  const legacy = readLegacyRoleCard(legacyFile);
+  const okfConcept = readOkfConcept(okfFile);
+  const okf = okfConcept
+    ? {
+      source: "okf-role-profile" as const,
+      file: okfFile,
+      exists: true,
+      content: okfConcept.body,
+      frontmatter: okfConcept.frontmatter,
+    }
+    : fs.existsSync(okfFile)
+      ? {
+        source: "okf-role-profile" as const,
+        file: okfFile,
+        exists: true,
+        content: fs.readFileSync(okfFile, "utf8"),
+        frontmatter: {},
+      }
+      : null;
+  return {
+    role,
+    legacy,
+    okf,
+    conflicts: okf ? detectRoleResolutionConflicts(role, okf) : [],
+  };
+}
+
+export function renderRoleResolutionDebug(resolution: RoleContextResolution): string {
+  const okf = resolution.okf
+    ? `OKF: ${resolution.okf.file}\nOKF exists: yes`
+    : "OKF exists: no";
+  const conflicts = resolution.conflicts.length > 0
+    ? resolution.conflicts.map((conflict) => `- [${conflict.kind}] ${conflict.message}${conflict.line ? ` :: ${conflict.line}` : ""}`).join("\n")
+    : "- none";
+  return `Role resolution: ${resolution.role}\nLegacy: ${resolution.legacy.file}\nLegacy exists: ${resolution.legacy.exists ? "yes" : "no"}\n${okf}\nConflicts / review flags:\n${conflicts}`;
+}
+
+export function readOkfConcept(file: string): OkfConcept | null {
+  if (!fs.existsSync(file)) return null;
+  try {
+    const text = fs.readFileSync(file, "utf8");
+    const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+    if (!match) return null;
+    const frontmatter = YAML.parse(match[1]) as unknown;
+    if (!frontmatter || typeof frontmatter !== "object" || Array.isArray(frontmatter)) return null;
+    return {
+      file,
+      frontmatter: frontmatter as Record<string, unknown>,
+      body: match[2] ?? "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function readLegacyRoleCard(file: string): RoleContextSource {
+  return {
+    source: "legacy-role-card",
+    file,
+    exists: fs.existsSync(file),
+    content: fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "",
+  };
+}
+
+function detectRoleResolutionConflicts(role: string, okf: RoleContextSource): RoleResolutionConflict[] {
+  const conflicts: RoleResolutionConflict[] = [];
+  if (okf.frontmatter?.role && okf.frontmatter.role !== role) {
+    conflicts.push({
+      kind: "okf-role-mismatch",
+      message: `OKF RoleProfile role ${String(okf.frontmatter.role)} does not match requested role ${role}.`,
+    });
+  }
+  const influence = okf.frontmatter?.influence;
+  if (influence && typeof influence === "object" && "enabled" in influence && (influence as { enabled?: unknown }).enabled === true) {
+    conflicts.push({
+      kind: "okf-influence-enabled",
+      message: "OKF RoleProfile attempted to enable runtime influence. v0.2 treats OKF as descriptive only.",
+    });
+  }
+  for (const line of directiveLikeLines(okf.content)) {
+    conflicts.push({
+      kind: "okf-directive-review",
+      message: "OKF RoleProfile contains directive-like text. Treat as contextual augmentation, not as an override.",
+      line,
+    });
+  }
+  return conflicts;
+}
+
+function directiveLikeLines(text: string): string[] {
+  const okfAuthoredPortion = text.split(/^# Baseline role instructions\s*$/m)[0] ?? text;
+  return okfAuthoredPortion
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /\b(must|always|never|only|required|forbidden)\b|必须|不得|不能|只能|永远/i.test(line))
+    .slice(0, 20);
 }
 
 function seedImportedBundle(bundleDir: string, config: CompanyConfig, result: OkfSeedResult): void {
