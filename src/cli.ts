@@ -183,6 +183,7 @@ okfHandoff.command("write")
   .requiredOption("--from <agent>")
   .requiredOption("--to <agent>")
   .option("--actor <agent>", "Actor; defaults to --from")
+  .option("--contract <id>")
   .option("--issue <id>")
   .option("--pr <id>")
   .option("--branch <name>")
@@ -204,6 +205,7 @@ okfHandoff.command("write")
       summary,
       current_owner: opts.currentOwner ?? null,
       next_owner: opts.nextOwner ?? null,
+      contract_id: opts.contract ?? null,
       issue_id: opts.issue ?? null,
       pr_id: opts.pr ?? null,
       branch: opts.branch ?? null,

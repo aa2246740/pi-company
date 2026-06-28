@@ -457,6 +457,15 @@ Rate limit 已过期，可以恢复正常工作`);
 
     const ready = buildDeliveryOkfReport(root, "penalty-v2");
     expect(ready).toMatchObject({ ready: true, warnings: [] });
+
+    writeStructuredHandoff(root, "lead", {
+      handoff_id: "final-penalty-v2",
+      from: "lead",
+      to: "tester",
+      contract_id: "penalty-v2",
+      summary: "Final handoff includes contract linkage.",
+    });
+    expect(buildDeliveryOkfReport(root, "penalty-v2").final_handoffs).toEqual(["final-penalty-v2"]);
   });
 
   it("does not reset an existing company when init is run again", () => {

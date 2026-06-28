@@ -86,6 +86,7 @@ export interface StructuredHandoffInput {
   summary: string;
   current_owner?: string | null;
   next_owner?: string | null;
+  contract_id?: string | null;
   issue_id?: string | null;
   pr_id?: string | null;
   branch?: string | null;
@@ -439,6 +440,7 @@ export function writeStructuredHandoffConcept(root: string, input: StructuredHan
     to: input.to,
     current_owner: input.current_owner ?? input.from,
     next_owner: input.next_owner ?? input.to,
+    contract_id: input.contract_id ?? null,
     issue_id: input.issue_id ?? null,
     pr_id: input.pr_id ?? null,
     branch: input.branch ?? null,
