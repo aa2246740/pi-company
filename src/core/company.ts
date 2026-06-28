@@ -38,11 +38,17 @@ import { makeEvent } from "./events.js";
 import { newId, nowIso, slug } from "./id.js";
 import { withCompanyLock } from "./lock.js";
 import {
+  buildDeliveryOkfProtocolReport,
+  renderDeliveryOkfProtocolReport,
   seedOkfBundles,
+  writeConsumptionManifestConcept,
   writeEvaluationFindingConcept,
+  writeRoleBundleConcept,
   writeSprintContractConcept,
   writeStructuredHandoffConcept,
+  type ConsumptionManifestInput,
   type EvaluationFindingInput,
+  type RoleBundleInput,
   type SprintContractInput,
   type StructuredHandoffInput,
 } from "./okf.js";
@@ -198,6 +204,31 @@ export function writeStructuredHandoff(root: string, actor: string, input: Struc
   return writeStructuredHandoffConcept(root, input, options);
 }
 
+export function writeRoleBundle(root: string, actor: string, input: RoleBundleInput, options: { update?: boolean } = {}) {
+  const state = loadState(root);
+  requireRoleBundleActor(state, actor, input.kind);
+  if (input.contract_id) {
+    // Contract ids are OKF ids. The OKF path helper validates them when writing.
+  }
+  return writeRoleBundleConcept(root, { ...input, author: actor }, options);
+}
+
+export function recordConsumptionManifest(root: string, actor: string, input: ConsumptionManifestInput, options: { update?: boolean } = {}) {
+  const state = loadState(root);
+  const agent = state.agents[actor];
+  if (!agent) throw new Error(`Unknown consumption manifest actor ${actor}.`);
+  if (agent.role !== "coder") throw new Error(`Only coder agents can record implementation consumption manifests. ${actor} has role ${agent.role}.`);
+  return writeConsumptionManifestConcept(root, { ...input, implementation_owner: actor }, options);
+}
+
+export function buildDeliveryOkfReport(root: string, contractId?: string | null, requiredKinds?: string[]) {
+  return buildDeliveryOkfProtocolReport(root, contractId ?? null, requiredKinds);
+}
+
+export function renderDeliveryOkfReport(root: string, contractId?: string | null, requiredKinds?: string[]): string {
+  return renderDeliveryOkfProtocolReport(buildDeliveryOkfReport(root, contractId, requiredKinds));
+}
+
 function requireEvaluationActor(state: CompanyState, actor: string, kind: EvaluationFindingInput["kind"]): void {
   const lead = state.config?.lead ?? "lead";
   if (kind === "system") {
@@ -210,6 +241,20 @@ function requireEvaluationActor(state: CompanyState, actor: string, kind: Evalua
   if (kind === "review" && agent.role !== "reviewer") throw new Error(`Only reviewer agents can submit review findings. ${actor} has role ${agent.role}.`);
   if (kind === "test" && agent.role !== "tester") throw new Error(`Only tester agents can submit test findings. ${actor} has role ${agent.role}.`);
   if (kind === "acceptance" && agent.role !== "pm") throw new Error(`Only ${lead} or pm agents can submit acceptance findings. ${actor} has role ${agent.role}.`);
+}
+
+function requireRoleBundleActor(state: CompanyState, actor: string, kind: RoleBundleInput["kind"]): void {
+  const expectedRole = ({
+    product_quality_bar: "pm",
+    gameplay_design: "designer",
+    visual_art_direction: "designer",
+    research_brief: "researcher",
+  } satisfies Record<RoleBundleInput["kind"], AgentRole>)[kind];
+  const agent = state.agents[actor];
+  if (!agent) throw new Error(`Unknown role bundle actor ${actor}.`);
+  if (agent.role !== expectedRole) {
+    throw new Error(`Only ${expectedRole} agents can write ${kind} role bundles. ${actor} has role ${agent.role}.`);
+  }
 }
 
 function normalizeQualityGates(gates?: Partial<CompanyConfig["quality_gates"]> | null): CompanyConfig["quality_gates"] {

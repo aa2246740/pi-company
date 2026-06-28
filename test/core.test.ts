@@ -17,6 +17,7 @@ import {
   createIssue,
   createPr,
   createSprintContract,
+  buildDeliveryOkfReport,
   ensureCoderWorktree,
   ensurePendingMergeReminder,
   getPrGateStatus,
@@ -38,6 +39,7 @@ import {
   recordAutomatedTests,
   recordHumanSteering,
   reportTask,
+  recordConsumptionManifest,
   requestAgentSpawn,
   requestMerge,
   normalizeMessagePolicy,
@@ -55,6 +57,7 @@ import {
   syncRenderedRecords,
   submitAcceptance,
   submitTest,
+  writeRoleBundle,
   writeStructuredHandoff,
 } from "../src/core/company.js";
 import { DEFAULT_MESSAGE_POLICY, DEFAULT_RATE_LIMIT_POLICY } from "../src/core/defaults.js";
@@ -355,6 +358,105 @@ Rate limit 已过期，可以恢复正常工作`);
 
     expect(handoff.frontmatter.type).toBe("StructuredHandoff");
     expect(readDeliveryOkfConcept(root, "handoff", "review-to-tester")?.body).toContain("Runtime events, git state, and PR gates remain authoritative");
+  });
+
+  it("audits role-specialized OKF bundles and implementation consumption", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "okf-role-specialization-demo" });
+    registerCoder(root);
+    createSprintContract(root, "lead", {
+      contract_id: "penalty-v2",
+      title: "Penalty game v2",
+      owner: "coder",
+      scope: "Build a better penalty game through role-specialized context.",
+      done_criteria: ["quality bar consumed"],
+      status: "active",
+    });
+
+    const missing = buildDeliveryOkfReport(root, "penalty-v2");
+    expect(missing.ready).toBe(false);
+    expect(missing.warnings).toContain("Missing required role bundle: product_quality_bar");
+    expect(missing.warnings).toContain("Missing implementation consumption manifest");
+
+    expect(() => writeRoleBundle(root, "lead", {
+      bundle_id: "lead-should-not-design",
+      kind: "visual_art_direction",
+      contract_id: "penalty-v2",
+      author: "lead",
+      title: "Bad author",
+      summary: "wrong role",
+      guidance: ["wrong"],
+    })).toThrow(/Only designer agents/);
+
+    writeRoleBundle(root, "pm", {
+      bundle_id: "product-quality-v2",
+      kind: "product_quality_bar",
+      contract_id: "penalty-v2",
+      author: "pm",
+      title: "Product quality bar",
+      summary: "Fun, clear, and replayable.",
+      guidance: ["Must feel better than a throwaway canvas demo"],
+      acceptance_criteria: ["Player understands why a shot succeeded or failed"],
+    });
+    writeRoleBundle(root, "designer", {
+      bundle_id: "gameplay-design-v2",
+      kind: "gameplay_design",
+      contract_id: "penalty-v2",
+      author: "designer",
+      title: "Gameplay design",
+      summary: "Add timing, aiming tension, and keeper tells.",
+      guidance: ["Charge/timing should affect shot quality"],
+    });
+    writeRoleBundle(root, "designer", {
+      bundle_id: "visual-art-v2",
+      kind: "visual_art_direction",
+      contract_id: "penalty-v2",
+      author: "designer",
+      title: "Visual art direction",
+      summary: "Premium stadium mood with readable depth.",
+      guidance: ["Use layered stadium, lighting, and motion polish"],
+    });
+
+    const noConsumption = buildDeliveryOkfReport(root, "penalty-v2");
+    expect(noConsumption.warnings).toEqual(["Missing implementation consumption manifest"]);
+
+    recordConsumptionManifest(root, "coder", {
+      manifest_id: "coder-consumption-v2",
+      contract_id: "penalty-v2",
+      implementation_owner: "coder",
+      summary: "Consumed PM and design bundles before implementation.",
+      consumed_bundles: ["product-quality-v2", "gameplay-design-v2", "visual-art-v2"],
+      output_paths: ["index.html", "src/game.ts"],
+    });
+    submitEvaluationFinding(root, "reviewer", {
+      finding_id: "visual-polish-blocker",
+      contract_id: "penalty-v2",
+      kind: "review",
+      evaluator: "reviewer",
+      verdict: "request_changes",
+      severity: "blocking",
+      target: "visual-art-v2",
+      summary: "Visual direction was not implemented.",
+    });
+
+    const blocked = buildDeliveryOkfReport(root, "penalty-v2");
+    expect(blocked.ready).toBe(false);
+    expect(blocked.warnings.some((warning) => warning.includes("Unresolved blocking finding"))).toBe(true);
+
+    submitEvaluationFinding(root, "reviewer", {
+      finding_id: "visual-polish-blocker",
+      contract_id: "penalty-v2",
+      kind: "review",
+      evaluator: "reviewer",
+      verdict: "comment",
+      severity: "blocking",
+      target: "visual-art-v2",
+      status: "resolved",
+      summary: "Visual direction is now implemented.",
+    }, { update: true });
+
+    const ready = buildDeliveryOkfReport(root, "penalty-v2");
+    expect(ready).toMatchObject({ ready: true, warnings: [] });
   });
 
   it("does not reset an existing company when init is run again", () => {

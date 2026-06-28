@@ -39,7 +39,11 @@ export interface RoleContextResolution {
   conflicts: RoleResolutionConflict[];
 }
 
-export type DeliveryOkfKind = "contract" | "evaluation" | "handoff";
+export type DeliveryOkfKind = "contract" | "evaluation" | "handoff" | "role-bundle" | "consumption";
+
+export type RoleBundleKind = "product_quality_bar" | "gameplay_design" | "visual_art_direction" | "research_brief";
+
+export type EvaluationFindingSeverity = "blocking" | "improvement" | "note";
 
 export interface DeliveryOkfWriteOptions {
   update?: boolean;
@@ -66,6 +70,9 @@ export interface EvaluationFindingInput {
   kind: "review" | "test" | "acceptance" | "system";
   evaluator: string;
   verdict: "pass" | "fail" | "blocked" | "comment" | "approve" | "request_changes" | "accept";
+  severity?: EvaluationFindingSeverity;
+  target?: string | null;
+  status?: "active" | "resolved" | "superseded";
   summary: string;
   evidence?: string[];
   blockers?: string[];
@@ -85,6 +92,43 @@ export interface StructuredHandoffInput {
   head?: string | null;
   blockers?: string[];
   next_actions?: string[];
+}
+
+export interface RoleBundleInput {
+  bundle_id: string;
+  kind: RoleBundleKind;
+  contract_id?: string | null;
+  author: string;
+  title: string;
+  summary: string;
+  guidance: string[];
+  acceptance_criteria?: string[];
+  references?: string[];
+}
+
+export interface IgnoredBundleInput {
+  bundle_id: string;
+  reason: string;
+}
+
+export interface ConsumptionManifestInput {
+  manifest_id: string;
+  contract_id?: string | null;
+  implementation_owner: string;
+  summary: string;
+  consumed_bundles: string[];
+  ignored_bundles?: IgnoredBundleInput[];
+  output_paths?: string[];
+}
+
+export interface DeliveryOkfProtocolReport {
+  contract_id: string | null;
+  required_role_bundles: Array<{ kind: string; present: boolean; ids: string[] }>;
+  consumption_manifests: string[];
+  unresolved_blocking_findings: Array<{ id: string | null; file: string; summary: string; target: string | null }>;
+  final_handoffs: string[];
+  warnings: string[];
+  ready: boolean;
 }
 
 const OKF_PROFILE_ID = "works.pi-company.project-company";
@@ -109,6 +153,8 @@ export function seedOkfBundles(root: string, config: CompanyConfig, roster: Reco
     path.join(paths.okfDeliveryDir, "contracts"),
     path.join(paths.okfDeliveryDir, "evaluations"),
     path.join(paths.okfDeliveryDir, "handoffs"),
+    path.join(paths.okfDeliveryDir, "role-bundles"),
+    path.join(paths.okfDeliveryDir, "consumption"),
     path.join(paths.okfDeliveryDir, "traces"),
   ]) {
     ensureDir(dir);
@@ -219,6 +265,8 @@ function seedDeliveryBundle(bundleDir: string, config: CompanyConfig, result: Ok
   seedSubdirIndex(bundleDir, "contracts", "Sprint contracts", "Contracts bridge issues to testable, single-sprint work.", result);
   seedSubdirIndex(bundleDir, "evaluations", "Evaluations", "Tester, reviewer, PM, and system findings can be recorded here as supporting evidence.", result);
   seedSubdirIndex(bundleDir, "handoffs", "Structured handoffs", "Role/session handoffs preserve current facts, blockers, evidence, and next owners.", result);
+  seedSubdirIndex(bundleDir, "role-bundles", "Role-specialized bundles", "PM, design, research, and other specialist role outputs that implementation can selectively consume.", result);
+  seedSubdirIndex(bundleDir, "consumption", "Consumption manifests", "Implementation agents record which role bundles they consumed or deliberately ignored.", result);
   seedSubdirIndex(bundleDir, "traces", "Verification traces", "Commands, browser checks, screenshots, simulator checks, and other verification traces can be summarized here.", result);
 }
 
@@ -362,7 +410,9 @@ export function writeEvaluationFindingConcept(root: string, input: EvaluationFin
     kind: input.kind,
     evaluator: input.evaluator,
     verdict: input.verdict,
-    status: "active",
+    severity: input.severity ?? "note",
+    target: input.target ?? null,
+    status: input.status ?? "active",
   });
   const body = [
     "# Summary",
@@ -408,8 +458,131 @@ export function writeStructuredHandoffConcept(root: string, input: StructuredHan
   return writeDeliveryOkfConcept(root, "handoff", id, frontmatter, body, options);
 }
 
+export function writeRoleBundleConcept(root: string, input: RoleBundleInput, options: DeliveryOkfWriteOptions = {}): OkfConcept {
+  const id = safeOkfId(input.bundle_id, "bundle_id");
+  const frontmatter = deliveryBaseFrontmatter({
+    type: "RoleBundle",
+    title: input.title,
+    bundle_id: id,
+    role_bundle_kind: input.kind,
+    contract_id: input.contract_id ?? null,
+    author: input.author,
+    status: "active",
+  });
+  const body = [
+    "# Summary",
+    input.summary.trim() || "(summary not provided)",
+    "# Specialist guidance",
+    markdownList(input.guidance),
+    "# Acceptance criteria",
+    markdownList(input.acceptance_criteria ?? []),
+    "# References",
+    markdownList(input.references ?? []),
+    "# Runtime authority boundary",
+    "This role bundle is specialist context. Implementation must record whether it consumed or ignored this bundle; runtime events and PR gates remain authoritative.",
+  ].join("\n\n");
+  return writeDeliveryOkfConcept(root, "role-bundle", id, frontmatter, body, options);
+}
+
+export function writeConsumptionManifestConcept(root: string, input: ConsumptionManifestInput, options: DeliveryOkfWriteOptions = {}): OkfConcept {
+  const id = safeOkfId(input.manifest_id, "manifest_id");
+  const consumed = input.consumed_bundles.map((item) => safeOkfId(item, "consumed_bundle_id"));
+  const ignored = (input.ignored_bundles ?? []).map((item) => ({
+    bundle_id: safeOkfId(item.bundle_id, "ignored_bundle_id"),
+    reason: item.reason,
+  }));
+  const frontmatter = deliveryBaseFrontmatter({
+    type: "ImplementationConsumptionManifest",
+    title: `Consumption manifest ${id}`,
+    manifest_id: id,
+    contract_id: input.contract_id ?? null,
+    implementation_owner: input.implementation_owner,
+    consumed_bundles: consumed,
+    ignored_bundles: ignored,
+    output_paths: input.output_paths ?? [],
+    status: "active",
+  });
+  const body = [
+    "# Summary",
+    input.summary.trim() || "(summary not provided)",
+    "# Consumed bundles",
+    markdownList(consumed),
+    "# Ignored bundles",
+    ignored.length > 0 ? ignored.map((item) => `- ${item.bundle_id}: ${item.reason}`).join("\n") : "- none",
+    "# Output paths",
+    markdownList(input.output_paths ?? []),
+    "# Runtime authority boundary",
+    "This manifest makes context consumption auditable. It does not prove implementation quality, test success, or merge readiness.",
+  ].join("\n\n");
+  return writeDeliveryOkfConcept(root, "consumption", id, frontmatter, body, options);
+}
+
 export function readDeliveryOkfConcept(root: string, kind: DeliveryOkfKind, id: string): OkfConcept | null {
   return readOkfConcept(deliveryOkfConceptPath(root, kind, id));
+}
+
+export function listDeliveryOkfConcepts(root: string, kind: DeliveryOkfKind): OkfConcept[] {
+  const paths = companyPaths(root);
+  ensureDir(paths.okfDeliveryDir);
+  const dir = deliveryKindDir(paths.okfDeliveryDir, kind);
+  ensureDir(dir);
+  assertDirectoryInsideDirectory(paths.okfDeliveryDir, dir);
+  return fs.readdirSync(dir)
+    .filter((entry) => entry.endsWith(".md") && entry !== "index.md")
+    .sort()
+    .map((entry) => readOkfConcept(path.join(dir, entry)))
+    .filter((concept): concept is OkfConcept => Boolean(concept));
+}
+
+export function buildDeliveryOkfProtocolReport(
+  root: string,
+  contractId: string | null = null,
+  requiredKinds: string[] = ["product_quality_bar", "gameplay_design", "visual_art_direction"],
+): DeliveryOkfProtocolReport {
+  const contract = contractId ? safeOkfId(contractId, "contract_id") : null;
+  const roleBundles = listDeliveryOkfConcepts(root, "role-bundle").filter((concept) => conceptMatchesContract(concept, contract));
+  const consumptions = listDeliveryOkfConcepts(root, "consumption").filter((concept) => conceptMatchesContract(concept, contract));
+  const evaluations = listDeliveryOkfConcepts(root, "evaluation").filter((concept) => conceptMatchesContract(concept, contract));
+  const handoffs = listDeliveryOkfConcepts(root, "handoff").filter((concept) => conceptMatchesContract(concept, contract));
+  const required = requiredKinds.map((kind) => {
+    const matches = roleBundles.filter((concept) => concept.frontmatter.role_bundle_kind === kind);
+    return {
+      kind,
+      present: matches.length > 0,
+      ids: matches.map((concept) => String(concept.frontmatter.bundle_id ?? path.basename(concept.file, ".md"))),
+    };
+  });
+  const unresolved = evaluations
+    .filter((concept) => concept.frontmatter.severity === "blocking" && concept.frontmatter.status !== "resolved")
+    .map((concept) => ({
+      id: concept.frontmatter.finding_id ? String(concept.frontmatter.finding_id) : null,
+      file: concept.file,
+      summary: firstSectionText(concept.body, "Summary"),
+      target: concept.frontmatter.target ? String(concept.frontmatter.target) : null,
+    }));
+  const warnings = [
+    ...required.filter((item) => !item.present).map((item) => `Missing required role bundle: ${item.kind}`),
+    ...(consumptions.length === 0 ? ["Missing implementation consumption manifest"] : []),
+    ...unresolved.map((item) => `Unresolved blocking finding: ${item.id ?? item.file}${item.target ? ` (${item.target})` : ""}`),
+  ];
+  return {
+    contract_id: contract,
+    required_role_bundles: required,
+    consumption_manifests: consumptions.map((concept) => String(concept.frontmatter.manifest_id ?? path.basename(concept.file, ".md"))),
+    unresolved_blocking_findings: unresolved,
+    final_handoffs: handoffs.map((concept) => String(concept.frontmatter.handoff_id ?? path.basename(concept.file, ".md"))),
+    warnings,
+    ready: warnings.length === 0,
+  };
+}
+
+export function renderDeliveryOkfProtocolReport(report: DeliveryOkfProtocolReport): string {
+  const required = report.required_role_bundles.map((item) => `- ${item.kind}: ${item.present ? `present (${item.ids.join(", ")})` : "missing"}`).join("\n");
+  const blockers = report.unresolved_blocking_findings.length > 0
+    ? report.unresolved_blocking_findings.map((item) => `- ${item.id ?? item.file}${item.target ? ` target=${item.target}` : ""}: ${item.summary}`).join("\n")
+    : "- none";
+  const warnings = report.warnings.length > 0 ? report.warnings.map((item) => `- ${item}`).join("\n") : "- none";
+  return `Delivery OKF protocol report${report.contract_id ? ` for ${report.contract_id}` : ""}\nReady: ${report.ready ? "yes" : "no"}\n\nRequired role bundles:\n${required}\n\nConsumption manifests:\n${markdownList(report.consumption_manifests)}\n\nUnresolved blocking findings:\n${blockers}\n\nFinal handoffs:\n${markdownList(report.final_handoffs)}\n\nWarnings:\n${warnings}\n\nAuthority boundary: this report audits OKF collaboration hygiene only. Runtime events, state, git, and PR gates remain authoritative.`;
 }
 
 export function deliveryOkfConceptPath(root: string, kind: DeliveryOkfKind, id: string): string {
@@ -467,6 +640,8 @@ function deliveryKindDir(deliveryDir: string, kind: DeliveryOkfKind): string {
     contract: "contracts",
     evaluation: "evaluations",
     handoff: "handoffs",
+    "role-bundle": "role-bundles",
+    consumption: "consumption",
   } satisfies Record<DeliveryOkfKind, string>)[kind]);
 }
 
@@ -519,6 +694,17 @@ function deliveryBaseFrontmatter(extra: Record<string, unknown>): Record<string,
     profile_version: OKF_PROFILE_VERSION,
     ...extra,
   };
+}
+
+function conceptMatchesContract(concept: OkfConcept, contractId: string | null): boolean {
+  if (!contractId) return true;
+  return concept.frontmatter.contract_id === contractId;
+}
+
+function firstSectionText(body: string, heading: string): string {
+  const pattern = new RegExp(`^# ${heading}\\s*$([\\s\\S]*?)(?=^# |$)`, "m");
+  const match = body.match(pattern);
+  return (match?.[1] ?? body).trim().split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join(" ").slice(0, 500);
 }
 
 function markdownList(items: string[]): string {

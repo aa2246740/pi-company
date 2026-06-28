@@ -112,14 +112,42 @@ Validation:
 
 Goal: use this branch of pi-company against a fresh project to produce, consume, update, and maintain OKF delivery concepts while building a small browser deliverable.
 
-Validation target:
+Validation result:
 
-- initialize a fresh `.pi-company` project;
-- create a SprintContract for a World Cup penalty shootout 3D web mini-game;
-- build the game as ordinary project files;
-- record EvaluationFinding and StructuredHandoff OKF concepts from the observed build/test path;
-- run browser smoke validation and capture screenshot evidence;
-- inspect whether OKF helped context without becoming runtime authority.
+- initialized a fresh `.pi-company` project;
+- created a SprintContract for a World Cup penalty shootout 3D web mini-game;
+- built the game as ordinary project files;
+- recorded EvaluationFinding and StructuredHandoff OKF concepts from the observed build/test path;
+- ran browser smoke validation and captured screenshot evidence;
+- found that OKF bookkeeping worked, but role specialization was not actually exercised: one executor authored the contract, implementation, validation, and handoff.
+
+## Milestone 5: role-specialization protocol audit
+
+Goal: make it visible when a delivery used OKF as mere bookkeeping instead of clean role-specialized context.
+
+Advisor consensus for this milestone:
+
+- the first penalty demo did not prove pi-company architecture; it proved a missing operating protocol;
+- require pre-implementation specialist bundles before implementation claims quality;
+- require implementation to record which bundles it consumed or ignored;
+- report unresolved blocking OKF findings without turning them into PR gates.
+
+Implementation sketch:
+
+- add RoleBundle concepts for `product_quality_bar`, `gameplay_design`, `visual_art_direction`, and `research_brief`;
+- add ImplementationConsumptionManifest concepts for coder consumption/ignored-bundle audit;
+- add severity/target/status metadata to EvaluationFinding;
+- add `buildDeliveryOkfProtocolReport` / `renderDeliveryOkfProtocolReport`;
+- expose CLI and extension tools for role bundles, consumption manifests, and delivery OKF reports.
+
+Validation:
+
+- role guards enforce PM/designer/researcher/coder authorship;
+- report flags missing role bundles;
+- report flags missing consumption manifests;
+- report flags unresolved blocking findings;
+- resolved blocking findings clear the report;
+- report remains an OKF hygiene audit only and does not replace runtime PR gates.
 
 ## Out of scope for first pass
 

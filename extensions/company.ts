@@ -32,6 +32,7 @@ import {
   normalizeLifecyclePolicy,
   pendingMergeRequests,
   planAgentSpawn,
+  recordConsumptionManifest,
   reportRateLimit,
   recordAgentLaunch,
   recordAgentRuntime,
@@ -42,6 +43,7 @@ import {
   requestAgentSpawn,
   requestMerge,
   rateLimitIsActive,
+  renderDeliveryOkfReport,
   renderLeadBrief,
   sendCompanyMessage,
   shouldAutoDeliverMessage,
@@ -51,6 +53,7 @@ import {
   submitEvaluationFinding,
   submitReview,
   submitTest,
+  writeRoleBundle,
   writeStructuredHandoff,
 } from "../src/core/company.js";
 import { readDeliveryOkfConcept } from "../src/core/okf.js";
@@ -121,6 +124,8 @@ const okfDeliveryKindSchema = Type.Union([
   Type.Literal("contract"),
   Type.Literal("evaluation"),
   Type.Literal("handoff"),
+  Type.Literal("role-bundle"),
+  Type.Literal("consumption"),
 ]);
 
 const sprintContractStatusSchema = Type.Union([
@@ -146,6 +151,25 @@ const evaluationFindingVerdictSchema = Type.Union([
   Type.Literal("approve"),
   Type.Literal("request_changes"),
   Type.Literal("accept"),
+]);
+
+const evaluationFindingSeveritySchema = Type.Union([
+  Type.Literal("blocking"),
+  Type.Literal("improvement"),
+  Type.Literal("note"),
+]);
+
+const evaluationFindingStatusSchema = Type.Union([
+  Type.Literal("active"),
+  Type.Literal("resolved"),
+  Type.Literal("superseded"),
+]);
+
+const roleBundleKindSchema = Type.Union([
+  Type.Literal("product_quality_bar"),
+  Type.Literal("gameplay_design"),
+  Type.Literal("visual_art_direction"),
+  Type.Literal("research_brief"),
 ]);
 
 const rateLimitKindSchema = Type.Union([
@@ -1435,6 +1459,9 @@ function registerTools(pi: ExtensionAPI, runtime: {
       verdict: evaluationFindingVerdictSchema,
       summary: Type.String(),
       contract_id: Type.Optional(Type.String()),
+      target: Type.Optional(Type.String()),
+      severity: Type.Optional(evaluationFindingSeveritySchema),
+      status: Type.Optional(evaluationFindingStatusSchema),
       pr_id: Type.Optional(Type.String()),
       pr_head: Type.Optional(Type.String()),
       evidence: Type.Optional(Type.Array(Type.String())),
@@ -1451,6 +1478,9 @@ function registerTools(pi: ExtensionAPI, runtime: {
         kind: params.kind,
         evaluator: agentName,
         verdict: params.verdict,
+        severity: params.severity ?? "note",
+        target: params.target ?? null,
+        status: params.status ?? "active",
         summary: params.summary,
         evidence: params.evidence ?? [],
         blockers: params.blockers ?? [],
@@ -1524,6 +1554,101 @@ function registerTools(pi: ExtensionAPI, runtime: {
       await refreshUi(ctx);
       if (!concept) return toolResult(`No OKF ${params.kind} found for ${params.id}`, { concept: null });
       return toolResult(`${concept.frontmatter.type ?? params.kind} ${params.id}: ${concept.file}\n\n${concept.body.trim()}`, { concept });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_write_role_bundle",
+    label: "Write Role Bundle",
+    description: "Write a role-specialized OKF bundle such as product quality bar, gameplay design, visual art direction, or research brief.",
+    promptSnippet: "Before implementation, specialist roles should write concise role bundles that coders can selectively consume.",
+    promptGuidelines: [
+      "Use this as specialist context only. Runtime events, issue assignment, and PR gates remain authoritative.",
+      "PM owns product_quality_bar; designer owns gameplay_design and visual_art_direction; researcher owns research_brief.",
+      "Make guidance concrete enough that the coder can cite it in a consumption manifest.",
+    ],
+    parameters: Type.Object({
+      bundle_id: Type.String(),
+      kind: roleBundleKindSchema,
+      title: Type.String(),
+      summary: Type.String(),
+      contract_id: Type.Optional(Type.String()),
+      guidance: Type.Optional(Type.Array(Type.String())),
+      acceptance_criteria: Type.Optional(Type.Array(Type.String())),
+      references: Type.Optional(Type.Array(Type.String())),
+      update: Type.Optional(Type.Boolean({ description: "Replace an existing concept deliberately." })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const concept = writeRoleBundle(root, agentName, {
+        bundle_id: params.bundle_id,
+        kind: params.kind,
+        contract_id: params.contract_id ?? null,
+        author: agentName,
+        title: params.title,
+        summary: params.summary,
+        guidance: params.guidance ?? [],
+        acceptance_criteria: params.acceptance_criteria ?? [],
+        references: params.references ?? [],
+      }, { update: params.update === true });
+      await refreshUi(ctx);
+      return toolResult(`Wrote RoleBundle ${params.bundle_id}: ${concept.file}`, { concept });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_record_consumption_manifest",
+    label: "Record Consumption Manifest",
+    description: "Coder-only helper to record which role bundles implementation consumed or ignored.",
+    promptSnippet: "After reading role bundles and before/following implementation, record exactly which specialist context influenced the code.",
+    promptGuidelines: [
+      "This makes clean context consumption auditable; it does not prove quality or satisfy gates.",
+      "List every role bundle you used in consumed_bundles. If you ignore a bundle, provide a reason.",
+      "Point output_paths at the files changed by the implementation.",
+    ],
+    parameters: Type.Object({
+      manifest_id: Type.String(),
+      summary: Type.String(),
+      contract_id: Type.Optional(Type.String()),
+      consumed_bundles: Type.Optional(Type.Array(Type.String())),
+      ignored_bundles: Type.Optional(Type.Array(Type.Object({
+        bundle_id: Type.String(),
+        reason: Type.String(),
+      }))),
+      output_paths: Type.Optional(Type.Array(Type.String())),
+      update: Type.Optional(Type.Boolean({ description: "Replace an existing concept deliberately." })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const concept = recordConsumptionManifest(root, agentName, {
+        manifest_id: params.manifest_id,
+        contract_id: params.contract_id ?? null,
+        implementation_owner: agentName,
+        summary: params.summary,
+        consumed_bundles: params.consumed_bundles ?? [],
+        ignored_bundles: params.ignored_bundles ?? [],
+        output_paths: params.output_paths ?? [],
+      }, { update: params.update === true });
+      await refreshUi(ctx);
+      return toolResult(`Wrote ImplementationConsumptionManifest ${params.manifest_id}: ${concept.file}`, { concept });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_delivery_okf_report",
+    label: "Delivery OKF Report",
+    description: "Read a collaboration-hygiene report for role bundles, consumption manifests, and unresolved blocking OKF findings.",
+    promptSnippet: "Before implementation handoff or final claims, check whether specialist role bundles were produced and consumed.",
+    promptGuidelines: [
+      "This report is an OKF collaboration audit only; it is not a merge gate and does not replace company_lead_brief.",
+      "Treat missing role bundles, missing consumption manifests, and unresolved blocking findings as process warnings to resolve or explicitly explain.",
+    ],
+    parameters: Type.Object({
+      contract_id: Type.Optional(Type.String()),
+      required_role_bundle_kinds: Type.Optional(Type.Array(Type.String())),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const text = renderDeliveryOkfReport(root, params.contract_id ?? null, params.required_role_bundle_kinds ?? undefined);
+      await refreshUi(ctx);
+      return toolResult(text, { report: text });
     },
   });
 

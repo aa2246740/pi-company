@@ -35,8 +35,10 @@ import {
   requestAgentSpawn,
   requestMerge,
   rateLimitIsActive,
+  recordConsumptionManifest,
   reportRateLimit,
   sendCompanyMessage,
+  renderDeliveryOkfReport,
   renderLeadBrief,
   startTask,
   syncRenderedRecords,
@@ -44,10 +46,11 @@ import {
   submitEvaluationFinding,
   submitReview,
   submitTest,
+  writeRoleBundle,
   writeStructuredHandoff,
   listInbox,
 } from "./core/company.js";
-import { readDeliveryOkfConcept, type DeliveryOkfKind } from "./core/okf.js";
+import { readDeliveryOkfConcept, type DeliveryOkfKind, type RoleBundleKind } from "./core/okf.js";
 import { parseCmuxSurfaceRef } from "./core/cmux.js";
 import type { IssueWorkType } from "./core/types.js";
 import { companyPaths } from "./core/paths.js";
@@ -140,6 +143,9 @@ okfFinding.command("record")
   .requiredOption("--verdict <verdict>", "pass | fail | blocked | comment | approve | request_changes | accept")
   .option("--actor <agent>", "Actor/evaluator", "lead")
   .option("--contract <id>")
+  .option("--target <target>", "Bundle, file, behavior, or requirement this finding targets")
+  .option("--severity <severity>", "blocking | improvement | note", "note")
+  .option("--status <status>", "active | resolved | superseded", "active")
   .option("--pr <id>")
   .option("--pr-head <commit>")
   .option("--summary <text>")
@@ -159,6 +165,9 @@ okfFinding.command("record")
       kind: validateFindingKind(opts.kind),
       evaluator: opts.actor,
       verdict: validateFindingVerdict(opts.verdict),
+      severity: validateFindingSeverity(opts.severity),
+      target: opts.target ?? null,
+      status: validateFindingStatus(opts.status),
       summary,
       evidence: opts.evidence ?? [],
       blockers: opts.blocker ?? [],
@@ -205,8 +214,74 @@ okfHandoff.command("write")
     console.log(`Wrote StructuredHandoff ${handoffId}: ${concept.file}`);
   });
 
+const okfRoleBundle = okf.command("role-bundle").description("Manage role-specialized OKF bundles");
+
+okfRoleBundle.command("write")
+  .argument("<bundle-id>")
+  .requiredOption("--kind <kind>", "product_quality_bar | gameplay_design | visual_art_direction | research_brief")
+  .requiredOption("--actor <agent>")
+  .requiredOption("--title <title>")
+  .option("--contract <id>")
+  .option("--summary <text>")
+  .option("--summary-file <path>")
+  .option("--summary-stdin")
+  .option("--guidance <text>", "Specialist guidance; repeat for multiple entries", collectOption, [])
+  .option("--criterion <text>", "Acceptance criterion; repeat for multiple entries", collectOption, [])
+  .option("--reference <text>", "Reference; repeat for multiple entries", collectOption, [])
+  .option("--update", "Replace an existing concept deliberately")
+  .action((bundleId, opts) => {
+    const summary = readTextOption(opts.summary, opts.summaryFile, opts.summaryStdin === true, "summary", true) ?? "";
+    const concept = writeRoleBundle(rootOpt(), opts.actor, {
+      bundle_id: bundleId,
+      kind: validateRoleBundleKind(opts.kind),
+      contract_id: opts.contract ?? null,
+      author: opts.actor,
+      title: opts.title,
+      summary,
+      guidance: opts.guidance ?? [],
+      acceptance_criteria: opts.criterion ?? [],
+      references: opts.reference ?? [],
+    }, { update: opts.update === true });
+    console.log(`Wrote RoleBundle ${bundleId}: ${concept.file}`);
+  });
+
+const okfConsumption = okf.command("consumption").description("Manage implementation consumption manifests");
+
+okfConsumption.command("record")
+  .argument("<manifest-id>")
+  .requiredOption("--actor <agent>")
+  .option("--contract <id>")
+  .option("--summary <text>")
+  .option("--summary-file <path>")
+  .option("--summary-stdin")
+  .option("--consumed <bundle-id>", "Consumed role bundle id; repeat for multiple entries", collectOption, [])
+  .option("--ignored <bundle-id:reason>", "Ignored role bundle and reason; repeat for multiple entries", collectOption, [])
+  .option("--output <path>", "Implementation output path; repeat for multiple entries", collectOption, [])
+  .option("--update", "Replace an existing concept deliberately")
+  .action((manifestId, opts) => {
+    const summary = readTextOption(opts.summary, opts.summaryFile, opts.summaryStdin === true, "summary", true) ?? "";
+    const concept = recordConsumptionManifest(rootOpt(), opts.actor, {
+      manifest_id: manifestId,
+      contract_id: opts.contract ?? null,
+      implementation_owner: opts.actor,
+      summary,
+      consumed_bundles: opts.consumed ?? [],
+      ignored_bundles: parseIgnoredBundles(opts.ignored ?? []),
+      output_paths: opts.output ?? [],
+    }, { update: opts.update === true });
+    console.log(`Wrote ImplementationConsumptionManifest ${manifestId}: ${concept.file}`);
+  });
+
+okf.command("report")
+  .option("--contract <id>")
+  .option("--required <kind>", "Required role bundle kind; repeat for multiple entries", collectOption, [])
+  .action((opts) => {
+    const required = opts.required?.length ? opts.required : undefined;
+    console.log(renderDeliveryOkfReport(rootOpt(), opts.contract ?? null, required));
+  });
+
 okf.command("read")
-  .argument("<kind>", "contract | evaluation | handoff")
+  .argument("<kind>", "contract | evaluation | handoff | role-bundle | consumption")
   .argument("<id>")
   .action((kind, id) => {
     const concept = readDeliveryOkfConcept(rootOpt(), validateDeliveryOkfKind(kind), id);
@@ -742,8 +817,23 @@ function gateEvidenceOptions(opts: { clean?: boolean; caveat?: string[] }): { cl
 
 function validateDeliveryOkfKind(value: unknown): DeliveryOkfKind {
   const text = String(value);
-  if (["contract", "evaluation", "handoff"].includes(text)) return text as DeliveryOkfKind;
-  throw new Error(`Invalid OKF kind ${text}. Expected contract, evaluation, or handoff.`);
+  if (["contract", "evaluation", "handoff", "role-bundle", "consumption"].includes(text)) return text as DeliveryOkfKind;
+  throw new Error(`Invalid OKF kind ${text}. Expected contract, evaluation, handoff, role-bundle, or consumption.`);
+}
+
+function validateRoleBundleKind(value: unknown): RoleBundleKind {
+  const text = String(value);
+  if (["product_quality_bar", "gameplay_design", "visual_art_direction", "research_brief"].includes(text)) return text as RoleBundleKind;
+  throw new Error(`Invalid role bundle kind ${text}.`);
+}
+
+function parseIgnoredBundles(values: string[]): Array<{ bundle_id: string; reason: string }> {
+  return values.map((value) => {
+    const [bundleId, ...reasonParts] = value.split(":");
+    const reason = reasonParts.join(":").trim();
+    if (!bundleId || !reason) throw new Error(`Invalid --ignored value ${value}. Expected <bundle-id:reason>.`);
+    return { bundle_id: bundleId.trim(), reason };
+  });
 }
 
 function validateOkfStatus(value: unknown): "draft" | "active" | "fulfilled" | "superseded" | "abandoned" {
@@ -766,6 +856,18 @@ function validateFindingVerdict(value: unknown): "pass" | "fail" | "blocked" | "
     return text as "pass" | "fail" | "blocked" | "comment" | "approve" | "request_changes" | "accept";
   }
   throw new Error(`Invalid finding verdict ${text}.`);
+}
+
+function validateFindingSeverity(value: unknown): "blocking" | "improvement" | "note" {
+  const text = String(value);
+  if (["blocking", "improvement", "note"].includes(text)) return text as "blocking" | "improvement" | "note";
+  throw new Error(`Invalid finding severity ${text}.`);
+}
+
+function validateFindingStatus(value: unknown): "active" | "resolved" | "superseded" {
+  const text = String(value);
+  if (["active", "resolved", "superseded"].includes(text)) return text as "active" | "resolved" | "superseded";
+  throw new Error(`Invalid finding status ${text}.`);
 }
 
 function printStatus(root: string, state: ReturnType<typeof loadState>): void {

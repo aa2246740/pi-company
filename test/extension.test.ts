@@ -154,6 +154,9 @@ describe("pi-company extension", () => {
     expect(tools.some((tool) => tool.name === "company_record_evaluation_finding")).toBe(true);
     expect(tools.some((tool) => tool.name === "company_write_structured_handoff")).toBe(true);
     expect(tools.some((tool) => tool.name === "company_read_delivery_okf")).toBe(true);
+    expect(tools.some((tool) => tool.name === "company_write_role_bundle")).toBe(true);
+    expect(tools.some((tool) => tool.name === "company_record_consumption_manifest")).toBe(true);
+    expect(tools.some((tool) => tool.name === "company_delivery_okf_report")).toBe(true);
     expect(tools.some((tool) => tool.name === "company_record_automated_tests")).toBe(true);
     expect(tools.some((tool) => tool.name === "company_record_auto_tests")).toBe(true);
     expect(ui.setWidget).toHaveBeenCalledWith(
@@ -181,7 +184,8 @@ describe("pi-company extension", () => {
     companyExtension(pi);
     const contractTool = tools.find((tool) => tool.name === "company_create_sprint_contract");
     const readTool = tools.find((tool) => tool.name === "company_read_delivery_okf");
-    if (!contractTool || !readTool) throw new Error("OKF tools were not registered");
+    const reportTool = tools.find((tool) => tool.name === "company_delivery_okf_report");
+    if (!contractTool || !readTool || !reportTool) throw new Error("OKF tools were not registered");
 
     const created = await contractTool.execute("tool-1", {
       contract_id: "extension-contract",
@@ -192,8 +196,11 @@ describe("pi-company extension", () => {
     }, undefined, undefined, ctx) as ToolResult;
     const readBack = await readTool.execute("tool-2", { kind: "contract", id: "extension-contract" }, undefined, undefined, ctx) as ToolResult;
 
+    const report = await reportTool.execute("tool-3", { contract_id: "extension-contract" }, undefined, undefined, ctx) as ToolResult;
+
     expect(created.content[0].text).toContain("Wrote SprintContract extension-contract");
     expect(readBack.content[0].text).toContain("Runtime authority boundary");
+    expect(report.content[0].text).toContain("Missing required role bundle: product_quality_bar");
     expect(readDeliveryOkfConcept(root, "contract", "extension-contract")?.frontmatter.type).toBe("SprintContract");
   });
 
