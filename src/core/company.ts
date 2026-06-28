@@ -37,7 +37,15 @@ import { defaultCoderWorktree, defaultConfig, DEFAULT_LIFECYCLE_POLICY, DEFAULT_
 import { makeEvent } from "./events.js";
 import { newId, nowIso, slug } from "./id.js";
 import { withCompanyLock } from "./lock.js";
-import { seedOkfBundles } from "./okf.js";
+import {
+  seedOkfBundles,
+  writeEvaluationFindingConcept,
+  writeSprintContractConcept,
+  writeStructuredHandoffConcept,
+  type EvaluationFindingInput,
+  type SprintContractInput,
+  type StructuredHandoffInput,
+} from "./okf.js";
 import { evaluatePrGates, evidenceHasGateCaveat, reduceEvents } from "./reducer.js";
 import { classifyRateLimitText } from "./rate-limit.js";
 
@@ -157,6 +165,51 @@ export function loadConfig(root = process.cwd()): CompanyConfig | null {
   // normalize against defaults rather than crashing every command on a PR.
   config.quality_gates = normalizeQualityGates(config.quality_gates);
   return config;
+}
+
+export function createSprintContract(root: string, actor: string, input: SprintContractInput, options: { update?: boolean } = {}) {
+  requireLead(root, actor, "create sprint contracts");
+  const state = loadState(root);
+  if (input.issue_id && !state.issues[input.issue_id]) throw new Error(`Unknown sprint contract issue ${input.issue_id}.`);
+  if (input.owner && !state.agents[input.owner]) throw new Error(`Unknown sprint contract owner ${input.owner}.`);
+  return writeSprintContractConcept(root, input, options);
+}
+
+export function submitEvaluationFinding(root: string, actor: string, input: EvaluationFindingInput, options: { update?: boolean } = {}) {
+  const state = loadState(root);
+  requireEvaluationActor(state, actor, input.kind);
+  if (input.contract_id) {
+    // Contract ids are OKF ids, not runtime ids. The path helper validates them
+    // when writing; no runtime state check is needed here.
+  }
+  if (input.pr_id && !state.prs[input.pr_id]) throw new Error(`Unknown evaluation PR ${input.pr_id}.`);
+  return writeEvaluationFindingConcept(root, { ...input, evaluator: actor }, options);
+}
+
+export function writeStructuredHandoff(root: string, actor: string, input: StructuredHandoffInput, options: { update?: boolean } = {}) {
+  const state = loadState(root);
+  const lead = state.config?.lead ?? "lead";
+  if (actor !== lead && actor !== input.from) throw new Error(`Only ${lead} or ${input.from} can write this handoff.`);
+  if (actor !== "system" && !state.agents[actor]) throw new Error(`Unknown handoff actor ${actor}.`);
+  if (input.from !== "system" && !state.agents[input.from]) throw new Error(`Unknown handoff source ${input.from}.`);
+  if (input.to !== "system" && !state.agents[input.to]) throw new Error(`Unknown handoff target ${input.to}.`);
+  if (input.issue_id && !state.issues[input.issue_id]) throw new Error(`Unknown handoff issue ${input.issue_id}.`);
+  if (input.pr_id && !state.prs[input.pr_id]) throw new Error(`Unknown handoff PR ${input.pr_id}.`);
+  return writeStructuredHandoffConcept(root, input, options);
+}
+
+function requireEvaluationActor(state: CompanyState, actor: string, kind: EvaluationFindingInput["kind"]): void {
+  const lead = state.config?.lead ?? "lead";
+  if (kind === "system") {
+    if (actor === "system" || actor === lead) return;
+    throw new Error(`Only system or ${lead} can submit system evaluation findings.`);
+  }
+  if (kind === "acceptance" && actor === lead) return;
+  const agent = state.agents[actor];
+  if (!agent) throw new Error(`Unknown evaluation actor ${actor}.`);
+  if (kind === "review" && agent.role !== "reviewer") throw new Error(`Only reviewer agents can submit review findings. ${actor} has role ${agent.role}.`);
+  if (kind === "test" && agent.role !== "tester") throw new Error(`Only tester agents can submit test findings. ${actor} has role ${agent.role}.`);
+  if (kind === "acceptance" && agent.role !== "pm") throw new Error(`Only ${lead} or pm agents can submit acceptance findings. ${actor} has role ${agent.role}.`);
 }
 
 function normalizeQualityGates(gates?: Partial<CompanyConfig["quality_gates"]> | null): CompanyConfig["quality_gates"] {

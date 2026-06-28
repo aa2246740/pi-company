@@ -16,6 +16,7 @@ import {
   completeTask,
   createIssue,
   createPr,
+  createSprintContract,
   ensureCoderWorktree,
   ensurePendingMergeReminder,
   getPrGateStatus,
@@ -45,6 +46,7 @@ import {
   reportRateLimit,
   resolveGitHead,
   startTask,
+  submitEvaluationFinding,
   submitReview,
   sendCompanyMessage,
   renderLeadBrief,
@@ -53,10 +55,11 @@ import {
   syncRenderedRecords,
   submitAcceptance,
   submitTest,
+  writeStructuredHandoff,
 } from "../src/core/company.js";
 import { DEFAULT_MESSAGE_POLICY, DEFAULT_RATE_LIMIT_POLICY } from "../src/core/defaults.js";
 import { makeEvent } from "../src/core/events.js";
-import { resolveRoleContext, renderRoleResolutionDebug } from "../src/core/okf.js";
+import { deliveryOkfConceptPath, readDeliveryOkfConcept, resolveRoleContext, renderRoleResolutionDebug } from "../src/core/okf.js";
 import { companyPaths } from "../src/core/paths.js";
 import {
   acquireProviderRequestLease,
@@ -233,6 +236,125 @@ Rate limit 已过期，可以恢复正常工作`);
 
     expect(resolution.conflicts.map((conflict) => conflict.kind)).toContain("okf-influence-enabled");
     expect(resolution.conflicts.map((conflict) => conflict.kind)).toContain("okf-directive-review");
+  });
+
+  it("writes and reads SprintContract OKF concepts idempotently with explicit updates", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "okf-contract-demo" });
+    registerCoder(root);
+    const issue = createIssue(root, "lead", "Build penalty shootout", "Create a browser game.", { work_type: "implementation" });
+    const input = {
+      contract_id: "sprint-penalty-demo",
+      issue_id: issue.id,
+      title: "World Cup penalty shootout demo",
+      owner: "coder",
+      scope: "Build a playable 3D-ish penalty shootout web game.",
+      done_criteria: ["User can aim and shoot", "Score and attempts are visible"],
+      non_goals: ["Online multiplayer"],
+      required_evidence: ["Browser smoke test", "Screenshot"],
+      evaluator_roles: ["tester", "reviewer"],
+      status: "active" as const,
+    };
+
+    const concept = createSprintContract(root, "lead", input);
+    const firstText = fs.readFileSync(concept.file, "utf8");
+    const second = createSprintContract(root, "lead", input);
+    const read = readDeliveryOkfConcept(root, "contract", "sprint-penalty-demo");
+
+    expect(second.file).toBe(concept.file);
+    expect(fs.readFileSync(concept.file, "utf8")).toBe(firstText);
+    expect(read?.frontmatter.type).toBe("SprintContract");
+    expect(read?.frontmatter.strategy_mode).toBe("descriptive");
+    expect(read?.body).toContain("Runtime authority boundary");
+    expect(() => createSprintContract(root, "lead", { ...input, title: "Changed title" })).toThrow(/already exists/);
+
+    const updated = createSprintContract(root, "lead", { ...input, title: "Updated penalty shootout demo" }, { update: true });
+    expect(updated.frontmatter.title).toBe("Updated penalty shootout demo");
+  });
+
+  it("guards delivery OKF paths and role-scoped writes", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "okf-path-guard-demo" });
+    registerCoder(root);
+
+    for (const badId of ["../evil", ".hidden", "/tmp/evil", "nested/evil"]) {
+      expect(() => createSprintContract(root, "lead", {
+        contract_id: badId,
+        title: "Bad contract",
+        owner: "coder",
+        scope: "bad",
+        done_criteria: ["bad"],
+      })).toThrow(/Invalid contract_id/);
+    }
+
+    const contractsDir = path.join(companyPaths(root).okfDeliveryDir, "contracts");
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "pi-company-okf-outside-"));
+    tempRoots.add(outside);
+    fs.rmSync(contractsDir, { recursive: true, force: true });
+    fs.symlinkSync(outside, contractsDir, "dir");
+
+    expect(() => deliveryOkfConceptPath(root, "contract", "safe-id")).toThrow(/outside bundle/);
+  });
+
+  it("records delivery OKF findings and handoffs without satisfying runtime PR gates", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "okf-nonauthoritative-demo" });
+    const plan = registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Penalty shootout implementation",
+      issue_id: null,
+      summary: "Adds the browser game.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? path.join(root, ".pi-company/worktrees/coder"),
+      base: "main",
+    });
+
+    markPrReady(root, "coder", pr.id, "npm test passed", "Validate shoot, score, and reset interactions.");
+    recordAutomatedTests(root, "coder", pr.id, "passed", "npm test passed", "npm test");
+    submitTest(root, "tester", pr.id, "pass", "Manual browser smoke passed.");
+    submitAcceptance(root, "pm", pr.id, "accept", "Matches requested penalty game scope.");
+
+    const finding = submitEvaluationFinding(root, "reviewer", {
+      finding_id: "review-okf-only",
+      contract_id: null,
+      pr_id: pr.id,
+      pr_head: pr.head,
+      kind: "review",
+      evaluator: "reviewer",
+      verdict: "approve",
+      summary: "OKF-only review note. This must not count as runtime review approval.",
+      evidence: ["Read the diff"],
+    });
+    const gates = getPrGateStatus(root, pr.id);
+
+    expect(finding.frontmatter.type).toBe("EvaluationFinding");
+    expect(gates.ready).toBe(false);
+    expect(gates.blockers).toContain("Needs 1 reviewer approval(s)");
+    expect(() => submitEvaluationFinding(root, "tester", {
+      finding_id: "wrong-role-review",
+      kind: "review",
+      evaluator: "tester",
+      verdict: "approve",
+      summary: "wrong role",
+    })).toThrow(/Only reviewer agents/);
+    expect(() => writeStructuredHandoff(root, "tester", {
+      handoff_id: "not-from-tester",
+      from: "reviewer",
+      to: "tester",
+      summary: "wrong actor",
+    })).toThrow(/Only lead or reviewer/);
+
+    const handoff = writeStructuredHandoff(root, "lead", {
+      handoff_id: "review-to-tester",
+      from: "reviewer",
+      to: "tester",
+      summary: "Reviewer found no runtime review event yet; tester should not treat OKF as gate truth.",
+      pr_id: pr.id,
+      next_actions: ["Submit runtime review separately if approving merge"],
+    });
+
+    expect(handoff.frontmatter.type).toBe("StructuredHandoff");
+    expect(readDeliveryOkfConcept(root, "handoff", "review-to-tester")?.body).toContain("Runtime events, git state, and PR gates remain authoritative");
   });
 
   it("does not reset an existing company when init is run again", () => {

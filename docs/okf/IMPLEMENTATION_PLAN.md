@@ -71,37 +71,55 @@ Validation:
 - core tests assert directive-like OKF conflicts are tagged;
 - no extension behavior or tool permission changes.
 
-## Milestone 3: sprint contract templates and read path
+## Milestone 3: delivery concept read/write path, still non-authoritative
 
-Goal: delivery bundle can hold sprint contracts, but gates still come from runtime events.
+Goal: delivery bundle can hold SprintContract, EvaluationFinding, and StructuredHandoff concepts with safe read/write helpers, but gates still come from runtime events.
+
+Advisor consensus for this milestone:
+
+- keep the concepts descriptive-only;
+- do not add a second event model yet;
+- keep deterministic, path-safe file names under approved delivery subdirectories;
+- reject path traversal, hidden path segments, and symlink escapes;
+- require explicit update mode for content changes;
+- prove OKF findings do not satisfy PR gates.
 
 Implementation sketch:
 
-- seed contract/evaluation/handoff templates;
-- add read-only status display in lead brief if active contracts exist;
+- add `writeSprintContractConcept`, `writeEvaluationFindingConcept`, `writeStructuredHandoffConcept`, and `readDeliveryOkfConcept`;
+- add company-level role guards:
+  - `createSprintContract`: lead-only;
+  - `submitEvaluationFinding`: reviewer/tester/PM-or-lead/system scoped by finding kind;
+  - `writeStructuredHandoff`: lead or handoff source only;
+- expose CLI commands under `pi-company okf ...`;
+- expose extension tools:
+  - `company_create_sprint_contract`;
+  - `company_record_evaluation_finding`;
+  - `company_write_structured_handoff`;
+  - `company_read_delivery_okf`;
 - no merge/gate decision depends on OKF.
 
 Validation:
 
-- lead brief shows contract references as context only;
-- PR gates unchanged.
-
-## Milestone 4: writer tools, still non-authoritative
-
-Goal: add tools to create contract/evaluation/handoff concepts with role guards.
-
-Implementation sketch:
-
-- `company_create_sprint_contract` lead-only;
-- `company_submit_evaluation` evaluator role scoped;
-- `company_write_handoff` owner scoped;
-- append related events only if needed for audit, not for gate status.
-
-Validation:
-
 - role tests;
-- path traversal tests;
-- idempotency and versioning tests.
+- path traversal and symlink-escape tests;
+- idempotency and explicit-update tests;
+- CLI smoke test;
+- extension tool registration/execution test;
+- PR gates remain blocked when only an OKF EvaluationFinding exists.
+
+## Milestone 4: production-consumption-maintenance smoke project
+
+Goal: use this branch of pi-company against a fresh project to produce, consume, update, and maintain OKF delivery concepts while building a small browser deliverable.
+
+Validation target:
+
+- initialize a fresh `.pi-company` project;
+- create a SprintContract for a World Cup penalty shootout 3D web mini-game;
+- build the game as ordinary project files;
+- record EvaluationFinding and StructuredHandoff OKF concepts from the observed build/test path;
+- run browser smoke validation and capture screenshot evidence;
+- inspect whether OKF helped context without becoming runtime authority.
 
 ## Out of scope for first pass
 

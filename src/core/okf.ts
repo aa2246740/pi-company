@@ -39,6 +39,54 @@ export interface RoleContextResolution {
   conflicts: RoleResolutionConflict[];
 }
 
+export type DeliveryOkfKind = "contract" | "evaluation" | "handoff";
+
+export interface DeliveryOkfWriteOptions {
+  update?: boolean;
+}
+
+export interface SprintContractInput {
+  contract_id: string;
+  issue_id?: string | null;
+  title: string;
+  owner: string;
+  scope: string;
+  done_criteria: string[];
+  non_goals?: string[];
+  required_evidence?: string[];
+  evaluator_roles?: string[];
+  status?: "draft" | "active" | "fulfilled" | "superseded" | "abandoned";
+}
+
+export interface EvaluationFindingInput {
+  finding_id: string;
+  contract_id?: string | null;
+  pr_id?: string | null;
+  pr_head?: string | null;
+  kind: "review" | "test" | "acceptance" | "system";
+  evaluator: string;
+  verdict: "pass" | "fail" | "blocked" | "comment" | "approve" | "request_changes" | "accept";
+  summary: string;
+  evidence?: string[];
+  blockers?: string[];
+  caveats?: string[];
+}
+
+export interface StructuredHandoffInput {
+  handoff_id: string;
+  from: string;
+  to: string;
+  summary: string;
+  current_owner?: string | null;
+  next_owner?: string | null;
+  issue_id?: string | null;
+  pr_id?: string | null;
+  branch?: string | null;
+  head?: string | null;
+  blockers?: string[];
+  next_actions?: string[];
+}
+
 const OKF_PROFILE_ID = "works.pi-company.project-company";
 const OKF_PROFILE_VERSION = "0.1.0";
 const OKF_BUNDLE_VERSION = "0.1.0";
@@ -274,6 +322,208 @@ function directiveLikeLines(text: string): string[] {
     .map((line) => line.trim())
     .filter((line) => /\b(must|always|never|only|required|forbidden)\b|必须|不得|不能|只能|永远/i.test(line))
     .slice(0, 20);
+}
+
+export function writeSprintContractConcept(root: string, input: SprintContractInput, options: DeliveryOkfWriteOptions = {}): OkfConcept {
+  const id = safeOkfId(input.contract_id, "contract_id");
+  const frontmatter = deliveryBaseFrontmatter({
+    type: "SprintContract",
+    title: input.title,
+    contract_id: id,
+    issue_id: input.issue_id ?? null,
+    owner: input.owner,
+    status: input.status ?? "draft",
+    evaluator_roles: input.evaluator_roles ?? [],
+  });
+  const body = [
+    "# Scope",
+    input.scope.trim() || "(scope not provided)",
+    "# Done criteria",
+    markdownList(input.done_criteria),
+    "# Non-goals",
+    markdownList(input.non_goals ?? []),
+    "# Required evidence",
+    markdownList(input.required_evidence ?? []),
+    "# Runtime authority boundary",
+    "This SprintContract is descriptive OKF delivery knowledge. Existing pi-company issue, PR, review, test, acceptance, and merge gates remain authoritative for execution.",
+  ].join("\n\n");
+  return writeDeliveryOkfConcept(root, "contract", id, frontmatter, body, options);
+}
+
+export function writeEvaluationFindingConcept(root: string, input: EvaluationFindingInput, options: DeliveryOkfWriteOptions = {}): OkfConcept {
+  const id = safeOkfId(input.finding_id, "finding_id");
+  const frontmatter = deliveryBaseFrontmatter({
+    type: "EvaluationFinding",
+    title: `${input.kind} finding ${id}`,
+    finding_id: id,
+    contract_id: input.contract_id ?? null,
+    pr_id: input.pr_id ?? null,
+    pr_head: input.pr_head ?? null,
+    kind: input.kind,
+    evaluator: input.evaluator,
+    verdict: input.verdict,
+    status: "active",
+  });
+  const body = [
+    "# Summary",
+    input.summary.trim() || "(summary not provided)",
+    "# Evidence",
+    markdownList(input.evidence ?? []),
+    "# Blockers",
+    markdownList(input.blockers ?? []),
+    "# Caveats",
+    markdownList(input.caveats ?? []),
+    "# Runtime authority boundary",
+    "This finding supports human/agent review, but does not replace review.submitted, test.submitted, acceptance.submitted, pr.automated_tests, or merge gate events.",
+  ].join("\n\n");
+  return writeDeliveryOkfConcept(root, "evaluation", id, frontmatter, body, options);
+}
+
+export function writeStructuredHandoffConcept(root: string, input: StructuredHandoffInput, options: DeliveryOkfWriteOptions = {}): OkfConcept {
+  const id = safeOkfId(input.handoff_id, "handoff_id");
+  const frontmatter = deliveryBaseFrontmatter({
+    type: "StructuredHandoff",
+    title: `Handoff ${id}`,
+    handoff_id: id,
+    from: input.from,
+    to: input.to,
+    current_owner: input.current_owner ?? input.from,
+    next_owner: input.next_owner ?? input.to,
+    issue_id: input.issue_id ?? null,
+    pr_id: input.pr_id ?? null,
+    branch: input.branch ?? null,
+    head: input.head ?? null,
+    status: "active",
+  });
+  const body = [
+    "# Summary",
+    input.summary.trim() || "(summary not provided)",
+    "# Blockers",
+    markdownList(input.blockers ?? []),
+    "# Next actions",
+    markdownList(input.next_actions ?? []),
+    "# Runtime authority boundary",
+    "This handoff transfers context. Runtime events, git state, and PR gates remain authoritative.",
+  ].join("\n\n");
+  return writeDeliveryOkfConcept(root, "handoff", id, frontmatter, body, options);
+}
+
+export function readDeliveryOkfConcept(root: string, kind: DeliveryOkfKind, id: string): OkfConcept | null {
+  return readOkfConcept(deliveryOkfConceptPath(root, kind, id));
+}
+
+export function deliveryOkfConceptPath(root: string, kind: DeliveryOkfKind, id: string): string {
+  const safeId = safeOkfId(id, `${kind}_id`);
+  const paths = companyPaths(root);
+  ensureDir(paths.okfDeliveryDir);
+  const dir = deliveryKindDir(paths.okfDeliveryDir, kind);
+  ensureDir(dir);
+  assertDirectoryInsideDirectory(paths.okfDeliveryDir, dir);
+  const target = path.join(dir, `${safeId}.md`);
+  assertPathInsideDirectory(dir, target);
+  return target;
+}
+
+export function safeOkfId(value: string, label = "id"): string {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed) throw new Error(`${label} is required.`);
+  if (path.isAbsolute(trimmed) || trimmed.includes("/") || trimmed.includes("\\")) {
+    throw new Error(`Invalid ${label} ${trimmed}: path separators are not allowed.`);
+  }
+  if (trimmed === "." || trimmed === ".." || trimmed.startsWith(".") || trimmed.includes("..")) {
+    throw new Error(`Invalid ${label} ${trimmed}: hidden or parent path segments are not allowed.`);
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$/.test(trimmed)) {
+    throw new Error(`Invalid ${label} ${trimmed}: use letters, numbers, dot, underscore, or dash.`);
+  }
+  return trimmed;
+}
+
+function writeDeliveryOkfConcept(
+  root: string,
+  kind: DeliveryOkfKind,
+  id: string,
+  frontmatter: Record<string, unknown>,
+  body: string,
+  options: DeliveryOkfWriteOptions,
+): OkfConcept {
+  const file = deliveryOkfConceptPath(root, kind, id);
+  const existingConcept = fs.existsSync(file) ? readOkfConcept(file) : null;
+  if (existingConcept) {
+    if (deliveryConceptEquivalent(existingConcept, frontmatter, body)) return existingConcept;
+    if (!options.update) throw new Error(`OKF ${kind} ${id} already exists. Pass update=true to replace it deliberately.`);
+    if (existingConcept.frontmatter.created_at) frontmatter.created_at = existingConcept.frontmatter.created_at;
+  } else if (fs.existsSync(file) && !options.update) {
+    throw new Error(`OKF ${kind} ${id} already exists but is not a valid OKF concept. Pass update=true to replace it deliberately.`);
+  }
+  if (options.update) frontmatter.updated_at = nowIso();
+  const text = renderOkfConcept(frontmatter, body);
+  atomicWriteText(file, text);
+  return readOkfConcept(file) ?? { file, frontmatter, body };
+}
+
+function deliveryKindDir(deliveryDir: string, kind: DeliveryOkfKind): string {
+  return path.join(deliveryDir, ({
+    contract: "contracts",
+    evaluation: "evaluations",
+    handoff: "handoffs",
+  } satisfies Record<DeliveryOkfKind, string>)[kind]);
+}
+
+function assertPathInsideDirectory(directory: string, target: string): void {
+  const base = fs.realpathSync.native(directory);
+  const parent = fs.realpathSync.native(path.dirname(target));
+  if (parent !== base) throw new Error(`Refusing to write outside OKF delivery directory: ${target}`);
+}
+
+function assertDirectoryInsideDirectory(directory: string, targetDirectory: string): void {
+  const base = fs.realpathSync.native(directory);
+  const child = fs.realpathSync.native(targetDirectory);
+  const relative = path.relative(base, child);
+  if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(`Refusing to use OKF delivery directory outside bundle: ${targetDirectory}`);
+  }
+}
+
+function renderOkfConcept(frontmatter: Record<string, unknown>, body: string): string {
+  return `---\n${YAML.stringify(frontmatter)}---\n\n${body.trim()}\n`;
+}
+
+function deliveryConceptEquivalent(existing: OkfConcept, frontmatter: Record<string, unknown>, body: string): boolean {
+  return JSON.stringify(stripVolatileFrontmatter(existing.frontmatter)) === JSON.stringify(stripVolatileFrontmatter(frontmatter)) &&
+    existing.body.trim() === body.trim();
+}
+
+function stripVolatileFrontmatter(frontmatter: Record<string, unknown>): Record<string, unknown> {
+  const { timestamp: _timestamp, created_at: _createdAt, updated_at: _updatedAt, ...stable } = frontmatter;
+  return stable;
+}
+
+function deliveryBaseFrontmatter(extra: Record<string, unknown>): Record<string, unknown> {
+  const now = nowIso();
+  return {
+    schema_version: OKF_PROFILE_VERSION,
+    authority: "role-authored",
+    content_origin: "agent-authored",
+    source_refs: [],
+    timestamp: now,
+    created_at: now,
+    updated_at: now,
+    last_verified_at: null,
+    review_due_at: null,
+    expires_at: null,
+    sensitivity: "project-internal",
+    strategy_mode: "descriptive",
+    influence: { enabled: false },
+    profile_id: OKF_PROFILE_ID,
+    profile_version: OKF_PROFILE_VERSION,
+    ...extra,
+  };
+}
+
+function markdownList(items: string[]): string {
+  const cleaned = items.map((item) => String(item).trim()).filter(Boolean);
+  return cleaned.length > 0 ? cleaned.map((item) => `- ${item}`).join("\n") : "- none";
 }
 
 function seedImportedBundle(bundleDir: string, config: CompanyConfig, result: OkfSeedResult): void {

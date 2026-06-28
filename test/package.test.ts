@@ -25,6 +25,40 @@ function runScanner(cwd: string): { status: number | null; stderr: string } {
   return { status: result.status, stderr: result.stderr };
 }
 
+function runCli(root: string, args: string[]): { stdout: string } {
+  const tsx = path.join(process.cwd(), "node_modules", ".bin", "tsx");
+  const cli = path.join(process.cwd(), "src", "cli.ts");
+  const result = spawnSync(tsx, [cli, "--root", root, ...args], { encoding: "utf8" });
+  if (result.status !== 0) throw new Error(result.stderr || result.stdout || `pi-company ${args.join(" ")} failed`);
+  return { stdout: result.stdout };
+}
+
+describe("cli", () => {
+  it("writes and reads delivery OKF concepts", () => {
+    const root = fixtureRoot();
+    runCli(root, ["init", "--id", "cli-okf"]);
+    runCli(root, [
+      "okf",
+      "contract",
+      "create",
+      "cli-contract",
+      "--title",
+      "CLI contract",
+      "--owner",
+      "lead",
+      "--scope",
+      "Build a small browser game.",
+      "--done",
+      "playable",
+    ]);
+    const read = runCli(root, ["okf", "read", "contract", "cli-contract"]);
+
+    expect(fs.existsSync(path.join(root, ".pi-company", "okf", "delivery", "contracts", "cli-contract.md"))).toBe(true);
+    expect(read.stdout).toContain("SprintContract");
+    expect(read.stdout).toContain("Runtime authority boundary");
+  });
+});
+
 describe("package manifest", () => {
   it("points Pi at compiled JavaScript extension files", () => {
     const packageJson = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as {

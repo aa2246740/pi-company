@@ -16,6 +16,7 @@ import {
   completeTask,
   createIssue,
   createPr,
+  createSprintContract,
   ensureCoderWorktree,
   ensurePendingMergeReminder,
   getPrGateStatus,
@@ -47,9 +48,12 @@ import {
   startTask,
   setModelPolicy,
   submitAcceptance,
+  submitEvaluationFinding,
   submitReview,
   submitTest,
+  writeStructuredHandoff,
 } from "../src/core/company.js";
+import { readDeliveryOkfConcept } from "../src/core/okf.js";
 import { parseCmuxSurfaceRef } from "../src/core/cmux.js";
 import {
   acquireProviderRequestLease,
@@ -111,6 +115,37 @@ const automatedTestStatusSchema = Type.Union([
   Type.Literal("passed"),
   Type.Literal("failed"),
   Type.Literal("blocked"),
+]);
+
+const okfDeliveryKindSchema = Type.Union([
+  Type.Literal("contract"),
+  Type.Literal("evaluation"),
+  Type.Literal("handoff"),
+]);
+
+const sprintContractStatusSchema = Type.Union([
+  Type.Literal("draft"),
+  Type.Literal("active"),
+  Type.Literal("fulfilled"),
+  Type.Literal("superseded"),
+  Type.Literal("abandoned"),
+]);
+
+const evaluationFindingKindSchema = Type.Union([
+  Type.Literal("review"),
+  Type.Literal("test"),
+  Type.Literal("acceptance"),
+  Type.Literal("system"),
+]);
+
+const evaluationFindingVerdictSchema = Type.Union([
+  Type.Literal("pass"),
+  Type.Literal("fail"),
+  Type.Literal("blocked"),
+  Type.Literal("comment"),
+  Type.Literal("approve"),
+  Type.Literal("request_changes"),
+  Type.Literal("accept"),
 ]);
 
 const rateLimitKindSchema = Type.Union([
@@ -1340,6 +1375,155 @@ function registerTools(pi: ExtensionAPI, runtime: {
       await refreshUi(ctx);
       const brief = buildLeadBrief(root);
       return toolResult(renderLeadBrief(brief), { brief });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_create_sprint_contract",
+    label: "Create SprintContract",
+    description: "Lead-only helper to write a descriptive OKF SprintContract for delivery memory. It does not create or modify runtime issues or gates.",
+    promptSnippet: "Write an OKF SprintContract after an issue or sprint scope is stable enough to preserve as descriptive delivery memory.",
+    promptGuidelines: [
+      "Use this for OKF context only; runtime issues, events, PRs, tests, and merge gates remain authoritative.",
+      "Do not use a SprintContract as proof that work is complete. Check company_lead_brief and PR gates for runtime truth.",
+      "Use stable, path-safe contract_id values without slashes, hidden segments, or parent traversal.",
+    ],
+    parameters: Type.Object({
+      contract_id: Type.String(),
+      title: Type.String(),
+      owner: Type.String(),
+      scope: Type.String(),
+      issue_id: Type.Optional(Type.String()),
+      done_criteria: Type.Optional(Type.Array(Type.String())),
+      non_goals: Type.Optional(Type.Array(Type.String())),
+      required_evidence: Type.Optional(Type.Array(Type.String())),
+      evaluator_roles: Type.Optional(Type.Array(Type.String())),
+      status: Type.Optional(sprintContractStatusSchema),
+      update: Type.Optional(Type.Boolean({ description: "Replace an existing concept deliberately." })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const concept = createSprintContract(root, agentName, {
+        contract_id: params.contract_id,
+        issue_id: params.issue_id ?? null,
+        title: params.title,
+        owner: params.owner,
+        scope: params.scope,
+        done_criteria: params.done_criteria ?? [],
+        non_goals: params.non_goals ?? [],
+        required_evidence: params.required_evidence ?? [],
+        evaluator_roles: params.evaluator_roles ?? [],
+        status: params.status ?? "draft",
+      }, { update: params.update === true });
+      await refreshUi(ctx);
+      return toolResult(`Wrote SprintContract ${params.contract_id}: ${concept.file}`, { concept });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_record_evaluation_finding",
+    label: "Record EvaluationFinding",
+    description: "Role-scoped helper to write a descriptive OKF EvaluationFinding. It supports review/test/acceptance memory but does not satisfy PR gates.",
+    promptSnippet: "Record a durable OKF finding after submitting or investigating review, test, acceptance, or system evidence.",
+    promptGuidelines: [
+      "Submit runtime review/test/acceptance evidence with the existing company tools first when a PR gate must change.",
+      "Use this OKF finding as supporting memory only; it does not replace review.submitted, test.submitted, acceptance.submitted, automated tests, or merge gates.",
+      "Record concrete evidence and caveats truthfully; never turn caveated evidence into a clean pass.",
+    ],
+    parameters: Type.Object({
+      finding_id: Type.String(),
+      kind: evaluationFindingKindSchema,
+      verdict: evaluationFindingVerdictSchema,
+      summary: Type.String(),
+      contract_id: Type.Optional(Type.String()),
+      pr_id: Type.Optional(Type.String()),
+      pr_head: Type.Optional(Type.String()),
+      evidence: Type.Optional(Type.Array(Type.String())),
+      blockers: Type.Optional(Type.Array(Type.String())),
+      caveats: Type.Optional(Type.Array(Type.String())),
+      update: Type.Optional(Type.Boolean({ description: "Replace an existing concept deliberately." })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const concept = submitEvaluationFinding(root, agentName, {
+        finding_id: params.finding_id,
+        contract_id: params.contract_id ?? null,
+        pr_id: params.pr_id ?? null,
+        pr_head: params.pr_head ?? null,
+        kind: params.kind,
+        evaluator: agentName,
+        verdict: params.verdict,
+        summary: params.summary,
+        evidence: params.evidence ?? [],
+        blockers: params.blockers ?? [],
+        caveats: params.caveats ?? [],
+      }, { update: params.update === true });
+      await refreshUi(ctx);
+      return toolResult(`Wrote EvaluationFinding ${params.finding_id}: ${concept.file}`, { concept });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_write_structured_handoff",
+    label: "Write StructuredHandoff",
+    description: "Write a descriptive OKF StructuredHandoff for durable role/session context transfer. It does not change task ownership or PR gates.",
+    promptSnippet: "Write an OKF handoff when another role/session needs durable context, blockers, and next actions.",
+    promptGuidelines: [
+      "Use this for context transfer only. Runtime events, issue assignment, git state, and PR gates remain authoritative.",
+      "If ownership must change, also use company_assign_issue or the appropriate runtime tool; the handoff itself does not reassign work.",
+      "Include blockers and next actions with enough evidence for the next owner to resume without stale chat memory.",
+    ],
+    parameters: Type.Object({
+      handoff_id: Type.String(),
+      from: Type.String(),
+      to: Type.String(),
+      summary: Type.String(),
+      current_owner: Type.Optional(Type.String()),
+      next_owner: Type.Optional(Type.String()),
+      issue_id: Type.Optional(Type.String()),
+      pr_id: Type.Optional(Type.String()),
+      branch: Type.Optional(Type.String()),
+      head: Type.Optional(Type.String()),
+      blockers: Type.Optional(Type.Array(Type.String())),
+      next_actions: Type.Optional(Type.Array(Type.String())),
+      update: Type.Optional(Type.Boolean({ description: "Replace an existing concept deliberately." })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const concept = writeStructuredHandoff(root, agentName, {
+        handoff_id: params.handoff_id,
+        from: params.from,
+        to: params.to,
+        summary: params.summary,
+        current_owner: params.current_owner ?? null,
+        next_owner: params.next_owner ?? null,
+        issue_id: params.issue_id ?? null,
+        pr_id: params.pr_id ?? null,
+        branch: params.branch ?? null,
+        head: params.head ?? null,
+        blockers: params.blockers ?? [],
+        next_actions: params.next_actions ?? [],
+      }, { update: params.update === true });
+      await refreshUi(ctx);
+      return toolResult(`Wrote StructuredHandoff ${params.handoff_id}: ${concept.file}`, { concept });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_read_delivery_okf",
+    label: "Read Delivery OKF",
+    description: "Read a descriptive OKF delivery concept by kind and id.",
+    promptSnippet: "Read OKF delivery memory for context, then verify runtime truth through company_lead_brief or PR gates before making execution claims.",
+    promptGuidelines: [
+      "Treat returned OKF as descriptive context only, not as permission, assignment, gate evidence, or completion truth.",
+      "Use company_lead_brief and PR gate tools for authoritative runtime state.",
+    ],
+    parameters: Type.Object({
+      kind: okfDeliveryKindSchema,
+      id: Type.String(),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const concept = readDeliveryOkfConcept(root, params.kind, params.id);
+      await refreshUi(ctx);
+      if (!concept) return toolResult(`No OKF ${params.kind} found for ${params.id}`, { concept: null });
+      return toolResult(`${concept.frontmatter.type ?? params.kind} ${params.id}: ${concept.file}\n\n${concept.body.trim()}`, { concept });
     },
   });
 

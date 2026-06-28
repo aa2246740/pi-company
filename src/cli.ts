@@ -15,6 +15,7 @@ import {
   completeTask,
   createIssue,
   createPr,
+  createSprintContract,
   ensureCoderWorktree,
   getPrGateStatus,
   inferIssueWorkType,
@@ -40,10 +41,13 @@ import {
   startTask,
   syncRenderedRecords,
   submitAcceptance,
+  submitEvaluationFinding,
   submitReview,
   submitTest,
+  writeStructuredHandoff,
   listInbox,
 } from "./core/company.js";
+import { readDeliveryOkfConcept, type DeliveryOkfKind } from "./core/okf.js";
 import { parseCmuxSurfaceRef } from "./core/cmux.js";
 import type { IssueWorkType } from "./core/types.js";
 import { companyPaths } from "./core/paths.js";
@@ -90,6 +94,124 @@ program.command("brief")
   .description("Show lead's authoritative global delivery brief")
   .action(() => {
     console.log(renderLeadBrief(buildLeadBrief(rootOpt())));
+  });
+
+const okf = program.command("okf").description("Manage descriptive OKF delivery concepts");
+const okfContract = okf.command("contract").description("Manage SprintContract OKF concepts");
+
+okfContract.command("create")
+  .argument("<contract-id>")
+  .requiredOption("--title <title>")
+  .requiredOption("--owner <agent>")
+  .option("--actor <agent>", "Actor; defaults to lead", "lead")
+  .option("--issue <id>")
+  .option("--scope <text>")
+  .option("--scope-file <path>")
+  .option("--scope-stdin")
+  .option("--done <text>", "Done criterion; repeat for multiple criteria", collectOption, [])
+  .option("--non-goal <text>", "Non-goal; repeat for multiple entries", collectOption, [])
+  .option("--evidence <text>", "Required evidence; repeat for multiple entries", collectOption, [])
+  .option("--evaluator-role <role>", "Evaluator role; repeat for multiple entries", collectOption, [])
+  .option("--status <status>", "draft | active | fulfilled | superseded | abandoned", "draft")
+  .option("--update", "Replace an existing concept deliberately")
+  .action((contractId, opts) => {
+    const status = validateOkfStatus(opts.status);
+    const scope = readTextOption(opts.scope, opts.scopeFile, opts.scopeStdin === true, "scope", true) ?? "";
+    const concept = createSprintContract(rootOpt(), opts.actor, {
+      contract_id: contractId,
+      issue_id: opts.issue ?? null,
+      title: opts.title,
+      owner: opts.owner,
+      scope,
+      done_criteria: opts.done,
+      non_goals: opts.nonGoal ?? [],
+      required_evidence: opts.evidence ?? [],
+      evaluator_roles: opts.evaluatorRole ?? [],
+      status,
+    }, { update: opts.update === true });
+    console.log(`Wrote SprintContract ${contractId}: ${concept.file}`);
+  });
+
+const okfFinding = okf.command("finding").description("Manage EvaluationFinding OKF concepts");
+
+okfFinding.command("record")
+  .argument("<finding-id>")
+  .requiredOption("--kind <kind>", "review | test | acceptance | system")
+  .requiredOption("--verdict <verdict>", "pass | fail | blocked | comment | approve | request_changes | accept")
+  .option("--actor <agent>", "Actor/evaluator", "lead")
+  .option("--contract <id>")
+  .option("--pr <id>")
+  .option("--pr-head <commit>")
+  .option("--summary <text>")
+  .option("--summary-file <path>")
+  .option("--summary-stdin")
+  .option("--evidence <text>", "Evidence item; repeat for multiple entries", collectOption, [])
+  .option("--blocker <text>", "Blocker; repeat for multiple entries", collectOption, [])
+  .option("--caveat <text>", "Caveat; repeat for multiple entries", collectOption, [])
+  .option("--update", "Replace an existing concept deliberately")
+  .action((findingId, opts) => {
+    const summary = readTextOption(opts.summary, opts.summaryFile, opts.summaryStdin === true, "summary", true) ?? "";
+    const concept = submitEvaluationFinding(rootOpt(), opts.actor, {
+      finding_id: findingId,
+      contract_id: opts.contract ?? null,
+      pr_id: opts.pr ?? null,
+      pr_head: opts.prHead ?? null,
+      kind: validateFindingKind(opts.kind),
+      evaluator: opts.actor,
+      verdict: validateFindingVerdict(opts.verdict),
+      summary,
+      evidence: opts.evidence ?? [],
+      blockers: opts.blocker ?? [],
+      caveats: opts.caveat ?? [],
+    }, { update: opts.update === true });
+    console.log(`Wrote EvaluationFinding ${findingId}: ${concept.file}`);
+  });
+
+const okfHandoff = okf.command("handoff").description("Manage StructuredHandoff OKF concepts");
+
+okfHandoff.command("write")
+  .argument("<handoff-id>")
+  .requiredOption("--from <agent>")
+  .requiredOption("--to <agent>")
+  .option("--actor <agent>", "Actor; defaults to --from")
+  .option("--issue <id>")
+  .option("--pr <id>")
+  .option("--branch <name>")
+  .option("--head <commit>")
+  .option("--current-owner <agent>")
+  .option("--next-owner <agent>")
+  .option("--summary <text>")
+  .option("--summary-file <path>")
+  .option("--summary-stdin")
+  .option("--blocker <text>", "Blocker; repeat for multiple entries", collectOption, [])
+  .option("--next-action <text>", "Next action; repeat for multiple entries", collectOption, [])
+  .option("--update", "Replace an existing concept deliberately")
+  .action((handoffId, opts) => {
+    const summary = readTextOption(opts.summary, opts.summaryFile, opts.summaryStdin === true, "summary", true) ?? "";
+    const concept = writeStructuredHandoff(rootOpt(), opts.actor ?? opts.from, {
+      handoff_id: handoffId,
+      from: opts.from,
+      to: opts.to,
+      summary,
+      current_owner: opts.currentOwner ?? null,
+      next_owner: opts.nextOwner ?? null,
+      issue_id: opts.issue ?? null,
+      pr_id: opts.pr ?? null,
+      branch: opts.branch ?? null,
+      head: opts.head ?? null,
+      blockers: opts.blocker ?? [],
+      next_actions: opts.nextAction ?? [],
+    }, { update: opts.update === true });
+    console.log(`Wrote StructuredHandoff ${handoffId}: ${concept.file}`);
+  });
+
+okf.command("read")
+  .argument("<kind>", "contract | evaluation | handoff")
+  .argument("<id>")
+  .action((kind, id) => {
+    const concept = readDeliveryOkfConcept(rootOpt(), validateDeliveryOkfKind(kind), id);
+    if (!concept) throw new Error(`Unknown OKF ${kind} ${id}`);
+    console.log(JSON.stringify(concept, null, 2));
   });
 
 program.command("reduce")
@@ -616,6 +738,34 @@ function gateEvidenceOptions(opts: { clean?: boolean; caveat?: string[] }): { cl
     clean: opts.clean === true ? true : undefined,
     caveats: opts.caveat ?? [],
   };
+}
+
+function validateDeliveryOkfKind(value: unknown): DeliveryOkfKind {
+  const text = String(value);
+  if (["contract", "evaluation", "handoff"].includes(text)) return text as DeliveryOkfKind;
+  throw new Error(`Invalid OKF kind ${text}. Expected contract, evaluation, or handoff.`);
+}
+
+function validateOkfStatus(value: unknown): "draft" | "active" | "fulfilled" | "superseded" | "abandoned" {
+  const text = String(value);
+  if (["draft", "active", "fulfilled", "superseded", "abandoned"].includes(text)) {
+    return text as "draft" | "active" | "fulfilled" | "superseded" | "abandoned";
+  }
+  throw new Error(`Invalid SprintContract status ${text}.`);
+}
+
+function validateFindingKind(value: unknown): "review" | "test" | "acceptance" | "system" {
+  const text = String(value);
+  if (["review", "test", "acceptance", "system"].includes(text)) return text as "review" | "test" | "acceptance" | "system";
+  throw new Error(`Invalid finding kind ${text}.`);
+}
+
+function validateFindingVerdict(value: unknown): "pass" | "fail" | "blocked" | "comment" | "approve" | "request_changes" | "accept" {
+  const text = String(value);
+  if (["pass", "fail", "blocked", "comment", "approve", "request_changes", "accept"].includes(text)) {
+    return text as "pass" | "fail" | "blocked" | "comment" | "approve" | "request_changes" | "accept";
+  }
+  throw new Error(`Invalid finding verdict ${text}.`);
 }
 
 function printStatus(root: string, state: ReturnType<typeof loadState>): void {
