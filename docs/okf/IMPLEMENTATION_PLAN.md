@@ -149,6 +149,36 @@ Validation:
 - resolved blocking findings clear the report;
 - report remains an OKF hygiene audit only and does not replace runtime PR gates.
 
+## Milestone 6: OKF update/freshness maintenance
+
+Goal: prove OKF is not write-once bookkeeping. If a specialist bundle changes or a blocking finding is resolved without evidence, the delivery report should make the lifecycle stale/unsafe until the implementation re-consumes and records resolution evidence.
+
+Advisor consensus for this milestone:
+
+- do not add runtime enforcement or a second event stream;
+- add freshness and resolution checks to the OKF report;
+- prefer stable content hashes over timestamp-only freshness;
+- make stale OKF visible without overriding runtime PR gates.
+
+Implementation sketch:
+
+- when writing an ImplementationConsumptionManifest, snapshot each consumed RoleBundle with bundle id, file path, schema/version, stable content hash, bundle updated time, and consumed time;
+- report a stale manifest when a consumed role bundle's current stable hash differs from the snapshot;
+- report missing consumed bundle snapshots and consumed bundles that disappeared;
+- report required role bundles that exist but were not consumed;
+- report resolved blocking EvaluationFindings that lack `resolved_by` or `resolution_evidence`;
+- report missing/stale StructuredHandoff when the final handoff is absent or older than the latest contract/bundle/manifest/finding.
+
+Validation:
+
+- fresh manifest passes after final handoff;
+- changed RoleBundle marks existing manifest stale;
+- updated manifest clears stale warning;
+- blocking finding fails report;
+- resolved blocking finding without evidence still fails report;
+- evidence-backed resolution clears finding warning;
+- report remains separate from runtime PR gates.
+
 ## Out of scope for first pass
 
 - full OKF import/export CLI;

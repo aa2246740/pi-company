@@ -418,7 +418,9 @@ Rate limit 已过期，可以恢复正常工作`);
     });
 
     const noConsumption = buildDeliveryOkfReport(root, "penalty-v2");
-    expect(noConsumption.warnings).toEqual(["Missing implementation consumption manifest"]);
+    expect(noConsumption.warnings).toContain("Missing implementation consumption manifest");
+    expect(noConsumption.warnings).toContain("Required role bundle not consumed: product_quality_bar (product-quality-v2)");
+    expect(noConsumption.warnings).toContain("Missing structured handoff for current OKF lifecycle");
 
     recordConsumptionManifest(root, "coder", {
       manifest_id: "coder-consumption-v2",
@@ -455,8 +457,46 @@ Rate limit 已过期，可以恢复正常工作`);
       summary: "Visual direction is now implemented.",
     }, { update: true });
 
-    const ready = buildDeliveryOkfReport(root, "penalty-v2");
-    expect(ready).toMatchObject({ ready: true, warnings: [] });
+    const weakResolution = buildDeliveryOkfReport(root, "penalty-v2");
+    expect(weakResolution.warnings).toContain("Resolved blocking finding lacks resolution evidence: visual-polish-blocker");
+
+    submitEvaluationFinding(root, "reviewer", {
+      finding_id: "visual-polish-blocker",
+      contract_id: "penalty-v2",
+      kind: "review",
+      evaluator: "reviewer",
+      verdict: "comment",
+      severity: "blocking",
+      target: "visual-art-v2",
+      status: "resolved",
+      resolved_by: "coder",
+      resolution_evidence: ["Updated floodlight scene and net texture"],
+      summary: "Visual direction is now implemented.",
+    }, { update: true });
+
+    expect(buildDeliveryOkfReport(root, "penalty-v2").warnings).toEqual(["Missing structured handoff for current OKF lifecycle"]);
+
+    writeRoleBundle(root, "designer", {
+      bundle_id: "visual-art-v2",
+      kind: "visual_art_direction",
+      contract_id: "penalty-v2",
+      author: "designer",
+      title: "Visual art direction",
+      summary: "Premium stadium mood with readable depth and stronger bug-fix guidance.",
+      guidance: ["Use layered stadium, lighting, motion polish, and high-contrast keeper tells"],
+    }, { update: true });
+
+    const stale = buildDeliveryOkfReport(root, "penalty-v2");
+    expect(stale.warnings).toContain("Consumed role bundle is stale: visual-art-v2 (coder-consumption-v2)");
+
+    recordConsumptionManifest(root, "coder", {
+      manifest_id: "coder-consumption-v2",
+      contract_id: "penalty-v2",
+      implementation_owner: "coder",
+      summary: "Re-consumed updated visual art bundle after bug-fix guidance changed.",
+      consumed_bundles: ["product-quality-v2", "gameplay-design-v2", "visual-art-v2"],
+      output_paths: ["index.html", "src/game.ts"],
+    }, { update: true });
 
     writeStructuredHandoff(root, "lead", {
       handoff_id: "final-penalty-v2",
@@ -465,7 +505,8 @@ Rate limit 已过期，可以恢复正常工作`);
       contract_id: "penalty-v2",
       summary: "Final handoff includes contract linkage.",
     });
-    expect(buildDeliveryOkfReport(root, "penalty-v2").final_handoffs).toEqual(["final-penalty-v2"]);
+    const ready = buildDeliveryOkfReport(root, "penalty-v2");
+    expect(ready).toMatchObject({ ready: true, warnings: [], final_handoffs: ["final-penalty-v2"] });
   });
 
   it("does not reset an existing company when init is run again", () => {

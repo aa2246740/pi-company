@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
@@ -73,6 +74,8 @@ export interface EvaluationFindingInput {
   severity?: EvaluationFindingSeverity;
   target?: string | null;
   status?: "active" | "resolved" | "superseded";
+  resolved_by?: string | null;
+  resolution_evidence?: string[];
   summary: string;
   evidence?: string[];
   blockers?: string[];
@@ -414,6 +417,8 @@ export function writeEvaluationFindingConcept(root: string, input: EvaluationFin
     severity: input.severity ?? "note",
     target: input.target ?? null,
     status: input.status ?? "active",
+    resolved_by: input.resolved_by ?? null,
+    resolution_evidence: input.resolution_evidence ?? [],
   });
   const body = [
     "# Summary",
@@ -424,6 +429,8 @@ export function writeEvaluationFindingConcept(root: string, input: EvaluationFin
     markdownList(input.blockers ?? []),
     "# Caveats",
     markdownList(input.caveats ?? []),
+    "# Resolution evidence",
+    markdownList(input.resolution_evidence ?? []),
     "# Runtime authority boundary",
     "This finding supports human/agent review, but does not replace review.submitted, test.submitted, acceptance.submitted, pr.automated_tests, or merge gate events.",
   ].join("\n\n");
@@ -493,6 +500,8 @@ export function writeConsumptionManifestConcept(root: string, input: Consumption
     bundle_id: safeOkfId(item.bundle_id, "ignored_bundle_id"),
     reason: item.reason,
   }));
+  const consumedAt = nowIso();
+  const snapshots = consumed.map((bundleId) => roleBundleSnapshot(root, bundleId, consumedAt));
   const frontmatter = deliveryBaseFrontmatter({
     type: "ImplementationConsumptionManifest",
     title: `Consumption manifest ${id}`,
@@ -500,6 +509,7 @@ export function writeConsumptionManifestConcept(root: string, input: Consumption
     contract_id: input.contract_id ?? null,
     implementation_owner: input.implementation_owner,
     consumed_bundles: consumed,
+    consumed_bundle_snapshots: snapshots,
     ignored_bundles: ignored,
     output_paths: input.output_paths ?? [],
     status: "active",
@@ -542,10 +552,13 @@ export function buildDeliveryOkfProtocolReport(
   requiredKinds: string[] = ["product_quality_bar", "gameplay_design", "visual_art_direction"],
 ): DeliveryOkfProtocolReport {
   const contract = contractId ? safeOkfId(contractId, "contract_id") : null;
+  const contracts = contract ? [readDeliveryOkfConcept(root, "contract", contract)].filter((concept): concept is OkfConcept => Boolean(concept)) : [];
   const roleBundles = listDeliveryOkfConcepts(root, "role-bundle").filter((concept) => conceptMatchesContract(concept, contract));
   const consumptions = listDeliveryOkfConcepts(root, "consumption").filter((concept) => conceptMatchesContract(concept, contract));
   const evaluations = listDeliveryOkfConcepts(root, "evaluation").filter((concept) => conceptMatchesContract(concept, contract));
   const handoffs = listDeliveryOkfConcepts(root, "handoff").filter((concept) => conceptMatchesContract(concept, contract));
+  const roleBundlesById = new Map(roleBundles.map((concept) => [String(concept.frontmatter.bundle_id ?? path.basename(concept.file, ".md")), concept]));
+  const consumedIds = new Set(consumptions.flatMap((concept) => stringArrayFrontmatter(concept.frontmatter.consumed_bundles)));
   const required = requiredKinds.map((kind) => {
     const matches = roleBundles.filter((concept) => concept.frontmatter.role_bundle_kind === kind);
     return {
@@ -562,10 +575,29 @@ export function buildDeliveryOkfProtocolReport(
       summary: firstSectionText(concept.body, "Summary"),
       target: concept.frontmatter.target ? String(concept.frontmatter.target) : null,
     }));
+  const resolvedBlockingWithoutEvidence = evaluations
+    .filter((concept) => concept.frontmatter.severity === "blocking" && concept.frontmatter.status === "resolved")
+    .filter((concept) => !concept.frontmatter.resolved_by || stringArrayFrontmatter(concept.frontmatter.resolution_evidence).length === 0)
+    .map((concept) => String(concept.frontmatter.finding_id ?? path.basename(concept.file, ".md")));
+  const staleWarnings = consumptionFreshnessWarnings(consumptions, roleBundlesById);
+  const requiredConsumptionWarnings = required.flatMap((item) => item.ids
+    .filter((id) => !consumedIds.has(id))
+    .map((id) => `Required role bundle not consumed: ${item.kind} (${id})`));
+  const latestLifecycleAt = latestConceptTimestamp([...contracts, ...roleBundles, ...consumptions, ...evaluations]);
+  const latestHandoffAt = latestConceptTimestamp(handoffs);
+  const handoffWarnings = handoffs.length === 0
+    ? ["Missing structured handoff for current OKF lifecycle"]
+    : latestLifecycleAt && latestHandoffAt && latestHandoffAt < latestLifecycleAt
+      ? ["Structured handoff is stale relative to latest contract, bundle, manifest, or finding"]
+      : [];
   const warnings = [
     ...required.filter((item) => !item.present).map((item) => `Missing required role bundle: ${item.kind}`),
     ...(consumptions.length === 0 ? ["Missing implementation consumption manifest"] : []),
+    ...requiredConsumptionWarnings,
+    ...staleWarnings,
     ...unresolved.map((item) => `Unresolved blocking finding: ${item.id ?? item.file}${item.target ? ` (${item.target})` : ""}`),
+    ...resolvedBlockingWithoutEvidence.map((id) => `Resolved blocking finding lacks resolution evidence: ${id}`),
+    ...handoffWarnings,
   ];
   return {
     contract_id: contract,
@@ -672,8 +704,18 @@ function deliveryConceptEquivalent(existing: OkfConcept, frontmatter: Record<str
 }
 
 function stripVolatileFrontmatter(frontmatter: Record<string, unknown>): Record<string, unknown> {
-  const { timestamp: _timestamp, created_at: _createdAt, updated_at: _updatedAt, ...stable } = frontmatter;
-  return stable;
+  return stripVolatileValue(frontmatter) as Record<string, unknown>;
+}
+
+function stripVolatileValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripVolatileValue);
+  if (!value || typeof value !== "object") return value;
+  const result: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (["timestamp", "created_at", "updated_at", "consumed_at", "bundle_updated_at"].includes(key)) continue;
+    result[key] = stripVolatileValue(child);
+  }
+  return result;
 }
 
 function deliveryBaseFrontmatter(extra: Record<string, unknown>): Record<string, unknown> {
@@ -698,13 +740,93 @@ function deliveryBaseFrontmatter(extra: Record<string, unknown>): Record<string,
   };
 }
 
+function roleBundleSnapshot(root: string, bundleId: string, consumedAt: string): Record<string, unknown> {
+  const concept = readDeliveryOkfConcept(root, "role-bundle", bundleId);
+  return {
+    bundle_id: bundleId,
+    bundle_path: concept?.file ?? null,
+    bundle_version: concept?.frontmatter.schema_version ?? concept?.frontmatter.profile_version ?? null,
+    bundle_hash: concept ? conceptContentHash(concept) : null,
+    bundle_updated_at: concept ? conceptTimestamp(concept) : null,
+    consumed_at: consumedAt,
+  };
+}
+
 function conceptMatchesContract(concept: OkfConcept, contractId: string | null): boolean {
   if (!contractId) return true;
   return concept.frontmatter.contract_id === contractId;
 }
 
+function consumptionFreshnessWarnings(consumptions: OkfConcept[], roleBundlesById: Map<string, OkfConcept>): string[] {
+  const warnings: string[] = [];
+  for (const manifest of consumptions) {
+    const manifestId = String(manifest.frontmatter.manifest_id ?? path.basename(manifest.file, ".md"));
+    const consumed = stringArrayFrontmatter(manifest.frontmatter.consumed_bundles);
+    const snapshots = Array.isArray(manifest.frontmatter.consumed_bundle_snapshots)
+      ? manifest.frontmatter.consumed_bundle_snapshots as Array<Record<string, unknown>>
+      : [];
+    if (consumed.length > 0 && snapshots.length === 0) {
+      warnings.push(`Consumption manifest lacks bundle snapshots: ${manifestId}`);
+      continue;
+    }
+    const snapshotIds = new Set<string>();
+    for (const snapshot of snapshots) {
+      const bundleId = typeof snapshot.bundle_id === "string" ? snapshot.bundle_id : "";
+      if (!bundleId) {
+        warnings.push(`Consumption manifest has invalid bundle snapshot: ${manifestId}`);
+        continue;
+      }
+      snapshotIds.add(bundleId);
+      const current = roleBundlesById.get(bundleId);
+      if (!current) {
+        warnings.push(`Consumed role bundle is missing: ${bundleId} (${manifestId})`);
+        continue;
+      }
+      const snapshotHash = typeof snapshot.bundle_hash === "string" ? snapshot.bundle_hash : "";
+      if (!snapshotHash) {
+        warnings.push(`Consumed role bundle snapshot lacks hash: ${bundleId} (${manifestId})`);
+        continue;
+      }
+      const currentHash = conceptContentHash(current);
+      if (currentHash !== snapshotHash) {
+        warnings.push(`Consumed role bundle is stale: ${bundleId} (${manifestId})`);
+      }
+    }
+    for (const bundleId of consumed) {
+      if (!snapshotIds.has(bundleId)) warnings.push(`Consumption manifest missing snapshot for bundle: ${bundleId} (${manifestId})`);
+    }
+  }
+  return warnings;
+}
+
+function latestConceptTimestamp(concepts: OkfConcept[]): number | null {
+  const times = concepts
+    .map((concept) => conceptTimestamp(concept))
+    .filter((time): time is number => time !== null);
+  return times.length > 0 ? Math.max(...times) : null;
+}
+
+function conceptTimestamp(concept: OkfConcept): number | null {
+  const value = concept.frontmatter.updated_at ?? concept.frontmatter.timestamp ?? concept.frontmatter.created_at;
+  if (typeof value !== "string") return null;
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? time : null;
+}
+
+function conceptContentHash(concept: OkfConcept): string {
+  const stableFrontmatter = stripVolatileFrontmatter(concept.frontmatter);
+  return createHash("sha256")
+    .update(JSON.stringify({ frontmatter: stableFrontmatter, body: concept.body.trim() }))
+    .digest("hex");
+}
+
+function stringArrayFrontmatter(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
 function firstSectionText(body: string, heading: string): string {
-  const pattern = new RegExp(`^# ${heading}\\s*$([\\s\\S]*?)(?=^# |$)`, "m");
+  const escapedHeading = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`(?:^|\\r?\\n)# ${escapedHeading}\\s*\\r?\\n([\\s\\S]*?)(?=\\r?\\n# |$)`);
   const match = body.match(pattern);
   return (match?.[1] ?? body).trim().split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join(" ").slice(0, 500);
 }

@@ -146,6 +146,8 @@ okfFinding.command("record")
   .option("--target <target>", "Bundle, file, behavior, or requirement this finding targets")
   .option("--severity <severity>", "blocking | improvement | note", "note")
   .option("--status <status>", "active | resolved | superseded", "active")
+  .option("--resolved-by <agent>")
+  .option("--resolution-evidence <text>", "Resolution evidence; repeat for multiple entries", collectOption, [])
   .option("--pr <id>")
   .option("--pr-head <commit>")
   .option("--summary <text>")
@@ -168,6 +170,8 @@ okfFinding.command("record")
       severity: validateFindingSeverity(opts.severity),
       target: opts.target ?? null,
       status: validateFindingStatus(opts.status),
+      resolved_by: opts.resolvedBy ?? null,
+      resolution_evidence: opts.resolutionEvidence ?? [],
       summary,
       evidence: opts.evidence ?? [],
       blockers: opts.blocker ?? [],
