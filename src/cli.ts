@@ -39,6 +39,7 @@ import {
   reportRateLimit,
   sendCompanyMessage,
   renderDeliveryOkfReport,
+  renderRoleOkfWorkingSet,
   renderLeadBrief,
   startTask,
   syncRenderedRecords,
@@ -46,11 +47,12 @@ import {
   submitEvaluationFinding,
   submitReview,
   submitTest,
+  transitionDeliveryOkfLifecycle,
   writeRoleBundle,
   writeStructuredHandoff,
   listInbox,
 } from "./core/company.js";
-import { readDeliveryOkfConcept, type DeliveryOkfKind, type RoleBundleKind } from "./core/okf.js";
+import { readDeliveryOkfConcept, type DeliveryOkfKind, type OkfLifecycleStatus, type RoleBundleKind } from "./core/okf.js";
 import { parseCmuxSurfaceRef } from "./core/cmux.js";
 import type { IssueWorkType } from "./core/types.js";
 import { companyPaths } from "./core/paths.js";
@@ -281,9 +283,38 @@ okfConsumption.command("record")
 okf.command("report")
   .option("--contract <id>")
   .option("--required <kind>", "Required role bundle kind; repeat for multiple entries", collectOption, [])
+  .option("--strict", "Exit non-zero when lifecycle warnings are present")
   .action((opts) => {
     const required = opts.required?.length ? opts.required : undefined;
-    console.log(renderDeliveryOkfReport(rootOpt(), opts.contract ?? null, required));
+    const text = renderDeliveryOkfReport(rootOpt(), opts.contract ?? null, required);
+    console.log(text);
+    if (opts.strict === true && text.includes("Ready: no")) process.exitCode = 1;
+  });
+
+okf.command("working-set")
+  .argument("<role>")
+  .option("--contract <id>")
+  .option("--required <kind>", "Required role bundle kind; repeat for multiple entries", collectOption, [])
+  .action((role, opts) => {
+    const required = opts.required?.length ? opts.required : undefined;
+    console.log(renderRoleOkfWorkingSet(rootOpt(), role, opts.contract ?? null, required));
+  });
+
+okf.command("lifecycle")
+  .description("Transition OKF concept lifecycle state")
+  .argument("<kind>", "contract | evaluation | handoff | role-bundle | consumption")
+  .argument("<id>")
+  .requiredOption("--status <status>", "draft | proposed | accepted | active | consumed | resolved | fulfilled | stale | superseded | retired | archived | abandoned")
+  .requiredOption("--reason <text>")
+  .option("--actor <agent>", "Actor; defaults to lead", "lead")
+  .option("--superseded-by <id>")
+  .action((kind, id, opts) => {
+    const concept = transitionDeliveryOkfLifecycle(rootOpt(), opts.actor, validateDeliveryOkfKind(kind), id, {
+      status: validateLifecycleStatus(opts.status),
+      reason: opts.reason,
+      superseded_by: opts.supersededBy ?? null,
+    });
+    console.log(`Transitioned OKF ${kind} ${id} to ${concept.frontmatter.status}: ${concept.file}`);
   });
 
 okf.command("read")
@@ -848,6 +879,14 @@ function validateOkfStatus(value: unknown): "draft" | "active" | "fulfilled" | "
     return text as "draft" | "active" | "fulfilled" | "superseded" | "abandoned";
   }
   throw new Error(`Invalid SprintContract status ${text}.`);
+}
+
+function validateLifecycleStatus(value: unknown): OkfLifecycleStatus {
+  const text = String(value);
+  if (["draft", "proposed", "accepted", "active", "consumed", "resolved", "fulfilled", "stale", "superseded", "retired", "archived", "abandoned"].includes(text)) {
+    return text as OkfLifecycleStatus;
+  }
+  throw new Error(`Invalid OKF lifecycle status ${text}.`);
 }
 
 function validateFindingKind(value: unknown): "review" | "test" | "acceptance" | "system" {

@@ -46,6 +46,7 @@ import {
   rateLimitAppliesToProvider,
   rateLimitIsActive,
   reportRateLimit,
+  renderRoleOkfWorkingSet,
   resolveGitHead,
   startTask,
   submitEvaluationFinding,
@@ -57,6 +58,7 @@ import {
   syncRenderedRecords,
   submitAcceptance,
   submitTest,
+  transitionDeliveryOkfLifecycle,
   writeRoleBundle,
   writeStructuredHandoff,
 } from "../src/core/company.js";
@@ -507,6 +509,67 @@ Rate limit 已过期，可以恢复正常工作`);
     });
     const ready = buildDeliveryOkfReport(root, "penalty-v2");
     expect(ready).toMatchObject({ ready: true, warnings: [], final_handoffs: ["final-penalty-v2"] });
+  });
+
+  it("keeps stale or retired OKF out of the active role working set", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "okf-lifecycle-working-set" });
+    registerCoder(root);
+    createSprintContract(root, "lead", {
+      contract_id: "contract-1",
+      title: "Contract one",
+      owner: "coder",
+      scope: "Implement one scoped behavior.",
+      done_criteria: ["behavior works"],
+      status: "active",
+    });
+    writeRoleBundle(root, "researcher", {
+      bundle_id: "research-1",
+      kind: "research_brief",
+      contract_id: "contract-1",
+      author: "researcher",
+      title: "Research one",
+      summary: "Use the source analyzer seam.",
+      guidance: ["Find source-only attributes, not just runtime attrs"],
+    });
+
+    const active = renderRoleOkfWorkingSet(root, "coder", "contract-1", ["research_brief"]);
+    expect(active).toContain("role-bundle/research-1 [active]");
+    expect(active).toContain("Before implementation, record or update a ConsumptionManifest");
+
+    transitionDeliveryOkfLifecycle(root, "lead", "role-bundle", "research-1", {
+      status: "retired",
+      reason: "sprint finished",
+    });
+    const retired = renderRoleOkfWorkingSet(root, "coder", "contract-1", ["research_brief"]);
+    const report = buildDeliveryOkfReport(root, "contract-1", ["research_brief"]);
+
+    expect(retired).not.toContain("role-bundle/research-1 [active]");
+    expect(retired).toContain("Inactive OKF role-bundle: research-1 (retired)");
+    expect(report.inactive_concepts).toContainEqual({ kind: "role-bundle", id: "research-1", status: "retired" });
+    expect(report.warnings).toContain("Missing required role bundle: research_brief");
+  });
+
+  it("injects a bounded OKF working-set prompt when launching an agent", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "okf-launch-context" });
+    registerCoder(root);
+    createSprintContract(root, "lead", {
+      contract_id: "contract-2",
+      title: "Contract two",
+      owner: "coder",
+      scope: "Use injected context.",
+      done_criteria: ["context visible"],
+      status: "active",
+    });
+
+    const command = launchCommand(root, "coder", path.join(root, "extensions", "company.ts"));
+    const contextPath = path.join(companyPaths(root).runtimeDir, "okf-context", "coder.md");
+
+    expect(command).toContain("--append-system-prompt");
+    expect(command).toContain(contextPath.replace(/'/g, "'\\''"));
+    expect(fs.readFileSync(contextPath, "utf8")).toContain("# OKF working set");
+    expect(fs.readFileSync(contextPath, "utf8")).toContain("contract/contract-2 [active]");
   });
 
   it("does not reset an existing company when init is run again", () => {

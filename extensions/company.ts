@@ -44,6 +44,7 @@ import {
   requestMerge,
   rateLimitIsActive,
   renderDeliveryOkfReport,
+  renderRoleOkfWorkingSet,
   renderLeadBrief,
   sendCompanyMessage,
   shouldAutoDeliverMessage,
@@ -53,6 +54,7 @@ import {
   submitEvaluationFinding,
   submitReview,
   submitTest,
+  transitionDeliveryOkfLifecycle,
   writeRoleBundle,
   writeStructuredHandoff,
 } from "../src/core/company.js";
@@ -165,6 +167,21 @@ const evaluationFindingStatusSchema = Type.Union([
   Type.Literal("superseded"),
 ]);
 
+const okfLifecycleStatusSchema = Type.Union([
+  Type.Literal("draft"),
+  Type.Literal("proposed"),
+  Type.Literal("accepted"),
+  Type.Literal("active"),
+  Type.Literal("consumed"),
+  Type.Literal("resolved"),
+  Type.Literal("fulfilled"),
+  Type.Literal("stale"),
+  Type.Literal("superseded"),
+  Type.Literal("retired"),
+  Type.Literal("archived"),
+  Type.Literal("abandoned"),
+]);
+
 const roleBundleKindSchema = Type.Union([
   Type.Literal("product_quality_bar"),
   Type.Literal("gameplay_design"),
@@ -264,6 +281,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
     registerTools(pi, {
       root,
       agentName,
+      role,
       lead,
       isPaused: () => companyPaused,
       refreshUi,
@@ -1349,11 +1367,12 @@ function readRolePrompt(root: string, role: string): string {
 function registerTools(pi: ExtensionAPI, runtime: {
   root: string;
   agentName: string;
+  role: string;
   lead: string;
   isPaused(): boolean;
   refreshUi(ctx: ExtensionContext): Promise<void>;
 }): void {
-  const { root, agentName, lead, isPaused, refreshUi } = runtime;
+  const { root, agentName, role, lead, isPaused, refreshUi } = runtime;
   const registerCompanyTool: ExtensionAPI["registerTool"] = (tool) => {
     const execute = tool.execute;
     return pi.registerTool({
@@ -1655,6 +1674,56 @@ function registerTools(pi: ExtensionAPI, runtime: {
       const text = renderDeliveryOkfReport(root, params.contract_id ?? null, params.required_role_bundle_kinds ?? undefined);
       await refreshUi(ctx);
       return toolResult(text, { report: text });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_okf_working_set",
+    label: "OKF Working Set",
+    description: "Render the bounded active OKF working set and lifecycle protocol for a role.",
+    promptSnippet: "Use the OKF working set at the start of a role turn to avoid stale or retired context.",
+    promptGuidelines: [
+      "Read active/accepted OKF only; stale, retired, superseded, archived, and abandoned concepts are historical unless lead revives them.",
+      "Coders must record a consumption manifest before relying on role bundles for implementation.",
+      "Evaluators should submit blocking findings for missing behavior instead of relying on coder self-evaluation.",
+    ],
+    parameters: Type.Object({
+      role: Type.Optional(Type.String()),
+      contract_id: Type.Optional(Type.String()),
+      required_role_bundle_kinds: Type.Optional(Type.Array(Type.String())),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const text = renderRoleOkfWorkingSet(root, params.role ?? role, params.contract_id ?? null, params.required_role_bundle_kinds ?? undefined);
+      await refreshUi(ctx);
+      return toolResult(text, { working_set: text });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_transition_okf_lifecycle",
+    label: "Transition OKF Lifecycle",
+    description: "Lead-only tool to mark OKF concepts stale, retired, superseded, archived, active, or accepted.",
+    promptSnippet: "Lead should retire sprint-scoped OKF at handoff and mark stale concepts when source facts or bundles change.",
+    promptGuidelines: [
+      "Only lead should transition lifecycle state; this is maintenance metadata, not runtime truth.",
+      "Use retired/archived for sprint-scoped OKF that must leave the active working set.",
+      "Use stale when a concept is still relevant but must be refreshed before consumption.",
+    ],
+    parameters: Type.Object({
+      kind: okfDeliveryKindSchema,
+      id: Type.String(),
+      status: okfLifecycleStatusSchema,
+      reason: Type.String(),
+      superseded_by: Type.Optional(Type.String()),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const concept = transitionDeliveryOkfLifecycle(root, agentName, params.kind, params.id, {
+        status: params.status,
+        reason: params.reason,
+        superseded_by: params.superseded_by ?? null,
+      });
+      await refreshUi(ctx);
+      return toolResult(`Transitioned OKF ${params.kind} ${params.id} to ${params.status}: ${concept.file}`, { concept });
     },
   });
 

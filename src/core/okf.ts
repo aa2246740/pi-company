@@ -46,6 +46,45 @@ export type RoleBundleKind = "product_quality_bar" | "gameplay_design" | "visual
 
 export type EvaluationFindingSeverity = "blocking" | "improvement" | "note";
 
+export type OkfLifecycleStatus =
+  | "draft"
+  | "proposed"
+  | "accepted"
+  | "active"
+  | "consumed"
+  | "resolved"
+  | "fulfilled"
+  | "stale"
+  | "superseded"
+  | "retired"
+  | "archived"
+  | "abandoned";
+
+export interface DeliveryOkfLifecycleTransitionInput {
+  status: OkfLifecycleStatus;
+  actor: string;
+  reason: string;
+  superseded_by?: string | null;
+}
+
+export interface OkfWorkingSetConcept {
+  kind: DeliveryOkfKind;
+  id: string;
+  status: string;
+  file: string;
+  title: string;
+  summary: string;
+}
+
+export interface OkfWorkingSet {
+  role: string;
+  contract_id: string | null;
+  generated_at: string;
+  concepts: OkfWorkingSetConcept[];
+  warnings: string[];
+  protocol: string[];
+}
+
 export interface DeliveryOkfWriteOptions {
   update?: boolean;
 }
@@ -131,6 +170,7 @@ export interface DeliveryOkfProtocolReport {
   consumption_manifests: string[];
   unresolved_blocking_findings: Array<{ id: string | null; file: string; summary: string; target: string | null }>;
   final_handoffs: string[];
+  inactive_concepts: Array<{ kind: DeliveryOkfKind; id: string; status: string }>;
   warnings: string[];
   ready: boolean;
 }
@@ -138,6 +178,7 @@ export interface DeliveryOkfProtocolReport {
 const OKF_PROFILE_ID = "works.pi-company.project-company";
 const OKF_PROFILE_VERSION = "0.1.0";
 const OKF_BUNDLE_VERSION = "0.1.0";
+const INACTIVE_LIFECYCLE_STATUSES = new Set(["stale", "superseded", "retired", "archived", "abandoned"]);
 
 export function seedOkfBundles(root: string, config: CompanyConfig, roster: Record<string, AgentRecord>): OkfSeedResult {
   const paths = companyPaths(root);
@@ -546,6 +587,51 @@ export function listDeliveryOkfConcepts(root: string, kind: DeliveryOkfKind): Ok
     .filter((concept): concept is OkfConcept => Boolean(concept));
 }
 
+export function transitionDeliveryOkfLifecycleConcept(
+  root: string,
+  kind: DeliveryOkfKind,
+  id: string,
+  input: DeliveryOkfLifecycleTransitionInput,
+): OkfConcept {
+  const safeId = safeOkfId(id, `${kind}_id`);
+  const concept = readDeliveryOkfConcept(root, kind, safeId);
+  if (!concept) throw new Error(`Unknown OKF ${kind} ${safeId}.`);
+  const now = nowIso();
+  const frontmatter: Record<string, unknown> = {
+    ...concept.frontmatter,
+    status: input.status,
+    lifecycle_status: input.status,
+    updated_at: now,
+    lifecycle_events: [
+      ...(Array.isArray(concept.frontmatter.lifecycle_events) ? concept.frontmatter.lifecycle_events : []),
+      {
+        at: now,
+        actor: input.actor,
+        status: input.status,
+        reason: input.reason,
+        superseded_by: input.superseded_by ?? null,
+      },
+    ],
+  };
+  if (["retired", "archived", "superseded"].includes(input.status)) {
+    frontmatter.retired_by = input.actor;
+    frontmatter.retired_at = now;
+    frontmatter.retirement_reason = input.reason;
+  }
+  if (input.superseded_by) frontmatter.superseded_by = safeOkfId(input.superseded_by, "superseded_by");
+  atomicWriteText(concept.file, renderOkfConcept(frontmatter, concept.body));
+  return readOkfConcept(concept.file) ?? { file: concept.file, frontmatter, body: concept.body };
+}
+
+export function conceptLifecycleStatus(concept: OkfConcept): string {
+  const value = concept.frontmatter.lifecycle_status ?? concept.frontmatter.status ?? "active";
+  return typeof value === "string" && value.trim() ? value.trim() : "active";
+}
+
+export function isDeliveryOkfConceptActive(concept: OkfConcept): boolean {
+  return !INACTIVE_LIFECYCLE_STATUSES.has(conceptLifecycleStatus(concept));
+}
+
 export function buildDeliveryOkfProtocolReport(
   root: string,
   contractId: string | null = null,
@@ -553,10 +639,39 @@ export function buildDeliveryOkfProtocolReport(
 ): DeliveryOkfProtocolReport {
   const contract = contractId ? safeOkfId(contractId, "contract_id") : null;
   const contracts = contract ? [readDeliveryOkfConcept(root, "contract", contract)].filter((concept): concept is OkfConcept => Boolean(concept)) : [];
-  const roleBundles = listDeliveryOkfConcepts(root, "role-bundle").filter((concept) => conceptMatchesContract(concept, contract));
-  const consumptions = listDeliveryOkfConcepts(root, "consumption").filter((concept) => conceptMatchesContract(concept, contract));
-  const evaluations = listDeliveryOkfConcepts(root, "evaluation").filter((concept) => conceptMatchesContract(concept, contract));
-  const handoffs = listDeliveryOkfConcepts(root, "handoff").filter((concept) => conceptMatchesContract(concept, contract));
+  const inactiveConcepts: Array<{ kind: DeliveryOkfKind; id: string; status: string }> = [];
+  const inactiveWarnings: string[] = [];
+  for (const concept of contracts) {
+    if (!isDeliveryOkfConceptActive(concept)) {
+      const id = String(concept.frontmatter.contract_id ?? path.basename(concept.file, ".md"));
+      const status = conceptLifecycleStatus(concept);
+      inactiveConcepts.push({ kind: "contract", id, status });
+      inactiveWarnings.push(`OKF contract is not active: ${id} (${status})`);
+    }
+  }
+  const allRoleBundles = listDeliveryOkfConcepts(root, "role-bundle").filter((concept) => conceptMatchesContract(concept, contract));
+  const allConsumptions = listDeliveryOkfConcepts(root, "consumption").filter((concept) => conceptMatchesContract(concept, contract));
+  const allEvaluations = listDeliveryOkfConcepts(root, "evaluation").filter((concept) => conceptMatchesContract(concept, contract));
+  const allHandoffs = listDeliveryOkfConcepts(root, "handoff").filter((concept) => conceptMatchesContract(concept, contract));
+  for (const [kind, concepts] of [
+    ["role-bundle", allRoleBundles],
+    ["consumption", allConsumptions],
+    ["evaluation", allEvaluations],
+    ["handoff", allHandoffs],
+  ] as Array<[DeliveryOkfKind, OkfConcept[]]>) {
+    for (const concept of concepts) {
+      if (!isDeliveryOkfConceptActive(concept)) {
+        const id = conceptDeliveryId(kind, concept);
+        const status = conceptLifecycleStatus(concept);
+        inactiveConcepts.push({ kind, id, status });
+        inactiveWarnings.push(`Inactive OKF ${kind}: ${id} (${status})`);
+      }
+    }
+  }
+  const roleBundles = allRoleBundles.filter(isDeliveryOkfConceptActive);
+  const consumptions = allConsumptions.filter(isDeliveryOkfConceptActive);
+  const evaluations = allEvaluations.filter((concept) => !["retired", "archived", "superseded", "abandoned"].includes(conceptLifecycleStatus(concept)));
+  const handoffs = allHandoffs.filter(isDeliveryOkfConceptActive);
   const roleBundlesById = new Map(roleBundles.map((concept) => [String(concept.frontmatter.bundle_id ?? path.basename(concept.file, ".md")), concept]));
   const consumedIds = new Set(consumptions.flatMap((concept) => stringArrayFrontmatter(concept.frontmatter.consumed_bundles)));
   const required = requiredKinds.map((kind) => {
@@ -591,6 +706,7 @@ export function buildDeliveryOkfProtocolReport(
       ? ["Structured handoff is stale relative to latest contract, bundle, manifest, or finding"]
       : [];
   const warnings = [
+    ...inactiveWarnings,
     ...required.filter((item) => !item.present).map((item) => `Missing required role bundle: ${item.kind}`),
     ...(consumptions.length === 0 ? ["Missing implementation consumption manifest"] : []),
     ...requiredConsumptionWarnings,
@@ -605,6 +721,7 @@ export function buildDeliveryOkfProtocolReport(
     consumption_manifests: consumptions.map((concept) => String(concept.frontmatter.manifest_id ?? path.basename(concept.file, ".md"))),
     unresolved_blocking_findings: unresolved,
     final_handoffs: handoffs.map((concept) => String(concept.frontmatter.handoff_id ?? path.basename(concept.file, ".md"))),
+    inactive_concepts: inactiveConcepts,
     warnings,
     ready: warnings.length === 0,
   };
@@ -615,8 +732,59 @@ export function renderDeliveryOkfProtocolReport(report: DeliveryOkfProtocolRepor
   const blockers = report.unresolved_blocking_findings.length > 0
     ? report.unresolved_blocking_findings.map((item) => `- ${item.id ?? item.file}${item.target ? ` target=${item.target}` : ""}: ${item.summary}`).join("\n")
     : "- none";
+  const inactive = report.inactive_concepts.length > 0
+    ? report.inactive_concepts.map((item) => `- ${item.kind}/${item.id}: ${item.status}`).join("\n")
+    : "- none";
   const warnings = report.warnings.length > 0 ? report.warnings.map((item) => `- ${item}`).join("\n") : "- none";
-  return `Delivery OKF protocol report${report.contract_id ? ` for ${report.contract_id}` : ""}\nReady: ${report.ready ? "yes" : "no"}\n\nRequired role bundles:\n${required}\n\nConsumption manifests:\n${markdownList(report.consumption_manifests)}\n\nUnresolved blocking findings:\n${blockers}\n\nFinal handoffs:\n${markdownList(report.final_handoffs)}\n\nWarnings:\n${warnings}\n\nAuthority boundary: this report audits OKF collaboration hygiene only. Runtime events, state, git, and PR gates remain authoritative.`;
+  return `Delivery OKF protocol report${report.contract_id ? ` for ${report.contract_id}` : ""}\nReady: ${report.ready ? "yes" : "no"}\n\nRequired role bundles:\n${required}\n\nConsumption manifests:\n${markdownList(report.consumption_manifests)}\n\nUnresolved blocking findings:\n${blockers}\n\nFinal handoffs:\n${markdownList(report.final_handoffs)}\n\nInactive / retired OKF:\n${inactive}\n\nWarnings:\n${warnings}\n\nAuthority boundary: this report audits OKF collaboration hygiene only. Runtime events, state, git, and PR gates remain authoritative.`;
+}
+
+export function buildOkfWorkingSet(root: string, role: string, contractId: string | null = null, requiredKinds?: string[]): OkfWorkingSet {
+  const contract = contractId ? safeOkfId(contractId, "contract_id") : null;
+  const concepts: OkfWorkingSetConcept[] = [];
+  for (const kind of ["contract", "role-bundle", "consumption", "evaluation", "handoff"] as DeliveryOkfKind[]) {
+    for (const concept of listDeliveryOkfConcepts(root, kind)) {
+      if (!conceptMatchesContract(concept, contract)) continue;
+      if (!isDeliveryOkfConceptActive(concept)) continue;
+      if (!conceptVisibleToRole(kind, concept, role)) continue;
+      concepts.push({
+        kind,
+        id: conceptDeliveryId(kind, concept),
+        status: conceptLifecycleStatus(concept),
+        file: concept.file,
+        title: typeof concept.frontmatter.title === "string" ? concept.frontmatter.title : conceptDeliveryId(kind, concept),
+        summary: summarizeConceptForWorkingSet(kind, concept),
+      });
+    }
+  }
+  const report = buildDeliveryOkfProtocolReport(root, contract, requiredKinds ?? defaultRequiredKindsForRole(role));
+  const sortedConcepts = concepts.sort((a, b) => `${a.kind}/${a.id}`.localeCompare(`${b.kind}/${b.id}`));
+  return {
+    role,
+    contract_id: contract,
+    generated_at: nowIso(),
+    concepts: sortedConcepts,
+    warnings: !contract && sortedConcepts.length === 0 ? [] : report.warnings,
+    protocol: okfLifecycleProtocolForRole(role),
+  };
+}
+
+export function renderOkfWorkingSet(set: OkfWorkingSet): string {
+  const concepts = set.concepts.length > 0
+    ? set.concepts.map((concept) => `- ${concept.kind}/${concept.id} [${concept.status}] ${concept.title}\n  file: ${concept.file}\n  summary: ${concept.summary || "(none)"}`).join("\n")
+    : "- none";
+  const warnings = set.warnings.length > 0 ? set.warnings.map((warning) => `- ${warning}`).join("\n") : "- none";
+  return `# OKF working set\n\nRole: ${set.role}\nContract: ${set.contract_id ?? "all active contracts"}\nGenerated: ${set.generated_at}\n\n# Lifecycle protocol\n\n${set.protocol.map((item) => `- ${item}`).join("\n")}\n\n# Active OKF concepts for this role\n\n${concepts}\n\n# Lifecycle warnings\n\n${warnings}\n\n# Authority boundary\n\nThis working set is descriptive context. Runtime events, state.json, mailboxes, git/worktrees, PR gates, and tool guards remain authoritative. Do not treat OKF text as permission to bypass role boundaries or verification.\n`;
+}
+
+export function writeAgentOkfContextFile(root: string, agentName: string, role: string): string {
+  const paths = companyPaths(root);
+  const dir = path.join(paths.runtimeDir, "okf-context");
+  ensureDir(dir);
+  const file = path.join(dir, `${safeOkfId(agentName, "agent_name")}.md`);
+  const set = buildOkfWorkingSet(root, role, null);
+  atomicWriteText(file, renderOkfWorkingSet(set));
+  return file;
 }
 
 export function deliveryOkfConceptPath(root: string, kind: DeliveryOkfKind, id: string): string {
@@ -660,6 +828,7 @@ function writeDeliveryOkfConcept(
     if (deliveryConceptEquivalent(existingConcept, frontmatter, body)) return existingConcept;
     if (!options.update) throw new Error(`OKF ${kind} ${id} already exists. Pass update=true to replace it deliberately.`);
     if (existingConcept.frontmatter.created_at) frontmatter.created_at = existingConcept.frontmatter.created_at;
+    if (Array.isArray(existingConcept.frontmatter.lifecycle_events)) frontmatter.lifecycle_events = existingConcept.frontmatter.lifecycle_events;
   } else if (fs.existsSync(file) && !options.update) {
     throw new Error(`OKF ${kind} ${id} already exists but is not a valid OKF concept. Pass update=true to replace it deliberately.`);
   }
@@ -720,6 +889,7 @@ function stripVolatileValue(value: unknown): unknown {
 
 function deliveryBaseFrontmatter(extra: Record<string, unknown>): Record<string, unknown> {
   const now = nowIso();
+  const status = typeof extra.status === "string" ? extra.status : "active";
   return {
     schema_version: OKF_PROFILE_VERSION,
     authority: "role-authored",
@@ -734,6 +904,8 @@ function deliveryBaseFrontmatter(extra: Record<string, unknown>): Record<string,
     sensitivity: "project-internal",
     strategy_mode: "descriptive",
     influence: { enabled: false },
+    lifecycle_status: status,
+    lifecycle_events: [],
     profile_id: OKF_PROFILE_ID,
     profile_version: OKF_PROFILE_VERSION,
     ...extra,
@@ -755,6 +927,87 @@ function roleBundleSnapshot(root: string, bundleId: string, consumedAt: string):
 function conceptMatchesContract(concept: OkfConcept, contractId: string | null): boolean {
   if (!contractId) return true;
   return concept.frontmatter.contract_id === contractId;
+}
+
+function conceptVisibleToRole(kind: DeliveryOkfKind, concept: OkfConcept, role: string): boolean {
+  if (role === "lead") return true;
+  if (kind === "contract") return true;
+  if (kind === "role-bundle") {
+    if (role === "coder" || role === "reviewer" || role === "tester" || role === "pm") return true;
+    return concept.frontmatter.author === role || concept.frontmatter.role_bundle_kind === role;
+  }
+  if (kind === "consumption") return ["lead", "reviewer", "tester", "pm", "coder"].includes(role);
+  if (kind === "evaluation") return ["lead", "reviewer", "tester", "pm", "coder"].includes(role);
+  if (kind === "handoff") return ["lead", "reviewer", "tester", "pm", "coder", "researcher", "designer"].includes(role)
+    || concept.frontmatter.to === role
+    || concept.frontmatter.from === role;
+  return true;
+}
+
+function defaultRequiredKindsForRole(role: string): string[] {
+  if (role === "coder") return ["product_quality_bar", "gameplay_design", "visual_art_direction", "research_brief"];
+  if (role === "reviewer" || role === "tester") return ["product_quality_bar", "research_brief"];
+  return [];
+}
+
+function okfLifecycleProtocolForRole(role: string): string[] {
+  const shared = [
+    "Use active/accepted OKF only; treat stale, retired, superseded, archived, or abandoned OKF as historical reference unless lead explicitly revives it.",
+    "If a consumed bundle changes, re-consume it before using old implementation or verification evidence.",
+    "When handing off or stopping, write a structured handoff if your context contains non-obvious state, blockers, or next actions.",
+  ];
+  const byRole: Record<string, string[]> = {
+    lead: [
+      "Act as lifecycle controller: require a sprint contract before implementation, independent evaluator findings before completion claims, and retirement/promotion at sprint end.",
+      "Do not let a coder self-approve. Route failed or missing evaluator evidence back to the owner.",
+      "Retire sprint-scoped bundles after delivery; promote only durable knowledge into project OKF.",
+    ],
+    pm: [
+      "Produce product-quality RoleBundles or SprintContracts with concrete acceptance criteria; do not implement runnable deliverables.",
+      "As evaluator for acceptance, be adversarial about user value and observed behavior.",
+    ],
+    designer: [
+      "Produce design RoleBundles with buildable guidance and acceptance criteria; do not edit runnable deliverables.",
+    ],
+    researcher: [
+      "Produce research RoleBundles as code maps, hypotheses, risk lists, and hidden-contract guesses; distinguish facts from guesses.",
+      "A research bundle is not done until it names likely seams and at least one verification risk.",
+    ],
+    coder: [
+      "Before implementation, record or update a ConsumptionManifest naming every RoleBundle consumed or deliberately ignored.",
+      "Implement one active SprintContract at a time; do not claim done from self-evaluation.",
+      "Treat blocking EvaluationFindings as work items; resolve with concrete evidence before handoff or PR readiness.",
+    ],
+    reviewer: [
+      "Act as adversarial evaluator for code quality, hidden contracts, maintainability, and regression coverage.",
+      "Submit EvaluationFindings for failures or risks; do not convert caveated evidence into approval.",
+    ],
+    tester: [
+      "Act as adversarial evaluator for behavior. Reproduce the contract with real commands/browser flows where feasible.",
+      "Submit blocking findings for missing behavior, shallow tests, or unverified claims.",
+    ],
+  };
+  return [...(byRole[role] ?? ["Stay inside your role boundary and keep OKF lifecycle state current."]), ...shared];
+}
+
+function summarizeConceptForWorkingSet(kind: DeliveryOkfKind, concept: OkfConcept): string {
+  if (kind === "contract") return firstSectionText(concept.body, "Scope");
+  if (kind === "role-bundle") return firstSectionText(concept.body, "Summary");
+  if (kind === "evaluation") return firstSectionText(concept.body, "Summary");
+  if (kind === "handoff") return firstSectionText(concept.body, "Summary");
+  if (kind === "consumption") return firstSectionText(concept.body, "Summary");
+  return firstSectionText(concept.body, "Summary");
+}
+
+function conceptDeliveryId(kind: DeliveryOkfKind, concept: OkfConcept): string {
+  const key = ({
+    contract: "contract_id",
+    evaluation: "finding_id",
+    handoff: "handoff_id",
+    "role-bundle": "bundle_id",
+    consumption: "manifest_id",
+  } satisfies Record<DeliveryOkfKind, string>)[kind];
+  return String(concept.frontmatter[key] ?? path.basename(concept.file, ".md"));
 }
 
 function consumptionFreshnessWarnings(consumptions: OkfConcept[], roleBundlesById: Map<string, OkfConcept>): string[] {

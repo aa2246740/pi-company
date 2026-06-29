@@ -39,14 +39,20 @@ import { newId, nowIso, slug } from "./id.js";
 import { withCompanyLock } from "./lock.js";
 import {
   buildDeliveryOkfProtocolReport,
+  buildOkfWorkingSet,
   renderDeliveryOkfProtocolReport,
+  renderOkfWorkingSet,
   seedOkfBundles,
+  transitionDeliveryOkfLifecycleConcept,
+  writeAgentOkfContextFile,
   writeConsumptionManifestConcept,
   writeEvaluationFindingConcept,
   writeRoleBundleConcept,
   writeSprintContractConcept,
   writeStructuredHandoffConcept,
   type ConsumptionManifestInput,
+  type DeliveryOkfKind,
+  type DeliveryOkfLifecycleTransitionInput,
   type EvaluationFindingInput,
   type RoleBundleInput,
   type SprintContractInput,
@@ -227,6 +233,15 @@ export function buildDeliveryOkfReport(root: string, contractId?: string | null,
 
 export function renderDeliveryOkfReport(root: string, contractId?: string | null, requiredKinds?: string[]): string {
   return renderDeliveryOkfProtocolReport(buildDeliveryOkfReport(root, contractId, requiredKinds));
+}
+
+export function renderRoleOkfWorkingSet(root: string, role: string, contractId?: string | null, requiredKinds?: string[]): string {
+  return renderOkfWorkingSet(buildOkfWorkingSet(root, role, contractId ?? null, requiredKinds));
+}
+
+export function transitionDeliveryOkfLifecycle(root: string, actor: string, kind: DeliveryOkfKind, id: string, input: Omit<DeliveryOkfLifecycleTransitionInput, "actor">) {
+  requireLead(root, actor, "transition OKF lifecycle state");
+  return transitionDeliveryOkfLifecycleConcept(root, kind, id, { ...input, actor });
 }
 
 function requireEvaluationActor(state: CompanyState, actor: string, kind: EvaluationFindingInput["kind"]): void {
@@ -3153,6 +3168,7 @@ export function launchCommand(root: string, agentName: string, extensionPathOver
   if (!agent) throw new Error(`Unknown agent ${agentName}`);
   const extensionPath = extensionPathOverride ?? path.join(root, "extensions", "company.ts");
   const rolePath = path.join(companyPaths(root).rolesDir, `${agent.role}.md`);
+  const okfContextPath = writeAgentOkfContextFile(root, agent.name, agent.role);
   const cwd = agent.worktree ?? agent.cwd;
   const modelConfig = resolveAgentModelConfig(root, agentName);
   const extensionArgs = shouldLaunchWithExplicitExtension(extensionPath)
@@ -3179,6 +3195,8 @@ export function launchCommand(root: string, agentName: string, extensionPathOver
     shellQuote(state.config?.lead ?? "lead"),
     "--append-system-prompt",
     shellQuote(rolePath),
+    "--append-system-prompt",
+    shellQuote(okfContextPath),
   ].join(" ");
 }
 
