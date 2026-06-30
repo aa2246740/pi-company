@@ -37,6 +37,7 @@ describe("cli", () => {
   it("writes and reads delivery OKF concepts", () => {
     const root = fixtureRoot();
     runCli(root, ["init", "--id", "cli-okf"]);
+    runCli(root, ["spawn", "coder", "--manual", "--no-worktree"]);
     runCli(root, [
       "okf",
       "contract",
@@ -51,11 +52,38 @@ describe("cli", () => {
       "--done",
       "playable",
     ]);
+    runCli(root, [
+      "okf",
+      "role-bundle",
+      "write",
+      "cli-research",
+      "--kind",
+      "research_brief",
+      "--actor",
+      "researcher",
+      "--title",
+      "CLI research",
+      "--contract",
+      "cli-contract",
+      "--summary",
+      "Use targeted public suite maps.",
+      "--guidance",
+      "Query and consume before patching.",
+    ]);
     const read = runCli(root, ["okf", "read", "contract", "cli-contract"]);
+    const list = runCli(root, ["okf", "list", "--contract", "cli-contract"]);
+    const query = runCli(root, ["okf", "query", "consume before patching", "--scope", "delivery", "--contract", "cli-contract"]);
+    const validate = runCli(root, ["okf", "validate", "--contract", "cli-contract"]);
+    const use = runCli(root, ["okf", "use", "coder", "--contract", "cli-contract", "--consume-as", "coder", "--manifest", "cli-use", "--output", "src/fix.ts"]);
 
     expect(fs.existsSync(path.join(root, ".pi-company", "okf", "delivery", "contracts", "cli-contract.md"))).toBe(true);
     expect(read.stdout).toContain("SprintContract");
     expect(read.stdout).toContain("Runtime authority boundary");
+    expect(list.stdout).toContain("role-bundle/cli-research [active]");
+    expect(query.stdout).toContain("Query and consume before patching.");
+    expect(validate.stdout).toContain("OKF validation report");
+    expect(use.stdout).toContain("Recorded ConsumptionManifest");
+    expect(fs.existsSync(path.join(root, ".pi-company", "okf", "delivery", "consumption", "cli-use.md"))).toBe(true);
   });
 });
 

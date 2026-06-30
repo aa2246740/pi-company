@@ -66,7 +66,19 @@ import {
 } from "../src/core/company.js";
 import { DEFAULT_MESSAGE_POLICY, DEFAULT_RATE_LIMIT_POLICY } from "../src/core/defaults.js";
 import { makeEvent } from "../src/core/events.js";
-import { deliveryOkfConceptPath, readDeliveryOkfConcept, resolveRoleContext, renderRoleResolutionDebug } from "../src/core/okf.js";
+import {
+  activeRoleBundleIds,
+  deliveryOkfConceptPath,
+  listDeliveryOkfInventory,
+  queryOkfBundle,
+  readDeliveryOkfConcept,
+  renderDeliveryOkfInventory,
+  renderOkfQueryReport,
+  renderOkfValidationReport,
+  resolveRoleContext,
+  renderRoleResolutionDebug,
+  validateOkfBundle,
+} from "../src/core/okf.js";
 import { companyPaths } from "../src/core/paths.js";
 import {
   acquireProviderRequestLease,
@@ -511,6 +523,53 @@ Rate limit 已过期，可以恢复正常工作`);
     });
     const ready = buildDeliveryOkfReport(root, "penalty-v2");
     expect(ready).toMatchObject({ ready: true, warnings: [], final_handoffs: ["final-penalty-v2"] });
+  });
+
+  it("supports OpenKnowledge-style OKF list query validate and explicit consumption discovery", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "okf-openknowledge-ux" });
+    registerCoder(root);
+    createSprintContract(root, "lead", {
+      contract_id: "contract-ux",
+      title: "UX contract",
+      owner: "coder",
+      scope: "Implement with source-excerpt knowledge discovery.",
+      done_criteria: ["queryable guidance consumed"],
+      status: "active",
+    });
+    writeRoleBundle(root, "researcher", {
+      bundle_id: "research-ux",
+      kind: "research_brief",
+      contract_id: "contract-ux",
+      author: "researcher",
+      title: "Research UX",
+      summary: "Map reset_index public tests before patching.",
+      guidance: ["Run the targeted public suite map before trusting a narrow repro"],
+    });
+
+    const inventory = listDeliveryOkfInventory(root, { contractId: "contract-ux" });
+    expect(inventory.map((entry) => `${entry.kind}/${entry.id}`)).toContain("contract/contract-ux");
+    expect(renderDeliveryOkfInventory(inventory)).toContain("role-bundle/research-ux [active]");
+    expect(activeRoleBundleIds(root, "contract-ux")).toEqual(["research-ux"]);
+
+    const query = queryOkfBundle(root, "targeted public suite map", { scope: "delivery", contractId: "contract-ux" });
+    expect(query.results[0]).toMatchObject({ kind: "role-bundle", id: "research-ux" });
+    expect(renderOkfQueryReport(query)).toContain("Run the targeted public suite map");
+
+    const validation = validateOkfBundle(root, "contract-ux");
+    expect(validation.ok).toBe(true);
+    expect(validation.warnings.map((warning) => warning.message)).toContain("Missing implementation consumption manifest");
+    expect(renderOkfValidationReport(validation)).toContain("OKF validation report");
+
+    recordConsumptionManifest(root, "coder", {
+      manifest_id: "use-contract-ux-coder",
+      contract_id: "contract-ux",
+      implementation_owner: "coder",
+      summary: "Consumed active OKF through the use flow.",
+      consumed_bundles: activeRoleBundleIds(root, "contract-ux"),
+      output_paths: ["src/example.ts"],
+    });
+    expect(buildDeliveryOkfReport(root, "contract-ux", ["research_brief"]).warnings).toEqual(["Missing structured handoff for current OKF lifecycle"]);
   });
 
   it("blocks OKF patch export until evaluator preflight is fresh for the current diff", () => {

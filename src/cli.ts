@@ -55,7 +55,19 @@ import {
   writeStructuredHandoff,
   listInbox,
 } from "./core/company.js";
-import { readDeliveryOkfConcept, type DeliveryOkfKind, type OkfLifecycleStatus, type RoleBundleKind } from "./core/okf.js";
+import {
+  activeRoleBundleIds,
+  listDeliveryOkfInventory,
+  queryOkfBundle,
+  readDeliveryOkfConcept,
+  renderDeliveryOkfInventory,
+  renderOkfQueryReport,
+  renderOkfValidationReport,
+  validateOkfBundle,
+  type DeliveryOkfKind,
+  type OkfLifecycleStatus,
+  type RoleBundleKind,
+} from "./core/okf.js";
 import { parseCmuxSurfaceRef } from "./core/cmux.js";
 import type { IssueWorkType } from "./core/types.js";
 import { companyPaths } from "./core/paths.js";
@@ -349,6 +361,120 @@ okf.command("working-set")
   .action((role, opts) => {
     const required = opts.required?.length ? opts.required : undefined;
     console.log(renderRoleOkfWorkingSet(rootOpt(), role, opts.contract ?? null, required));
+  });
+
+okf.command("list")
+  .description("List delivery OKF concepts with OpenKnowledge-style discovery output")
+  .option("--contract <id>")
+  .option("--kind <kind>", "contract | evaluation | handoff | role-bundle | consumption | preflight")
+  .option("--inactive", "Include stale, superseded, retired, archived, and abandoned concepts")
+  .option("--format <format>", "text | json", "text")
+  .action((opts) => {
+    const entries = listDeliveryOkfInventory(rootOpt(), {
+      contractId: opts.contract ?? null,
+      kind: opts.kind ? validateDeliveryOkfKind(opts.kind) : null,
+      includeInactive: opts.inactive === true,
+    });
+    if (validateOutputFormat(opts.format) === "json") console.log(JSON.stringify(entries, null, 2));
+    else console.log(renderDeliveryOkfInventory(entries));
+  });
+
+okf.command("query")
+  .description("Search OKF Markdown sections with lexical, source-excerpt retrieval")
+  .argument("<text>")
+  .option("--scope <scope>", "all | project | delivery | imported", "all")
+  .option("--contract <id>")
+  .option("--kind <kind>", "Restrict delivery scope to one kind")
+  .option("--inactive", "Include inactive delivery concepts")
+  .option("--budget <tokens>", "Approximate output token budget", parseIntegerOption, 2400)
+  .option("--limit <count>", "Maximum sections", parseIntegerOption, 12)
+  .option("--format <format>", "text | json", "text")
+  .action((text, opts) => {
+    const report = queryOkfBundle(rootOpt(), text, {
+      scope: validateOkfQueryScope(opts.scope),
+      budget: opts.budget,
+      limit: opts.limit,
+      contractId: opts.contract ?? null,
+      kind: opts.kind ? validateDeliveryOkfKind(opts.kind) : null,
+      includeInactive: opts.inactive === true,
+    });
+    if (validateOutputFormat(opts.format) === "json") console.log(JSON.stringify(report, null, 2));
+    else console.log(renderOkfQueryReport(report));
+  });
+
+okf.command("validate")
+  .description("Validate OKF Markdown shape and lifecycle hygiene")
+  .option("--contract <id>", "Also include lifecycle warnings for one contract")
+  .option("--strict", "Exit non-zero on warnings as well as errors")
+  .option("--format <format>", "text | json", "text")
+  .action((opts) => {
+    const report = validateOkfBundle(rootOpt(), opts.contract ?? null);
+    if (validateOutputFormat(opts.format) === "json") console.log(JSON.stringify(report, null, 2));
+    else console.log(renderOkfValidationReport(report));
+    if (!report.ok || (opts.strict === true && report.warnings.length > 0)) process.exitCode = 1;
+  });
+
+okf.command("use")
+  .description("Print a role-scoped OKF working set and optionally record coder consumption evidence")
+  .argument("[role]", "Role to render; defaults to coder", "coder")
+  .option("--contract <id>")
+  .option("--required <kind>", "Required role bundle kind; repeat for multiple entries", collectOption, [])
+  .option("--query <text>", "Also include source excerpts matching this query")
+  .option("--consume-as <agent>", "Coder agent that is consuming active role bundles")
+  .option("--manifest <id>", "ConsumptionManifest id; defaults to use-<contract|all>-<agent>")
+  .option("--consumed <bundle-id>", "Consumed role bundle id; defaults to every active role bundle in scope", collectOption, [])
+  .option("--ignored <bundle-id:reason>", "Ignored role bundle and reason; repeat for multiple entries", collectOption, [])
+  .option("--output <path>", "Implementation output path; repeat for multiple entries", collectOption, [])
+  .option("--summary <text>")
+  .option("--update", "Replace an existing consumption manifest deliberately")
+  .option("--format <format>", "text | json", "text")
+  .action((role, opts) => {
+    const root = rootOpt();
+    const required = opts.required?.length ? opts.required : undefined;
+    const workingSet = renderRoleOkfWorkingSet(root, role, opts.contract ?? null, required);
+    const queryReport = opts.query ? queryOkfBundle(root, opts.query, {
+      scope: "all",
+      contractId: opts.contract ?? null,
+      includeInactive: false,
+    }) : null;
+    let manifest: unknown = null;
+    if (opts.consumeAs) {
+      const consumed = opts.consumed?.length ? opts.consumed : activeRoleBundleIds(root, opts.contract ?? null);
+      const manifestId = opts.manifest ?? `use-${opts.contract ?? "all"}-${opts.consumeAs}`;
+      manifest = recordConsumptionManifest(root, opts.consumeAs, {
+        manifest_id: manifestId,
+        contract_id: opts.contract ?? null,
+        implementation_owner: opts.consumeAs,
+        summary: opts.summary ?? `OKF use by ${opts.consumeAs}: consumed ${consumed.length > 0 ? consumed.join(", ") : "no active role bundles"}.`,
+        consumed_bundles: consumed,
+        ignored_bundles: parseIgnoredBundles(opts.ignored ?? []),
+        output_paths: opts.output ?? [],
+      }, { update: opts.update === true });
+    }
+    if (validateOutputFormat(opts.format) === "json") {
+      console.log(JSON.stringify({ working_set: workingSet, query: queryReport, consumption_manifest: manifest }, null, 2));
+    } else {
+      const parts = [workingSet];
+      if (queryReport) parts.push(renderOkfQueryReport(queryReport));
+      if (manifest && typeof manifest === "object" && "file" in manifest) parts.push(`Recorded ConsumptionManifest: ${(manifest as { file: string }).file}`);
+      console.log(parts.join("\n\n"));
+    }
+  });
+
+okf.command("open")
+  .description("Open or print the local OKF folder path")
+  .option("--scope <scope>", "root | project | delivery | imported", "root")
+  .option("--print", "Only print the path; do not ask the OS to open it")
+  .action((opts) => {
+    const paths = companyPaths(rootOpt());
+    const target = okfOpenTarget(paths, validateOkfOpenScope(opts.scope));
+    if (opts.print === true || process.platform !== "darwin") {
+      console.log(target);
+      return;
+    }
+    const result = spawnSync("open", [target], { encoding: "utf8" });
+    if (result.status !== 0) throw new Error(result.stderr || result.stdout || `open ${target} failed`);
+    console.log(target);
   });
 
 okf.command("lifecycle")
@@ -894,6 +1020,39 @@ function prAuthor(root: string, prId: string): string {
 
 function collectOption(value: string, previous: string[]): string[] {
   return [...previous, value];
+}
+
+function parseIntegerOption(value: string): number {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`Expected a positive integer, got ${value}`);
+  return parsed;
+}
+
+function validateOutputFormat(value: unknown): "text" | "json" {
+  const text = String(value ?? "text");
+  if (["text", "json"].includes(text)) return text as "text" | "json";
+  throw new Error(`Invalid output format ${text}. Expected text or json.`);
+}
+
+function validateOkfQueryScope(value: unknown): "all" | "project" | "delivery" | "imported" {
+  const text = String(value ?? "all");
+  if (["all", "project", "delivery", "imported"].includes(text)) return text as "all" | "project" | "delivery" | "imported";
+  throw new Error(`Invalid OKF query scope ${text}. Expected all, project, delivery, or imported.`);
+}
+
+function validateOkfOpenScope(value: unknown): "root" | "project" | "delivery" | "imported" {
+  const text = String(value ?? "root");
+  if (["root", "project", "delivery", "imported"].includes(text)) return text as "root" | "project" | "delivery" | "imported";
+  throw new Error(`Invalid OKF open scope ${text}. Expected root, project, delivery, or imported.`);
+}
+
+function okfOpenTarget(paths: ReturnType<typeof companyPaths>, scope: "root" | "project" | "delivery" | "imported"): string {
+  return ({
+    root: paths.okfDir,
+    project: paths.okfProjectDir,
+    delivery: paths.okfDeliveryDir,
+    imported: paths.okfImportedDir,
+  } satisfies Record<typeof scope, string>)[scope];
 }
 
 function gateEvidenceOptions(opts: { clean?: boolean; caveat?: string[] }): { clean?: boolean; caveats?: string[] } {

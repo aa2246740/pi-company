@@ -61,7 +61,16 @@ import {
   writeRoleBundle,
   writeStructuredHandoff,
 } from "../src/core/company.js";
-import { readDeliveryOkfConcept } from "../src/core/okf.js";
+import {
+  activeRoleBundleIds,
+  listDeliveryOkfInventory,
+  queryOkfBundle,
+  readDeliveryOkfConcept,
+  renderDeliveryOkfInventory,
+  renderOkfQueryReport,
+  renderOkfValidationReport,
+  validateOkfBundle,
+} from "../src/core/okf.js";
 import { parseCmuxSurfaceRef } from "../src/core/cmux.js";
 import {
   acquireProviderRequestLease,
@@ -1770,6 +1779,131 @@ function registerTools(pi: ExtensionAPI, runtime: {
       const text = renderRoleOkfWorkingSet(root, params.role ?? role, params.contract_id ?? null, params.required_role_bundle_kinds ?? undefined);
       await refreshUi(ctx);
       return toolResult(text, { working_set: text });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_okf_list",
+    label: "OKF List",
+    description: "List delivery OKF concepts with OpenKnowledge-style discovery output.",
+    promptSnippet: "List active OKF delivery concepts before deciding what context to read or consume.",
+    promptGuidelines: [
+      "This is discovery only; runtime state, git, tests, and PR gates remain authoritative.",
+      "Use contract_id to keep the working set bounded during implementation or evaluation.",
+    ],
+    parameters: Type.Object({
+      contract_id: Type.Optional(Type.String()),
+      kind: Type.Optional(okfDeliveryKindSchema),
+      include_inactive: Type.Optional(Type.Boolean()),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const entries = listDeliveryOkfInventory(root, {
+        contractId: params.contract_id ?? null,
+        kind: params.kind ?? null,
+        includeInactive: params.include_inactive === true,
+      });
+      const text = renderDeliveryOkfInventory(entries);
+      await refreshUi(ctx);
+      return toolResult(text, { entries });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_okf_query",
+    label: "OKF Query",
+    description: "Search OKF Markdown with lexical, source-excerpt retrieval.",
+    promptSnippet: "Query OKF when you know the topic but not the exact concept path.",
+    promptGuidelines: [
+      "Returned sections are source excerpts, not generated summaries.",
+      "Use query results as context only; verify runtime truth separately.",
+    ],
+    parameters: Type.Object({
+      query: Type.String(),
+      scope: Type.Optional(Type.String({ description: "all, project, delivery, or imported." })),
+      contract_id: Type.Optional(Type.String()),
+      kind: Type.Optional(okfDeliveryKindSchema),
+      include_inactive: Type.Optional(Type.Boolean()),
+      budget: Type.Optional(Type.Number()),
+      limit: Type.Optional(Type.Number()),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const scope = ["all", "project", "delivery", "imported"].includes(params.scope ?? "all")
+        ? params.scope as "all" | "project" | "delivery" | "imported"
+        : "all";
+      const report = queryOkfBundle(root, params.query, {
+        scope,
+        contractId: params.contract_id ?? null,
+        kind: params.kind ?? null,
+        includeInactive: params.include_inactive === true,
+        budget: params.budget,
+        limit: params.limit,
+      });
+      await refreshUi(ctx);
+      return toolResult(renderOkfQueryReport(report), { report });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_okf_validate",
+    label: "OKF Validate",
+    description: "Validate OKF Markdown shape and lifecycle hygiene.",
+    promptSnippet: "Run OKF validation after meaningful OKF edits or before export handoff.",
+    promptGuidelines: [
+      "Validation checks OKF shape and lifecycle hygiene only; it does not replace tests or PR gates.",
+      "Treat errors as blockers and warnings as risks to resolve or explicitly justify.",
+    ],
+    parameters: Type.Object({
+      contract_id: Type.Optional(Type.String()),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const report = validateOkfBundle(root, params.contract_id ?? null);
+      await refreshUi(ctx);
+      return toolResult(renderOkfValidationReport(report), { report });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_okf_use",
+    label: "OKF Use",
+    description: "Render role-scoped OKF and optionally record coder ConsumptionManifest evidence.",
+    promptSnippet: "Use this at the start of implementation to bind active role-bundle consumption to an auditable manifest.",
+    promptGuidelines: [
+      "Reading OKF is not enough for gated delivery; coders should record consumption when bundle guidance influences code.",
+      "The consumption manifest is evidence of context flow, not a quality pass or test result.",
+    ],
+    parameters: Type.Object({
+      role: Type.Optional(Type.String()),
+      contract_id: Type.Optional(Type.String()),
+      record_consumption: Type.Optional(Type.Boolean()),
+      manifest_id: Type.Optional(Type.String()),
+      consumed_bundles: Type.Optional(Type.Array(Type.String())),
+      ignored_bundles: Type.Optional(Type.Array(Type.Object({
+        bundle_id: Type.String(),
+        reason: Type.String(),
+      }))),
+      output_paths: Type.Optional(Type.Array(Type.String())),
+      summary: Type.Optional(Type.String()),
+      update: Type.Optional(Type.Boolean()),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const targetRole = params.role ?? role;
+      const text = renderRoleOkfWorkingSet(root, targetRole, params.contract_id ?? null);
+      let concept = null;
+      if (params.record_consumption === true) {
+        const consumed = params.consumed_bundles?.length ? params.consumed_bundles : activeRoleBundleIds(root, params.contract_id ?? null);
+        const manifestId = params.manifest_id ?? `use-${params.contract_id ?? "all"}-${agentName}`;
+        concept = recordConsumptionManifest(root, agentName, {
+          manifest_id: manifestId,
+          contract_id: params.contract_id ?? null,
+          implementation_owner: agentName,
+          summary: params.summary ?? `OKF use by ${agentName}: consumed ${consumed.length > 0 ? consumed.join(", ") : "no active role bundles"}.`,
+          consumed_bundles: consumed,
+          ignored_bundles: params.ignored_bundles ?? [],
+          output_paths: params.output_paths ?? [],
+        }, { update: params.update === true });
+      }
+      await refreshUi(ctx);
+      return toolResult(concept ? `${text}\n\nRecorded ConsumptionManifest: ${concept.file}` : text, { working_set: text, consumption_manifest: concept });
     },
   });
 

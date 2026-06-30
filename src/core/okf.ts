@@ -188,9 +188,80 @@ export interface DeliveryOkfProtocolReport {
   ready: boolean;
 }
 
+export interface DeliveryOkfInventoryEntry {
+  kind: DeliveryOkfKind;
+  id: string;
+  status: string;
+  title: string;
+  contract_id: string | null;
+  updated_at: string | null;
+  file: string;
+  summary: string;
+}
+
+export interface DeliveryOkfInventoryOptions {
+  contractId?: string | null;
+  kind?: DeliveryOkfKind | null;
+  includeInactive?: boolean;
+}
+
+export interface OkfValidationIssue {
+  severity: "error" | "warning";
+  file: string;
+  message: string;
+}
+
+export interface OkfValidationReport {
+  root: string;
+  checked_files: number;
+  errors: OkfValidationIssue[];
+  warnings: OkfValidationIssue[];
+  ok: boolean;
+}
+
+export interface OkfQuerySection {
+  file: string;
+  heading: string;
+  score: number;
+  kind?: DeliveryOkfKind;
+  id?: string;
+  text: string;
+}
+
+export interface OkfQueryReport {
+  query: string;
+  scope: "all" | "project" | "delivery" | "imported";
+  budget: number;
+  results: OkfQuerySection[];
+}
+
+export interface OkfQueryOptions {
+  scope?: "all" | "project" | "delivery" | "imported";
+  budget?: number;
+  limit?: number;
+  contractId?: string | null;
+  kind?: DeliveryOkfKind | null;
+  includeInactive?: boolean;
+}
+
 const OKF_PROFILE_ID = "works.pi-company.project-company";
 const OKF_PROFILE_VERSION = "0.1.0";
 const OKF_BUNDLE_VERSION = "0.1.0";
+const ALL_DELIVERY_OKF_KINDS: DeliveryOkfKind[] = ["contract", "evaluation", "handoff", "role-bundle", "consumption", "preflight"];
+const VALID_LIFECYCLE_STATUSES = new Set<OkfLifecycleStatus>([
+  "draft",
+  "proposed",
+  "accepted",
+  "active",
+  "consumed",
+  "resolved",
+  "fulfilled",
+  "stale",
+  "superseded",
+  "retired",
+  "archived",
+  "abandoned",
+]);
 const INACTIVE_LIFECYCLE_STATUSES = new Set(["stale", "superseded", "retired", "archived", "abandoned"]);
 
 export function seedOkfBundles(root: string, config: CompanyConfig, roster: Record<string, AgentRecord>): OkfSeedResult {
@@ -783,6 +854,150 @@ export function renderDeliveryOkfProtocolReport(report: DeliveryOkfProtocolRepor
   return `Delivery OKF protocol report${report.contract_id ? ` for ${report.contract_id}` : ""}\nReady: ${report.ready ? "yes" : "no"}\n\nRequired role bundles:\n${required}\n\nConsumption manifests:\n${markdownList(report.consumption_manifests)}\n\nUnresolved blocking findings:\n${blockers}\n\nFinal handoffs:\n${markdownList(report.final_handoffs)}\n\nInactive / retired OKF:\n${inactive}\n\nWarnings:\n${warnings}\n\nAuthority boundary: this report audits OKF collaboration hygiene only. Runtime events, state, git, and PR gates remain authoritative.`;
 }
 
+export function listDeliveryOkfInventory(root: string, options: DeliveryOkfInventoryOptions = {}): DeliveryOkfInventoryEntry[] {
+  const contract = options.contractId ? safeOkfId(options.contractId, "contract_id") : null;
+  const kinds = options.kind ? [options.kind] : ALL_DELIVERY_OKF_KINDS;
+  const entries: DeliveryOkfInventoryEntry[] = [];
+  for (const kind of kinds) {
+    for (const concept of listDeliveryOkfConcepts(root, kind)) {
+      if (!conceptMatchesContract(concept, contract)) continue;
+      const status = conceptLifecycleStatus(concept);
+      if (!options.includeInactive && !isDeliveryOkfConceptActive(concept)) continue;
+      entries.push({
+        kind,
+        id: conceptDeliveryId(kind, concept),
+        status,
+        title: typeof concept.frontmatter.title === "string" ? concept.frontmatter.title : conceptDeliveryId(kind, concept),
+        contract_id: typeof concept.frontmatter.contract_id === "string" ? concept.frontmatter.contract_id : null,
+        updated_at: typeof concept.frontmatter.updated_at === "string" ? concept.frontmatter.updated_at : null,
+        file: concept.file,
+        summary: summarizeConceptForWorkingSet(kind, concept),
+      });
+    }
+  }
+  return entries.sort((a, b) => `${a.kind}/${a.id}`.localeCompare(`${b.kind}/${b.id}`));
+}
+
+export function renderDeliveryOkfInventory(entries: DeliveryOkfInventoryEntry[]): string {
+  const rows = entries.length > 0
+    ? entries.map((entry) => `- ${entry.kind}/${entry.id} [${entry.status}] ${entry.title}${entry.contract_id ? ` contract=${entry.contract_id}` : ""}\n  file: ${entry.file}\n  summary: ${entry.summary || "(none)"}`).join("\n")
+    : "- none";
+  return `# OKF inventory\n\n${rows}\n\n# Authority boundary\n\nThis is a discovery view over OKF files only. Runtime state, git, tests, PR gates, and tool guards remain authoritative.\n`;
+}
+
+export function activeRoleBundleIds(root: string, contractId: string | null = null): string[] {
+  const contract = contractId ? safeOkfId(contractId, "contract_id") : null;
+  return listDeliveryOkfConcepts(root, "role-bundle")
+    .filter((concept) => conceptMatchesContract(concept, contract))
+    .filter(isDeliveryOkfConceptActive)
+    .map((concept) => String(concept.frontmatter.bundle_id ?? path.basename(concept.file, ".md")))
+    .sort();
+}
+
+export function validateOkfBundle(root: string, contractId: string | null = null): OkfValidationReport {
+  const paths = companyPaths(root);
+  const target = paths.okfDir;
+  const errors: OkfValidationIssue[] = [];
+  const warnings: OkfValidationIssue[] = [];
+  const files = fs.existsSync(target) ? walkMarkdownFiles(target) : [];
+  if (!fs.existsSync(target)) {
+    errors.push({ severity: "error", file: target, message: "OKF directory does not exist; run pi-company init first." });
+  }
+
+  for (const file of files) {
+    const relative = path.relative(target, file) || file;
+    const basename = path.basename(file).toLowerCase();
+    const parsed = parseOkfMarkdownFile(file);
+    if (!parsed.ok) {
+      errors.push({ severity: "error", file: relative, message: parsed.message });
+      continue;
+    }
+    if (basename === "index.md") continue;
+    if (basename === "log.md") {
+      if (parsed.frontmatter) warnings.push({ severity: "warning", file: relative, message: "log.md should not use concept frontmatter." });
+      continue;
+    }
+    if (!parsed.frontmatter) {
+      errors.push({ severity: "error", file: relative, message: "Concept Markdown is missing YAML frontmatter." });
+      continue;
+    }
+    const type = parsed.frontmatter.type;
+    if (typeof type !== "string" || !type.trim()) {
+      errors.push({ severity: "error", file: relative, message: "Concept frontmatter must include a non-empty type field." });
+    }
+    const status = parsed.frontmatter.lifecycle_status ?? parsed.frontmatter.status;
+    if (typeof status === "string" && !VALID_LIFECYCLE_STATUSES.has(status as OkfLifecycleStatus)) {
+      warnings.push({ severity: "warning", file: relative, message: `Unknown lifecycle status: ${status}` });
+    }
+    const kind = deliveryKindFromFile(root, file);
+    if (kind) validateDeliveryConceptShape(kind, parsed.frontmatter, relative, errors, warnings);
+  }
+
+  if (contractId) {
+    const protocol = buildDeliveryOkfProtocolReport(root, contractId);
+    for (const warning of protocol.warnings) {
+      warnings.push({ severity: "warning", file: path.relative(target, paths.okfDeliveryDir), message: warning });
+    }
+  }
+
+  return { root: target, checked_files: files.length, errors, warnings, ok: errors.length === 0 };
+}
+
+export function renderOkfValidationReport(report: OkfValidationReport): string {
+  const errors = report.errors.length > 0 ? report.errors.map((issue) => `- ${issue.file}: ${issue.message}`).join("\n") : "- none";
+  const warnings = report.warnings.length > 0 ? report.warnings.map((issue) => `- ${issue.file}: ${issue.message}`).join("\n") : "- none";
+  return `OKF validation report\nRoot: ${report.root}\nChecked files: ${report.checked_files}\nValid: ${report.ok ? "yes" : "no"}\n\nErrors:\n${errors}\n\nWarnings:\n${warnings}\n\nAuthority boundary: validation checks OKF shape and lifecycle hygiene only. Runtime events, state, git, tests, PR gates, and tool guards remain authoritative.`;
+}
+
+export function queryOkfBundle(root: string, query: string, options: OkfQueryOptions = {}): OkfQueryReport {
+  const paths = companyPaths(root);
+  const scope = options.scope ?? "all";
+  const budget = Math.max(100, options.budget ?? 2400);
+  const limit = Math.max(1, options.limit ?? 12);
+  const terms = tokenizeQuery(query);
+  const files = okfFilesForQuery(paths, scope);
+  const sections: OkfQuerySection[] = [];
+  for (const file of files) {
+    const parsed = parseOkfMarkdownFile(file);
+    if (!parsed.ok) continue;
+    const kind = deliveryKindFromFile(root, file);
+    if (options.kind && kind !== options.kind) continue;
+    const concept = parsed.frontmatter ? { file, frontmatter: parsed.frontmatter, body: parsed.body } satisfies OkfConcept : null;
+    if (kind && concept) {
+      const contract = options.contractId ? safeOkfId(options.contractId, "contract_id") : null;
+      if (!conceptMatchesContract(concept, contract)) continue;
+      if (!options.includeInactive && !isDeliveryOkfConceptActive(concept)) continue;
+    }
+    for (const section of markdownSections(parsed.body)) {
+      const haystack = `${path.relative(paths.okfDir, file)}\n${JSON.stringify(parsed.frontmatter ?? {})}\n${section.heading}\n${section.text}`;
+      const score = scoreQuery(terms, haystack);
+      if (terms.length > 0 && score === 0) continue;
+      sections.push({
+        file,
+        heading: section.heading,
+        score,
+        kind,
+        id: kind && concept ? conceptDeliveryId(kind, concept) : undefined,
+        text: section.text.trim(),
+      });
+    }
+  }
+  const sorted = sections
+    .sort((a, b) => b.score - a.score || `${a.file}:${a.heading}`.localeCompare(`${b.file}:${b.heading}`))
+    .slice(0, limit);
+  return { query, scope, budget, results: packQueryBudget(sorted, budget) };
+}
+
+export function renderOkfQueryReport(report: OkfQueryReport): string {
+  const results = report.results.length > 0
+    ? report.results.map((result, index) => {
+      const label = result.kind && result.id ? `${result.kind}/${result.id}` : path.basename(result.file);
+      return `## ${index + 1}. ${label} — ${result.heading}\n\nSource: ${result.file}\nScore: ${result.score}\n\n${result.text.trim() || "(empty section)"}`;
+    }).join("\n\n")
+    : "No matching OKF sections.";
+  return `# OKF query\n\nQuery: ${report.query}\nScope: ${report.scope}\nBudget: ${report.budget}\n\n${results}\n\n# Authority boundary\n\nQuery returns source excerpts only; it does not summarize, verify, or supersede runtime truth.\n`;
+}
+
 export function buildOkfWorkingSet(root: string, role: string, contractId: string | null = null, requiredKinds?: string[]): OkfWorkingSet {
   const contract = contractId ? safeOkfId(contractId, "contract_id") : null;
   const concepts: OkfWorkingSetConcept[] = [];
@@ -880,6 +1095,149 @@ function writeDeliveryOkfConcept(
   const text = renderOkfConcept(frontmatter, body);
   atomicWriteText(file, text);
   return readOkfConcept(file) ?? { file, frontmatter, body };
+}
+
+function walkMarkdownFiles(directory: string): string[] {
+  if (!fs.existsSync(directory)) return [];
+  const result: string[] = [];
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    if (entry.name === ".git") continue;
+    const fullPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      result.push(...walkMarkdownFiles(fullPath));
+    } else if (entry.isFile() && /\.(md|markdown)$/i.test(entry.name)) {
+      result.push(fullPath);
+    }
+  }
+  return result.sort();
+}
+
+type ParsedOkfMarkdown =
+  | { ok: true; frontmatter: Record<string, unknown> | null; body: string }
+  | { ok: false; message: string };
+
+function parseOkfMarkdownFile(file: string): ParsedOkfMarkdown {
+  try {
+    const text = fs.readFileSync(file, "utf8");
+    if (text.startsWith("---\n") || text.startsWith("---\r\n")) {
+      const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+      if (!match) return { ok: false, message: "Frontmatter starts with --- but has no closing delimiter." };
+      const parsed = YAML.parse(match[1]) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return { ok: false, message: "Frontmatter must parse to a mapping." };
+      }
+      return { ok: true, frontmatter: parsed as Record<string, unknown>, body: match[2] ?? "" };
+    }
+    return { ok: true, frontmatter: null, body: text };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : "Unable to read Markdown file." };
+  }
+}
+
+function deliveryKindFromFile(root: string, file: string): DeliveryOkfKind | undefined {
+  const paths = companyPaths(root);
+  const normalized = path.resolve(file);
+  for (const kind of ALL_DELIVERY_OKF_KINDS) {
+    const dir = path.resolve(deliveryKindDir(paths.okfDeliveryDir, kind));
+    const relative = path.relative(dir, normalized);
+    if (relative && !relative.startsWith("..") && !path.isAbsolute(relative) && !relative.includes(path.sep)) return kind;
+  }
+  return undefined;
+}
+
+function validateDeliveryConceptShape(
+  kind: DeliveryOkfKind,
+  frontmatter: Record<string, unknown>,
+  file: string,
+  errors: OkfValidationIssue[],
+  warnings: OkfValidationIssue[],
+): void {
+  const idKey = ({
+    contract: "contract_id",
+    evaluation: "finding_id",
+    handoff: "handoff_id",
+    "role-bundle": "bundle_id",
+    consumption: "manifest_id",
+    preflight: "preflight_id",
+  } satisfies Record<DeliveryOkfKind, string>)[kind];
+  if (typeof frontmatter[idKey] !== "string" || !String(frontmatter[idKey]).trim()) {
+    errors.push({ severity: "error", file, message: `Delivery ${kind} concept must include ${idKey}.` });
+  }
+  if (kind === "role-bundle" && typeof frontmatter.role_bundle_kind !== "string") {
+    errors.push({ severity: "error", file, message: "RoleBundle must include role_bundle_kind." });
+  }
+  if (kind === "consumption") {
+    if (!Array.isArray(frontmatter.consumed_bundles)) warnings.push({ severity: "warning", file, message: "ConsumptionManifest should include consumed_bundles array." });
+    if (!Array.isArray(frontmatter.consumed_bundle_snapshots)) warnings.push({ severity: "warning", file, message: "ConsumptionManifest should include consumed_bundle_snapshots for freshness checks." });
+  }
+  if (kind === "preflight") {
+    if (typeof frontmatter.patch_hash !== "string" || !frontmatter.patch_hash) warnings.push({ severity: "warning", file, message: "PreflightReport should include patch_hash." });
+    if (!["pass", "fail", "blocked"].includes(String(frontmatter.verdict ?? ""))) warnings.push({ severity: "warning", file, message: "PreflightReport verdict should be pass, fail, or blocked." });
+  }
+}
+
+function okfFilesForQuery(paths: ReturnType<typeof companyPaths>, scope: "all" | "project" | "delivery" | "imported"): string[] {
+  const roots = scope === "project"
+    ? [paths.okfProjectDir]
+    : scope === "delivery"
+      ? [paths.okfDeliveryDir]
+      : scope === "imported"
+        ? [paths.okfImportedDir]
+        : [paths.okfProjectDir, paths.okfDeliveryDir, paths.okfImportedDir];
+  return roots.flatMap(walkMarkdownFiles).sort();
+}
+
+function markdownSections(body: string): Array<{ heading: string; text: string }> {
+  const lines = body.split(/\r?\n/);
+  const sections: Array<{ heading: string; text: string[] }> = [];
+  let current: { heading: string; text: string[] } | null = null;
+  for (const line of lines) {
+    const heading = line.match(/^(#{1,6})\s+(.+?)\s*$/);
+    if (heading) {
+      if (current) sections.push(current);
+      current = { heading: heading[2], text: [] };
+      continue;
+    }
+    if (!current) current = { heading: "Document", text: [] };
+    current.text.push(line);
+  }
+  if (current) sections.push(current);
+  return sections.map((section) => ({
+    heading: section.heading,
+    text: section.text.join("\n").trim(),
+  })).filter((section) => section.heading || section.text);
+}
+
+function tokenizeQuery(query: string): string[] {
+  return Array.from(new Set(query.toLowerCase().split(/[^\p{L}\p{N}_-]+/u).map((term) => term.trim()).filter((term) => term.length >= 2)));
+}
+
+function scoreQuery(terms: string[], text: string): number {
+  if (terms.length === 0) return 1;
+  const haystack = text.toLowerCase();
+  let score = 0;
+  for (const term of terms) {
+    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const count = haystack.match(new RegExp(escaped, "g"))?.length ?? 0;
+    score += count;
+  }
+  return score;
+}
+
+function packQueryBudget(sections: OkfQuerySection[], budget: number): OkfQuerySection[] {
+  const maxChars = Math.max(200, budget * 4);
+  let used = 0;
+  const packed: OkfQuerySection[] = [];
+  for (const section of sections) {
+    const remaining = maxChars - used;
+    if (remaining <= 0) break;
+    const overhead = section.file.length + section.heading.length + 80;
+    const textBudget = Math.max(0, remaining - overhead);
+    const text = section.text.length > textBudget ? `${section.text.slice(0, Math.max(0, textBudget - 15)).trim()}\n...[truncated]` : section.text;
+    packed.push({ ...section, text });
+    used += overhead + text.length;
+  }
+  return packed;
 }
 
 function deliveryKindDir(deliveryDir: string, kind: DeliveryOkfKind): string {
