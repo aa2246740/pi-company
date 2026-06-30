@@ -51,6 +51,8 @@ import {
   submitTest,
   transitionDeliveryOkfLifecycle,
   buildOkfExportGateReport,
+  checkOkfConsumption,
+  installOkfPrePushHook,
   writeRoleBundle,
   writeStructuredHandoff,
   listInbox,
@@ -341,6 +343,37 @@ okfGate.command("export")
     });
     console.log(renderOkfExportGateReport(report));
     if (opts.strict === true && !report.ready) process.exitCode = 1;
+  });
+
+okfGate.command("install-pre-push")
+  .description("Install a git pre-push hook that enforces the OKF export gate on push")
+  .option("--contract <id>")
+  .action((opts) => {
+    const result = installOkfPrePushHook(rootOpt(), opts.contract ?? null);
+    if (result.written) console.log(`Installed OKF pre-push hook at ${result.hookPath}`);
+    else console.log(`OKF pre-push hook already up to date at ${result.hookPath}`);
+  });
+
+okfGate.command("consumption")
+  .description("Check whether the active contract has a fresh ConsumptionManifest")
+  .option("--contract <id>")
+  .option("--format <format>", "text | json", "text")
+  .option("--strict", "Exit non-zero when consumption is not fresh")
+  .action((opts) => {
+    const check = checkOkfConsumption(rootOpt(), opts.contract ?? null);
+    if (validateOutputFormat(opts.format) === "json") console.log(JSON.stringify(check, null, 2));
+    else {
+      const lines = [
+        `OKF consumption check${check.contract_id ? ` for ${check.contract_id}` : ""}`,
+        `Fresh: ${check.fresh ? "yes" : "no"}`,
+        check.manifest_id ? `Latest manifest: ${check.manifest_id}` : "Latest manifest: none",
+        check.missing_bundle_ids.length > 0 ? `Missing bundles: ${check.missing_bundle_ids.join(", ")}` : "Missing bundles: none",
+        check.stale_bundle_ids.length > 0 ? `Stale bundles: ${check.stale_bundle_ids.join(", ")}` : "Stale bundles: none",
+        check.reason ?? "All required OKF bundles consumed with fresh hashes.",
+      ];
+      console.log(lines.join("\n"));
+    }
+    if (!check.fresh) process.exitCode = 1;
   });
 
 okf.command("report")

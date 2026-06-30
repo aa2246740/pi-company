@@ -71,6 +71,7 @@ import {
   renderOkfValidationReport,
   validateOkfBundle,
 } from "../src/core/okf.js";
+import { checkOkfConsumption } from "../src/core/company.js";
 import { parseCmuxSurfaceRef } from "../src/core/cmux.js";
 import {
   acquireProviderRequestLease,
@@ -869,6 +870,12 @@ function workerToolBlockReason(event: { toolName: string; input: Record<string, 
       if (scope.rootScoped && isProtectedProjectControlPath(root, target)) {
         return `pi-company root-scoped coder ${agent.name} cannot write pi-company or git control paths.`;
       }
+      // OKF enforcement (hook/gate-first): block implementation writes until the
+      // coder has a fresh ConsumptionManifest for the active contract. This is the
+      // agent-internal mirror of the git pre-push export gate. Permits .pi-company
+      // and control paths so the manifest/role-bundle can be written first.
+      const okfBlock = okfConsumptionBlockReason(root, target, agent);
+      if (okfBlock) return okfBlock;
       return null;
     }
     const allowed = nonCoderAllowedWriteReason(agent, target, root);
@@ -893,6 +900,36 @@ function workerToolBlockReason(event: { toolName: string; input: Record<string, 
 type CoderMutationScope =
   | { allowed: true; root: string; label: string; rootScoped: boolean }
   | { allowed: false; reason: string };
+
+function okfConsumptionBlockReason(root: string, target: string, agent: AgentRecord): string | null {
+  // Only enforce when there is a pi-company project AND the write targets real
+  // implementation files (not .pi-company knowledge itself).
+  if (!fs.existsSync(path.join(root, ".pi-company"))) return null;
+  const piCompanyDir = path.join(root, ".pi-company");
+  const normalized = path.resolve(target);
+  if (normalized === piCompanyDir || normalized.startsWith(piCompanyDir + path.sep)) return null;
+  // Only one contract is expected to be active at a time; check it.
+  let contractId: string | null = null;
+  try {
+    const concepts = listDeliveryOkfInventory(root, { kind: "contract", includeInactive: false });
+    const active = concepts.find((entry) => entry.status === "active");
+    if (!active) return null;
+    contractId = active.id;
+  } catch {
+    return null;
+  }
+  let check;
+  try {
+    check = checkOkfConsumption(root, contractId);
+  } catch {
+    return null;
+  }
+  if (check.fresh) return null;
+  const reConsume = check.manifest_id
+    ? `Re-consume updated bundles: \`okf use coder --contract ${contractId} --consume-as ${agent.name} --manifest ${check.manifest_id} --update\`.`
+    : `Record consumption: \`okf use coder --contract ${contractId} --consume-as ${agent.name}\`.`;
+  return `pi-company OKF enforcement: cannot edit implementation until OKF context is consumed. ${check.reason ?? ""} ${reConsume} This guard mirrors the git pre-push export gate; it ensures implementation is bound to auditable OKF consumption.`;
+}
 
 function coderMutationScope(agent: AgentRecord, root: string): CoderMutationScope {
   if (agent.worktree) {

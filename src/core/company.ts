@@ -39,6 +39,8 @@ import { makeEvent } from "./events.js";
 import { newId, nowIso, slug } from "./id.js";
 import { withCompanyLock } from "./lock.js";
 import {
+  activeRoleBundleIds,
+  checkConsumptionFreshness,
   buildDeliveryOkfProtocolReport,
   buildOkfWorkingSet,
   conceptLifecycleStatus,
@@ -359,6 +361,35 @@ export function currentPatchHash(root: string): string {
     hash.update("\0");
   }
   return hash.digest("hex");
+}
+
+export function checkOkfConsumption(root: string, contractId?: string | null) {
+  return checkConsumptionFreshness(root, contractId ?? null);
+}
+
+export function installOkfPrePushHook(root: string, contractId?: string | null): { hookPath: string; written: boolean } {
+  const gitDir = path.join(root, ".git");
+  if (!fs.existsSync(gitDir)) throw new Error("No .git directory found; cannot install pre-push hook.");
+  const hooksDir = path.join(gitDir, "hooks");
+  fs.mkdirSync(hooksDir, { recursive: true });
+  const hookPath = path.join(hooksDir, "pre-push");
+  const contractFlag = contractId ? ` --contract ${contractId}` : "";
+  const lines = [
+    "#!/bin/sh",
+    "# Installed by pi-company. Enforces the OKF export gate before any push.",
+    "# Edit or remove to bypass; this is a guardrail, not a hard CI gate.",
+    "set -e",
+    'CLI=""',
+    'if [ -n "${PI_COMPANY_CLI:-}" ]; then CLI="$PI_COMPANY_CLI"; elif command -v pi-company >/dev/null 2>&1; then CLI="pi-company"; fi',
+    'if [ -z "$CLI" ]; then echo "pi-company not found; set PI_COMPANY_CLI or install it. Skipping OKF export gate." >&2; exit 0; fi',
+    "$CLI okf gate export" + contractFlag + " --strict",
+    "",
+  ];
+  const script = lines.join("\n");
+  const existing = fs.existsSync(hookPath) ? fs.readFileSync(hookPath, "utf8") : "";
+  if (existing.trim() === script.trim()) return { hookPath, written: false };
+  fs.writeFileSync(hookPath, script, { encoding: "utf8", mode: 0o755 });
+  return { hookPath, written: true };
 }
 
 function runGitText(root: string, args: string[]): string {

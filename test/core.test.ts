@@ -68,6 +68,7 @@ import { DEFAULT_MESSAGE_POLICY, DEFAULT_RATE_LIMIT_POLICY } from "../src/core/d
 import { makeEvent } from "../src/core/events.js";
 import {
   activeRoleBundleIds,
+  checkConsumptionFreshness,
   deliveryOkfConceptPath,
   listDeliveryOkfInventory,
   queryOkfBundle,
@@ -570,6 +571,65 @@ Rate limit 已过期，可以恢复正常工作`);
       output_paths: ["src/example.ts"],
     });
     expect(buildDeliveryOkfReport(root, "contract-ux", ["research_brief"]).warnings).toEqual(["Missing structured handoff for current OKF lifecycle"]);
+  });
+
+  it("reports OKF consumption freshness for hook enforcement", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "okf-consumption-enforcement" });
+    registerCoder(root);
+    createSprintContract(root, "lead", {
+      contract_id: "contract-enforce",
+      title: "Enforcement contract",
+      owner: "coder",
+      scope: "Block writes until OKF context is consumed.",
+      done_criteria: ["consumption recorded"],
+      status: "active",
+    });
+    writeRoleBundle(root, "researcher", {
+      bundle_id: "research-enforce",
+      kind: "research_brief",
+      contract_id: "contract-enforce",
+      author: "researcher",
+      title: "Research enforce",
+      summary: "Map affected public tests.",
+      guidance: ["Consume before patching"],
+    });
+
+    // No manifest yet -> not fresh, missing the required bundle.
+    const missing = checkConsumptionFreshness(root, "contract-enforce");
+    expect(missing.fresh).toBe(false);
+    expect(missing.has_manifest).toBe(false);
+    expect(missing.missing_bundle_ids).toEqual(["research-enforce"]);
+    expect(missing.reason).toContain("No active ConsumptionManifest");
+
+    // Record consumption -> fresh.
+    recordConsumptionManifest(root, "coder", {
+      manifest_id: "enforce-consumption",
+      contract_id: "contract-enforce",
+      implementation_owner: "coder",
+      summary: "Consumed research.",
+      consumed_bundles: ["research-enforce"],
+      output_paths: ["src/x.ts"],
+    });
+    const fresh = checkConsumptionFreshness(root, "contract-enforce");
+    expect(fresh.fresh).toBe(true);
+    expect(fresh.manifest_id).toBe("enforce-consumption");
+    expect(fresh.stale_bundle_ids).toEqual([]);
+
+    // Mutate the bundle -> consumption goes stale.
+    writeRoleBundle(root, "researcher", {
+      bundle_id: "research-enforce",
+      kind: "research_brief",
+      contract_id: "contract-enforce",
+      author: "researcher",
+      title: "Research enforce",
+      summary: "Updated guidance after new findings.",
+      guidance: ["Consume before patching", "Also check contrapositives"],
+    }, { update: true });
+    const stale = checkConsumptionFreshness(root, "contract-enforce");
+    expect(stale.fresh).toBe(false);
+    expect(stale.stale_bundle_ids).toEqual(["research-enforce"]);
+    expect(stale.reason).toContain("stale");
   });
 
   it("blocks OKF patch export until evaluator preflight is fresh for the current diff", () => {

@@ -894,6 +894,80 @@ export function activeRoleBundleIds(root: string, contractId: string | null = nu
     .sort();
 }
 
+export interface ConsumptionFreshnessCheck {
+  contract_id: string | null;
+  has_manifest: boolean;
+  manifest_id: string | null;
+  stale_bundle_ids: string[];
+  missing_bundle_ids: string[];
+  fresh: boolean;
+  reason: string | null;
+}
+
+export function checkConsumptionFreshness(root: string, contractId: string | null = null): ConsumptionFreshnessCheck {
+  const contract = contractId ? safeOkfId(contractId, "contract_id") : null;
+  const roleBundleIds = activeRoleBundleIds(root, contract);
+  const manifests = listDeliveryOkfConcepts(root, "consumption")
+    .filter((concept) => conceptMatchesContract(concept, contract))
+    .filter(isDeliveryOkfConceptActive);
+  if (manifests.length === 0) {
+    return {
+      contract_id: contract,
+      has_manifest: false,
+      manifest_id: null,
+      stale_bundle_ids: [],
+      missing_bundle_ids: roleBundleIds,
+      fresh: false,
+      reason: contract
+        ? `No active ConsumptionManifest for contract ${contract}. Run \`okf use coder --contract ${contract} --consume-as <coder>\` before writing implementation.`
+        : "No active ConsumptionManifest. Record consumption of OKF bundles before implementation.",
+    };
+  }
+  // Pick the most recently updated manifest.
+  const latest = manifests
+    .slice()
+    .sort((a, b) => (conceptTimestamp(b) ?? 0) - (conceptTimestamp(a) ?? 0))[0];
+  const manifestId = String(latest.frontmatter.manifest_id ?? path.basename(latest.file, ".md"));
+  const consumed = new Set(stringArrayFrontmatter(latest.frontmatter.consumed_bundles));
+  const snapshots = Array.isArray(latest.frontmatter.consumed_bundle_snapshots)
+    ? latest.frontmatter.consumed_bundle_snapshots as Array<Record<string, unknown>>
+    : [];
+  const snapshotById = new Map<string, Record<string, unknown>>();
+  for (const snapshot of snapshots) {
+    const bid = typeof snapshot.bundle_id === "string" ? snapshot.bundle_id : "";
+    if (bid) snapshotById.set(bid, snapshot);
+  }
+  const missing: string[] = [];
+  const stale: string[] = [];
+  for (const bid of roleBundleIds) {
+    if (!consumed.has(bid)) {
+      missing.push(bid);
+      continue;
+    }
+    const snapshot = snapshotById.get(bid);
+    if (!snapshot) {
+      stale.push(bid);
+      continue;
+    }
+    const snapshotHash = typeof snapshot.bundle_hash === "string" ? snapshot.bundle_hash : "";
+    const current = readDeliveryOkfConcept(root, "role-bundle", bid);
+    const currentHash = current ? conceptContentHash(current) : "";
+    if (!snapshotHash || !currentHash || snapshotHash !== currentHash) stale.push(bid);
+  }
+  let reason: string | null = null;
+  if (missing.length > 0) reason = `ConsumptionManifest ${manifestId} is missing required bundles: ${missing.join(", ")}`;
+  else if (stale.length > 0) reason = `ConsumptionManifest ${manifestId} is stale for bundles: ${stale.join(", ")}. Re-consume before relying on them.`;
+  return {
+    contract_id: contract,
+    has_manifest: true,
+    manifest_id: manifestId,
+    stale_bundle_ids: stale,
+    missing_bundle_ids: missing,
+    fresh: reason === null,
+    reason,
+  };
+}
+
 export function validateOkfBundle(root: string, contractId: string | null = null): OkfValidationReport {
   const paths = companyPaths(root);
   const target = paths.okfDir;
