@@ -332,6 +332,11 @@ export function transitionDeliveryOkfLifecycle(root: string, actor: string, kind
 }
 
 export function currentPatchHash(root: string): string {
+  const branch = tryRunGitText(root, ["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+  const mergeBase = branch && branch !== "main" ? tryRunGitText(root, ["merge-base", "HEAD", "main"]).trim() : "";
+  const branchPatch = mergeBase
+    ? runGitText(root, ["diff", "--binary", "--no-ext-diff", `${mergeBase}...HEAD`, "--", ".", ":(exclude).pi-company"])
+    : "";
   const tracked = runGitText(root, ["diff", "--binary", "--no-ext-diff", "--", ".", ":(exclude).pi-company"]);
   const untrackedList = runGitText(root, ["ls-files", "--others", "--exclude-standard", "--", ".", ":(exclude).pi-company"])
     .split(/\r?\n/)
@@ -339,7 +344,9 @@ export function currentPatchHash(root: string): string {
     .filter(Boolean)
     .sort();
   const hash = createHash("sha256");
-  hash.update("tracked\0");
+  hash.update("branch\0");
+  hash.update(branchPatch);
+  hash.update("\0tracked\0");
   hash.update(tracked);
   hash.update("\0untracked\0");
   for (const file of untrackedList) {
@@ -361,6 +368,11 @@ function runGitText(root: string, args: string[]): string {
     throw new Error(`git ${args.join(" ")} failed${stderr ? `: ${stderr}` : ""}`);
   }
   return String(result.stdout ?? "");
+}
+
+function tryRunGitText(root: string, args: string[]): string {
+  const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
+  return result.status === 0 ? String(result.stdout ?? "") : "";
 }
 
 function conceptMatchesContractForGate(concept: OkfConcept, contractId: string | null): boolean {

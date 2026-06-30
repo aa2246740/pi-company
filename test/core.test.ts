@@ -567,6 +567,13 @@ Rate limit 已过期，可以恢复正常工作`);
     const stale = buildOkfExportGateReport(root, "contract-export", { requiredRoleBundleKinds: ["research_brief"] });
     expect(stale.ready).toBe(false);
     expect(stale.blockers).toContain("Latest PreflightReport is stale for current patch: preflight-export");
+
+    runGit(root, ["checkout", "-b", "feature/export-gate"]);
+    runGit(root, ["add", "src/fix.ts"]);
+    runGit(root, ["commit", "-m", "commit gated patch"]);
+    const committedPatch = buildOkfExportGateReport(root, "contract-export", { requiredRoleBundleKinds: ["research_brief"] });
+    expect(committedPatch.current_patch_hash).not.toBe(ready.current_patch_hash);
+    expect(committedPatch.blockers).toContain("Latest PreflightReport is stale for current patch: preflight-export");
   });
 
   it("keeps stale or retired OKF out of the active role working set", () => {
