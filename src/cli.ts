@@ -15,6 +15,7 @@ import {
   completeTask,
   createIssue,
   createPr,
+  createSprintContract,
   ensureCoderWorktree,
   getPrGateStatus,
   inferIssueWorkType,
@@ -34,16 +35,41 @@ import {
   requestAgentSpawn,
   requestMerge,
   rateLimitIsActive,
+  recordConsumptionManifest,
+  recordPreflightReport,
   reportRateLimit,
   sendCompanyMessage,
+  renderDeliveryOkfReport,
+  renderOkfExportGateReport,
+  renderRoleOkfWorkingSet,
   renderLeadBrief,
   startTask,
   syncRenderedRecords,
   submitAcceptance,
+  submitEvaluationFinding,
   submitReview,
   submitTest,
+  transitionDeliveryOkfLifecycle,
+  buildOkfExportGateReport,
+  checkOkfConsumption,
+  installOkfPrePushHook,
+  writeRoleBundle,
+  writeStructuredHandoff,
   listInbox,
 } from "./core/company.js";
+import {
+  activeRoleBundleIds,
+  listDeliveryOkfInventory,
+  queryOkfBundle,
+  readDeliveryOkfConcept,
+  renderDeliveryOkfInventory,
+  renderOkfQueryReport,
+  renderOkfValidationReport,
+  validateOkfBundle,
+  type DeliveryOkfKind,
+  type OkfLifecycleStatus,
+  type RoleBundleKind,
+} from "./core/okf.js";
 import { parseCmuxSurfaceRef } from "./core/cmux.js";
 import type { IssueWorkType } from "./core/types.js";
 import { companyPaths } from "./core/paths.js";
@@ -90,6 +116,424 @@ program.command("brief")
   .description("Show lead's authoritative global delivery brief")
   .action(() => {
     console.log(renderLeadBrief(buildLeadBrief(rootOpt())));
+  });
+
+const okf = program.command("okf").description("Manage descriptive OKF delivery concepts");
+const okfContract = okf.command("contract").description("Manage SprintContract OKF concepts");
+
+okfContract.command("create")
+  .argument("<contract-id>")
+  .requiredOption("--title <title>")
+  .requiredOption("--owner <agent>")
+  .option("--actor <agent>", "Actor; defaults to lead", "lead")
+  .option("--issue <id>")
+  .option("--scope <text>")
+  .option("--scope-file <path>")
+  .option("--scope-stdin")
+  .option("--done <text>", "Done criterion; repeat for multiple criteria", collectOption, [])
+  .option("--non-goal <text>", "Non-goal; repeat for multiple entries", collectOption, [])
+  .option("--evidence <text>", "Required evidence; repeat for multiple entries", collectOption, [])
+  .option("--evaluator-role <role>", "Evaluator role; repeat for multiple entries", collectOption, [])
+  .option("--status <status>", "draft | active | fulfilled | superseded | abandoned", "draft")
+  .option("--update", "Replace an existing concept deliberately")
+  .action((contractId, opts) => {
+    const status = validateOkfStatus(opts.status);
+    const scope = readTextOption(opts.scope, opts.scopeFile, opts.scopeStdin === true, "scope", true) ?? "";
+    const concept = createSprintContract(rootOpt(), opts.actor, {
+      contract_id: contractId,
+      issue_id: opts.issue ?? null,
+      title: opts.title,
+      owner: opts.owner,
+      scope,
+      done_criteria: opts.done,
+      non_goals: opts.nonGoal ?? [],
+      required_evidence: opts.evidence ?? [],
+      evaluator_roles: opts.evaluatorRole ?? [],
+      status,
+    }, { update: opts.update === true });
+    console.log(`Wrote SprintContract ${contractId}: ${concept.file}`);
+  });
+
+const okfFinding = okf.command("finding").description("Manage EvaluationFinding OKF concepts");
+
+okfFinding.command("record")
+  .argument("<finding-id>")
+  .requiredOption("--kind <kind>", "review | test | acceptance | system")
+  .requiredOption("--verdict <verdict>", "pass | fail | blocked | comment | approve | request_changes | accept")
+  .option("--actor <agent>", "Actor/evaluator", "lead")
+  .option("--contract <id>")
+  .option("--target <target>", "Bundle, file, behavior, or requirement this finding targets")
+  .option("--severity <severity>", "blocking | improvement | note", "note")
+  .option("--status <status>", "active | resolved | superseded", "active")
+  .option("--resolved-by <agent>")
+  .option("--resolution-evidence <text>", "Resolution evidence; repeat for multiple entries", collectOption, [])
+  .option("--pr <id>")
+  .option("--pr-head <commit>")
+  .option("--summary <text>")
+  .option("--summary-file <path>")
+  .option("--summary-stdin")
+  .option("--evidence <text>", "Evidence item; repeat for multiple entries", collectOption, [])
+  .option("--blocker <text>", "Blocker; repeat for multiple entries", collectOption, [])
+  .option("--caveat <text>", "Caveat; repeat for multiple entries", collectOption, [])
+  .option("--update", "Replace an existing concept deliberately")
+  .action((findingId, opts) => {
+    const summary = readTextOption(opts.summary, opts.summaryFile, opts.summaryStdin === true, "summary", true) ?? "";
+    const concept = submitEvaluationFinding(rootOpt(), opts.actor, {
+      finding_id: findingId,
+      contract_id: opts.contract ?? null,
+      pr_id: opts.pr ?? null,
+      pr_head: opts.prHead ?? null,
+      kind: validateFindingKind(opts.kind),
+      evaluator: opts.actor,
+      verdict: validateFindingVerdict(opts.verdict),
+      severity: validateFindingSeverity(opts.severity),
+      target: opts.target ?? null,
+      status: validateFindingStatus(opts.status),
+      resolved_by: opts.resolvedBy ?? null,
+      resolution_evidence: opts.resolutionEvidence ?? [],
+      summary,
+      evidence: opts.evidence ?? [],
+      blockers: opts.blocker ?? [],
+      caveats: opts.caveat ?? [],
+    }, { update: opts.update === true });
+    console.log(`Wrote EvaluationFinding ${findingId}: ${concept.file}`);
+  });
+
+const okfHandoff = okf.command("handoff").description("Manage StructuredHandoff OKF concepts");
+
+okfHandoff.command("write")
+  .argument("<handoff-id>")
+  .requiredOption("--from <agent>")
+  .requiredOption("--to <agent>")
+  .option("--actor <agent>", "Actor; defaults to --from")
+  .option("--contract <id>")
+  .option("--issue <id>")
+  .option("--pr <id>")
+  .option("--branch <name>")
+  .option("--head <commit>")
+  .option("--current-owner <agent>")
+  .option("--next-owner <agent>")
+  .option("--summary <text>")
+  .option("--summary-file <path>")
+  .option("--summary-stdin")
+  .option("--blocker <text>", "Blocker; repeat for multiple entries", collectOption, [])
+  .option("--next-action <text>", "Next action; repeat for multiple entries", collectOption, [])
+  .option("--update", "Replace an existing concept deliberately")
+  .action((handoffId, opts) => {
+    const summary = readTextOption(opts.summary, opts.summaryFile, opts.summaryStdin === true, "summary", true) ?? "";
+    const concept = writeStructuredHandoff(rootOpt(), opts.actor ?? opts.from, {
+      handoff_id: handoffId,
+      from: opts.from,
+      to: opts.to,
+      summary,
+      current_owner: opts.currentOwner ?? null,
+      next_owner: opts.nextOwner ?? null,
+      contract_id: opts.contract ?? null,
+      issue_id: opts.issue ?? null,
+      pr_id: opts.pr ?? null,
+      branch: opts.branch ?? null,
+      head: opts.head ?? null,
+      blockers: opts.blocker ?? [],
+      next_actions: opts.nextAction ?? [],
+    }, { update: opts.update === true });
+    console.log(`Wrote StructuredHandoff ${handoffId}: ${concept.file}`);
+  });
+
+const okfRoleBundle = okf.command("role-bundle").description("Manage role-specialized OKF bundles");
+
+okfRoleBundle.command("write")
+  .argument("<bundle-id>")
+  .requiredOption("--kind <kind>", "product_quality_bar | gameplay_design | visual_art_direction | research_brief")
+  .requiredOption("--actor <agent>")
+  .requiredOption("--title <title>")
+  .option("--contract <id>")
+  .option("--summary <text>")
+  .option("--summary-file <path>")
+  .option("--summary-stdin")
+  .option("--guidance <text>", "Specialist guidance; repeat for multiple entries", collectOption, [])
+  .option("--criterion <text>", "Acceptance criterion; repeat for multiple entries", collectOption, [])
+  .option("--reference <text>", "Reference; repeat for multiple entries", collectOption, [])
+  .option("--update", "Replace an existing concept deliberately")
+  .action((bundleId, opts) => {
+    const summary = readTextOption(opts.summary, opts.summaryFile, opts.summaryStdin === true, "summary", true) ?? "";
+    const concept = writeRoleBundle(rootOpt(), opts.actor, {
+      bundle_id: bundleId,
+      kind: validateRoleBundleKind(opts.kind),
+      contract_id: opts.contract ?? null,
+      author: opts.actor,
+      title: opts.title,
+      summary,
+      guidance: opts.guidance ?? [],
+      acceptance_criteria: opts.criterion ?? [],
+      references: opts.reference ?? [],
+    }, { update: opts.update === true });
+    console.log(`Wrote RoleBundle ${bundleId}: ${concept.file}`);
+  });
+
+const okfConsumption = okf.command("consumption").description("Manage implementation consumption manifests");
+
+okfConsumption.command("record")
+  .argument("<manifest-id>")
+  .requiredOption("--actor <agent>")
+  .option("--contract <id>")
+  .option("--summary <text>")
+  .option("--summary-file <path>")
+  .option("--summary-stdin")
+  .option("--consumed <bundle-id>", "Consumed role bundle id; repeat for multiple entries", collectOption, [])
+  .option("--ignored <bundle-id:reason>", "Ignored role bundle and reason; repeat for multiple entries", collectOption, [])
+  .option("--output <path>", "Implementation output path; repeat for multiple entries", collectOption, [])
+  .option("--update", "Replace an existing concept deliberately")
+  .action((manifestId, opts) => {
+    const summary = readTextOption(opts.summary, opts.summaryFile, opts.summaryStdin === true, "summary", true) ?? "";
+    const concept = recordConsumptionManifest(rootOpt(), opts.actor, {
+      manifest_id: manifestId,
+      contract_id: opts.contract ?? null,
+      implementation_owner: opts.actor,
+      summary,
+      consumed_bundles: opts.consumed ?? [],
+      ignored_bundles: parseIgnoredBundles(opts.ignored ?? []),
+      output_paths: opts.output ?? [],
+    }, { update: opts.update === true });
+    console.log(`Wrote ImplementationConsumptionManifest ${manifestId}: ${concept.file}`);
+  });
+
+const okfPreflight = okf.command("preflight").description("Manage evaluator preflight reports");
+
+okfPreflight.command("record")
+  .argument("<preflight-id>")
+  .requiredOption("--actor <agent>")
+  .requiredOption("--verdict <verdict>", "pass | fail | blocked")
+  .option("--contract <id>")
+  .option("--summary <text>")
+  .option("--summary-file <path>")
+  .option("--summary-stdin")
+  .option("--command <text>", "Command or check performed; repeat for multiple entries", collectOption, [])
+  .option("--evidence <text>", "Evidence item; repeat for multiple entries", collectOption, [])
+  .option("--blocker <text>", "Blocker; repeat for multiple entries", collectOption, [])
+  .option("--caveat <text>", "Caveat; repeat for multiple entries", collectOption, [])
+  .option("--patch-hash <hash>", "Patch hash to bind this report to; defaults to current git diff hash")
+  .option("--update", "Replace an existing concept deliberately")
+  .action((preflightId, opts) => {
+    const summary = readTextOption(opts.summary, opts.summaryFile, opts.summaryStdin === true, "summary", true) ?? "";
+    const concept = recordPreflightReport(rootOpt(), opts.actor, {
+      preflight_id: preflightId,
+      contract_id: opts.contract ?? null,
+      evaluator: opts.actor,
+      verdict: validatePreflightVerdict(opts.verdict),
+      patch_hash: opts.patchHash ?? null,
+      summary,
+      commands: opts.command ?? [],
+      evidence: opts.evidence ?? [],
+      blockers: opts.blocker ?? [],
+      caveats: opts.caveat ?? [],
+    }, { update: opts.update === true });
+    console.log(`Wrote PreflightReport ${preflightId}: ${concept.file}`);
+  });
+
+const okfGate = okf.command("gate").description("Run OKF lifecycle gates");
+
+okfGate.command("export")
+  .description("Check whether the current patch may be exported under OKF lifecycle rules")
+  .option("--contract <id>")
+  .option("--required <kind>", "Required role bundle kind; repeat for multiple entries", collectOption, [])
+  .option("--strict", "Exit non-zero when export gate is not ready")
+  .action((opts) => {
+    const report = buildOkfExportGateReport(rootOpt(), opts.contract ?? null, {
+      requiredRoleBundleKinds: opts.required?.length ? opts.required : undefined,
+    });
+    console.log(renderOkfExportGateReport(report));
+    if (opts.strict === true && !report.ready) process.exitCode = 1;
+  });
+
+okfGate.command("install-pre-push")
+  .description("Install a git pre-push hook that enforces the OKF export gate on push")
+  .option("--contract <id>")
+  .action((opts) => {
+    const result = installOkfPrePushHook(rootOpt(), opts.contract ?? null);
+    if (result.written) console.log(`Installed OKF pre-push hook at ${result.hookPath}`);
+    else console.log(`OKF pre-push hook already up to date at ${result.hookPath}`);
+  });
+
+okfGate.command("consumption")
+  .description("Check whether the active contract has a fresh ConsumptionManifest")
+  .option("--contract <id>")
+  .option("--format <format>", "text | json", "text")
+  .option("--strict", "Exit non-zero when consumption is not fresh")
+  .action((opts) => {
+    const check = checkOkfConsumption(rootOpt(), opts.contract ?? null);
+    if (validateOutputFormat(opts.format) === "json") console.log(JSON.stringify(check, null, 2));
+    else {
+      const lines = [
+        `OKF consumption check${check.contract_id ? ` for ${check.contract_id}` : ""}`,
+        `Fresh: ${check.fresh ? "yes" : "no"}`,
+        check.manifest_id ? `Latest manifest: ${check.manifest_id}` : "Latest manifest: none",
+        check.missing_bundle_ids.length > 0 ? `Missing bundles: ${check.missing_bundle_ids.join(", ")}` : "Missing bundles: none",
+        check.stale_bundle_ids.length > 0 ? `Stale bundles: ${check.stale_bundle_ids.join(", ")}` : "Stale bundles: none",
+        check.reason ?? "All required OKF bundles consumed with fresh hashes.",
+      ];
+      console.log(lines.join("\n"));
+    }
+    if (!check.fresh) process.exitCode = 1;
+  });
+
+okf.command("report")
+  .option("--contract <id>")
+  .option("--required <kind>", "Required role bundle kind; repeat for multiple entries", collectOption, [])
+  .option("--strict", "Exit non-zero when lifecycle warnings are present")
+  .action((opts) => {
+    const required = opts.required?.length ? opts.required : undefined;
+    const text = renderDeliveryOkfReport(rootOpt(), opts.contract ?? null, required);
+    console.log(text);
+    if (opts.strict === true && text.includes("Ready: no")) process.exitCode = 1;
+  });
+
+okf.command("working-set")
+  .argument("<role>")
+  .option("--contract <id>")
+  .option("--required <kind>", "Required role bundle kind; repeat for multiple entries", collectOption, [])
+  .action((role, opts) => {
+    const required = opts.required?.length ? opts.required : undefined;
+    console.log(renderRoleOkfWorkingSet(rootOpt(), role, opts.contract ?? null, required));
+  });
+
+okf.command("list")
+  .description("List delivery OKF concepts with OpenKnowledge-style discovery output")
+  .option("--contract <id>")
+  .option("--kind <kind>", "contract | evaluation | handoff | role-bundle | consumption | preflight")
+  .option("--inactive", "Include stale, superseded, retired, archived, and abandoned concepts")
+  .option("--format <format>", "text | json", "text")
+  .action((opts) => {
+    const entries = listDeliveryOkfInventory(rootOpt(), {
+      contractId: opts.contract ?? null,
+      kind: opts.kind ? validateDeliveryOkfKind(opts.kind) : null,
+      includeInactive: opts.inactive === true,
+    });
+    if (validateOutputFormat(opts.format) === "json") console.log(JSON.stringify(entries, null, 2));
+    else console.log(renderDeliveryOkfInventory(entries));
+  });
+
+okf.command("query")
+  .description("Search OKF Markdown sections with lexical, source-excerpt retrieval")
+  .argument("<text>")
+  .option("--scope <scope>", "all | project | delivery | imported", "all")
+  .option("--contract <id>")
+  .option("--kind <kind>", "Restrict delivery scope to one kind")
+  .option("--inactive", "Include inactive delivery concepts")
+  .option("--budget <tokens>", "Approximate output token budget", parseIntegerOption, 2400)
+  .option("--limit <count>", "Maximum sections", parseIntegerOption, 12)
+  .option("--format <format>", "text | json", "text")
+  .action((text, opts) => {
+    const report = queryOkfBundle(rootOpt(), text, {
+      scope: validateOkfQueryScope(opts.scope),
+      budget: opts.budget,
+      limit: opts.limit,
+      contractId: opts.contract ?? null,
+      kind: opts.kind ? validateDeliveryOkfKind(opts.kind) : null,
+      includeInactive: opts.inactive === true,
+    });
+    if (validateOutputFormat(opts.format) === "json") console.log(JSON.stringify(report, null, 2));
+    else console.log(renderOkfQueryReport(report));
+  });
+
+okf.command("validate")
+  .description("Validate OKF Markdown shape and lifecycle hygiene")
+  .option("--contract <id>", "Also include lifecycle warnings for one contract")
+  .option("--strict", "Exit non-zero on warnings as well as errors")
+  .option("--format <format>", "text | json", "text")
+  .action((opts) => {
+    const report = validateOkfBundle(rootOpt(), opts.contract ?? null);
+    if (validateOutputFormat(opts.format) === "json") console.log(JSON.stringify(report, null, 2));
+    else console.log(renderOkfValidationReport(report));
+    if (!report.ok || (opts.strict === true && report.warnings.length > 0)) process.exitCode = 1;
+  });
+
+okf.command("use")
+  .description("Print a role-scoped OKF working set and optionally record coder consumption evidence")
+  .argument("[role]", "Role to render; defaults to coder", "coder")
+  .option("--contract <id>")
+  .option("--required <kind>", "Required role bundle kind; repeat for multiple entries", collectOption, [])
+  .option("--query <text>", "Also include source excerpts matching this query")
+  .option("--consume-as <agent>", "Coder agent that is consuming active role bundles")
+  .option("--manifest <id>", "ConsumptionManifest id; defaults to use-<contract|all>-<agent>")
+  .option("--consumed <bundle-id>", "Consumed role bundle id; defaults to every active role bundle in scope", collectOption, [])
+  .option("--ignored <bundle-id:reason>", "Ignored role bundle and reason; repeat for multiple entries", collectOption, [])
+  .option("--output <path>", "Implementation output path; repeat for multiple entries", collectOption, [])
+  .option("--summary <text>")
+  .option("--update", "Replace an existing consumption manifest deliberately")
+  .option("--format <format>", "text | json", "text")
+  .action((role, opts) => {
+    const root = rootOpt();
+    const required = opts.required?.length ? opts.required : undefined;
+    const workingSet = renderRoleOkfWorkingSet(root, role, opts.contract ?? null, required);
+    const queryReport = opts.query ? queryOkfBundle(root, opts.query, {
+      scope: "all",
+      contractId: opts.contract ?? null,
+      includeInactive: false,
+    }) : null;
+    let manifest: unknown = null;
+    if (opts.consumeAs) {
+      const consumed = opts.consumed?.length ? opts.consumed : activeRoleBundleIds(root, opts.contract ?? null);
+      const manifestId = opts.manifest ?? `use-${opts.contract ?? "all"}-${opts.consumeAs}`;
+      manifest = recordConsumptionManifest(root, opts.consumeAs, {
+        manifest_id: manifestId,
+        contract_id: opts.contract ?? null,
+        implementation_owner: opts.consumeAs,
+        summary: opts.summary ?? `OKF use by ${opts.consumeAs}: consumed ${consumed.length > 0 ? consumed.join(", ") : "no active role bundles"}.`,
+        consumed_bundles: consumed,
+        ignored_bundles: parseIgnoredBundles(opts.ignored ?? []),
+        output_paths: opts.output ?? [],
+      }, { update: opts.update === true });
+    }
+    if (validateOutputFormat(opts.format) === "json") {
+      console.log(JSON.stringify({ working_set: workingSet, query: queryReport, consumption_manifest: manifest }, null, 2));
+    } else {
+      const parts = [workingSet];
+      if (queryReport) parts.push(renderOkfQueryReport(queryReport));
+      if (manifest && typeof manifest === "object" && "file" in manifest) parts.push(`Recorded ConsumptionManifest: ${(manifest as { file: string }).file}`);
+      console.log(parts.join("\n\n"));
+    }
+  });
+
+okf.command("open")
+  .description("Open or print the local OKF folder path")
+  .option("--scope <scope>", "root | project | delivery | imported", "root")
+  .option("--print", "Only print the path; do not ask the OS to open it")
+  .action((opts) => {
+    const paths = companyPaths(rootOpt());
+    const target = okfOpenTarget(paths, validateOkfOpenScope(opts.scope));
+    if (opts.print === true || process.platform !== "darwin") {
+      console.log(target);
+      return;
+    }
+    const result = spawnSync("open", [target], { encoding: "utf8" });
+    if (result.status !== 0) throw new Error(result.stderr || result.stdout || `open ${target} failed`);
+    console.log(target);
+  });
+
+okf.command("lifecycle")
+  .description("Transition OKF concept lifecycle state")
+  .argument("<kind>", "contract | evaluation | handoff | role-bundle | consumption")
+  .argument("<id>")
+  .requiredOption("--status <status>", "draft | proposed | accepted | active | consumed | resolved | fulfilled | stale | superseded | retired | archived | abandoned")
+  .requiredOption("--reason <text>")
+  .option("--actor <agent>", "Actor; defaults to lead", "lead")
+  .option("--superseded-by <id>")
+  .action((kind, id, opts) => {
+    const concept = transitionDeliveryOkfLifecycle(rootOpt(), opts.actor, validateDeliveryOkfKind(kind), id, {
+      status: validateLifecycleStatus(opts.status),
+      reason: opts.reason,
+      superseded_by: opts.supersededBy ?? null,
+    });
+    console.log(`Transitioned OKF ${kind} ${id} to ${concept.frontmatter.status}: ${concept.file}`);
+  });
+
+okf.command("read")
+  .argument("<kind>", "contract | evaluation | handoff | role-bundle | consumption")
+  .argument("<id>")
+  .action((kind, id) => {
+    const concept = readDeliveryOkfConcept(rootOpt(), validateDeliveryOkfKind(kind), id);
+    if (!concept) throw new Error(`Unknown OKF ${kind} ${id}`);
+    console.log(JSON.stringify(concept, null, 2));
   });
 
 program.command("reduce")
@@ -611,11 +1055,113 @@ function collectOption(value: string, previous: string[]): string[] {
   return [...previous, value];
 }
 
+function parseIntegerOption(value: string): number {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`Expected a positive integer, got ${value}`);
+  return parsed;
+}
+
+function validateOutputFormat(value: unknown): "text" | "json" {
+  const text = String(value ?? "text");
+  if (["text", "json"].includes(text)) return text as "text" | "json";
+  throw new Error(`Invalid output format ${text}. Expected text or json.`);
+}
+
+function validateOkfQueryScope(value: unknown): "all" | "project" | "delivery" | "imported" {
+  const text = String(value ?? "all");
+  if (["all", "project", "delivery", "imported"].includes(text)) return text as "all" | "project" | "delivery" | "imported";
+  throw new Error(`Invalid OKF query scope ${text}. Expected all, project, delivery, or imported.`);
+}
+
+function validateOkfOpenScope(value: unknown): "root" | "project" | "delivery" | "imported" {
+  const text = String(value ?? "root");
+  if (["root", "project", "delivery", "imported"].includes(text)) return text as "root" | "project" | "delivery" | "imported";
+  throw new Error(`Invalid OKF open scope ${text}. Expected root, project, delivery, or imported.`);
+}
+
+function okfOpenTarget(paths: ReturnType<typeof companyPaths>, scope: "root" | "project" | "delivery" | "imported"): string {
+  return ({
+    root: paths.okfDir,
+    project: paths.okfProjectDir,
+    delivery: paths.okfDeliveryDir,
+    imported: paths.okfImportedDir,
+  } satisfies Record<typeof scope, string>)[scope];
+}
+
 function gateEvidenceOptions(opts: { clean?: boolean; caveat?: string[] }): { clean?: boolean; caveats?: string[] } {
   return {
     clean: opts.clean === true ? true : undefined,
     caveats: opts.caveat ?? [],
   };
+}
+
+function validateDeliveryOkfKind(value: unknown): DeliveryOkfKind {
+  const text = String(value);
+  if (["contract", "evaluation", "handoff", "role-bundle", "consumption", "preflight"].includes(text)) return text as DeliveryOkfKind;
+  throw new Error(`Invalid OKF kind ${text}. Expected contract, evaluation, handoff, role-bundle, consumption, or preflight.`);
+}
+
+function validatePreflightVerdict(value: unknown): "pass" | "fail" | "blocked" {
+  const text = String(value);
+  if (["pass", "fail", "blocked"].includes(text)) return text as "pass" | "fail" | "blocked";
+  throw new Error(`Invalid preflight verdict ${text}.`);
+}
+
+function validateRoleBundleKind(value: unknown): RoleBundleKind {
+  const text = String(value);
+  if (["product_quality_bar", "gameplay_design", "visual_art_direction", "research_brief"].includes(text)) return text as RoleBundleKind;
+  throw new Error(`Invalid role bundle kind ${text}.`);
+}
+
+function parseIgnoredBundles(values: string[]): Array<{ bundle_id: string; reason: string }> {
+  return values.map((value) => {
+    const [bundleId, ...reasonParts] = value.split(":");
+    const reason = reasonParts.join(":").trim();
+    if (!bundleId || !reason) throw new Error(`Invalid --ignored value ${value}. Expected <bundle-id:reason>.`);
+    return { bundle_id: bundleId.trim(), reason };
+  });
+}
+
+function validateOkfStatus(value: unknown): "draft" | "active" | "fulfilled" | "superseded" | "abandoned" {
+  const text = String(value);
+  if (["draft", "active", "fulfilled", "superseded", "abandoned"].includes(text)) {
+    return text as "draft" | "active" | "fulfilled" | "superseded" | "abandoned";
+  }
+  throw new Error(`Invalid SprintContract status ${text}.`);
+}
+
+function validateLifecycleStatus(value: unknown): OkfLifecycleStatus {
+  const text = String(value);
+  if (["draft", "proposed", "accepted", "active", "consumed", "resolved", "fulfilled", "stale", "superseded", "retired", "archived", "abandoned"].includes(text)) {
+    return text as OkfLifecycleStatus;
+  }
+  throw new Error(`Invalid OKF lifecycle status ${text}.`);
+}
+
+function validateFindingKind(value: unknown): "review" | "test" | "acceptance" | "system" {
+  const text = String(value);
+  if (["review", "test", "acceptance", "system"].includes(text)) return text as "review" | "test" | "acceptance" | "system";
+  throw new Error(`Invalid finding kind ${text}.`);
+}
+
+function validateFindingVerdict(value: unknown): "pass" | "fail" | "blocked" | "comment" | "approve" | "request_changes" | "accept" {
+  const text = String(value);
+  if (["pass", "fail", "blocked", "comment", "approve", "request_changes", "accept"].includes(text)) {
+    return text as "pass" | "fail" | "blocked" | "comment" | "approve" | "request_changes" | "accept";
+  }
+  throw new Error(`Invalid finding verdict ${text}.`);
+}
+
+function validateFindingSeverity(value: unknown): "blocking" | "improvement" | "note" {
+  const text = String(value);
+  if (["blocking", "improvement", "note"].includes(text)) return text as "blocking" | "improvement" | "note";
+  throw new Error(`Invalid finding severity ${text}.`);
+}
+
+function validateFindingStatus(value: unknown): "active" | "resolved" | "superseded" {
+  const text = String(value);
+  if (["active", "resolved", "superseded"].includes(text)) return text as "active" | "resolved" | "superseded";
+  throw new Error(`Invalid finding status ${text}.`);
 }
 
 function printStatus(root: string, state: ReturnType<typeof loadState>): void {

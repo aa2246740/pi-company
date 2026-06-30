@@ -5,6 +5,7 @@ import path from "node:path";
 const root = process.cwd();
 
 const ignoredDirectories = new Set([
+  ".ai-bridge",
   ".cache",
   ".git",
   ".pi-company",

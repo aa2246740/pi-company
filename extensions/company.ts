@@ -12,10 +12,12 @@ import {
   assignIssue,
   blockTask,
   buildLeadBrief,
+  buildOkfExportGateReport,
   clearRateLimit,
   completeTask,
   createIssue,
   createPr,
+  createSprintContract,
   ensureCoderWorktree,
   ensurePendingMergeReminder,
   getPrGateStatus,
@@ -31,6 +33,8 @@ import {
   normalizeLifecyclePolicy,
   pendingMergeRequests,
   planAgentSpawn,
+  recordConsumptionManifest,
+  recordPreflightReport,
   reportRateLimit,
   recordAgentLaunch,
   recordAgentRuntime,
@@ -41,15 +45,33 @@ import {
   requestAgentSpawn,
   requestMerge,
   rateLimitIsActive,
+  renderDeliveryOkfReport,
+  renderOkfExportGateReport,
+  renderRoleOkfWorkingSet,
   renderLeadBrief,
   sendCompanyMessage,
   shouldAutoDeliverMessage,
   startTask,
   setModelPolicy,
   submitAcceptance,
+  submitEvaluationFinding,
   submitReview,
   submitTest,
+  transitionDeliveryOkfLifecycle,
+  writeRoleBundle,
+  writeStructuredHandoff,
 } from "../src/core/company.js";
+import {
+  activeRoleBundleIds,
+  listDeliveryOkfInventory,
+  queryOkfBundle,
+  readDeliveryOkfConcept,
+  renderDeliveryOkfInventory,
+  renderOkfQueryReport,
+  renderOkfValidationReport,
+  validateOkfBundle,
+} from "../src/core/okf.js";
+import { checkOkfConsumption } from "../src/core/company.js";
 import { parseCmuxSurfaceRef } from "../src/core/cmux.js";
 import {
   acquireProviderRequestLease,
@@ -111,6 +133,80 @@ const automatedTestStatusSchema = Type.Union([
   Type.Literal("passed"),
   Type.Literal("failed"),
   Type.Literal("blocked"),
+]);
+
+const okfDeliveryKindSchema = Type.Union([
+  Type.Literal("contract"),
+  Type.Literal("evaluation"),
+  Type.Literal("handoff"),
+  Type.Literal("role-bundle"),
+  Type.Literal("consumption"),
+  Type.Literal("preflight"),
+]);
+
+const sprintContractStatusSchema = Type.Union([
+  Type.Literal("draft"),
+  Type.Literal("active"),
+  Type.Literal("fulfilled"),
+  Type.Literal("superseded"),
+  Type.Literal("abandoned"),
+]);
+
+const evaluationFindingKindSchema = Type.Union([
+  Type.Literal("review"),
+  Type.Literal("test"),
+  Type.Literal("acceptance"),
+  Type.Literal("system"),
+]);
+
+const evaluationFindingVerdictSchema = Type.Union([
+  Type.Literal("pass"),
+  Type.Literal("fail"),
+  Type.Literal("blocked"),
+  Type.Literal("comment"),
+  Type.Literal("approve"),
+  Type.Literal("request_changes"),
+  Type.Literal("accept"),
+]);
+
+const evaluationFindingSeveritySchema = Type.Union([
+  Type.Literal("blocking"),
+  Type.Literal("improvement"),
+  Type.Literal("note"),
+]);
+
+const evaluationFindingStatusSchema = Type.Union([
+  Type.Literal("active"),
+  Type.Literal("resolved"),
+  Type.Literal("superseded"),
+]);
+
+const preflightVerdictSchema = Type.Union([
+  Type.Literal("pass"),
+  Type.Literal("fail"),
+  Type.Literal("blocked"),
+]);
+
+const okfLifecycleStatusSchema = Type.Union([
+  Type.Literal("draft"),
+  Type.Literal("proposed"),
+  Type.Literal("accepted"),
+  Type.Literal("active"),
+  Type.Literal("consumed"),
+  Type.Literal("resolved"),
+  Type.Literal("fulfilled"),
+  Type.Literal("stale"),
+  Type.Literal("superseded"),
+  Type.Literal("retired"),
+  Type.Literal("archived"),
+  Type.Literal("abandoned"),
+]);
+
+const roleBundleKindSchema = Type.Union([
+  Type.Literal("product_quality_bar"),
+  Type.Literal("gameplay_design"),
+  Type.Literal("visual_art_direction"),
+  Type.Literal("research_brief"),
 ]);
 
 const rateLimitKindSchema = Type.Union([
@@ -205,6 +301,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
     registerTools(pi, {
       root,
       agentName,
+      role,
       lead,
       isPaused: () => companyPaused,
       refreshUi,
@@ -773,6 +870,12 @@ function workerToolBlockReason(event: { toolName: string; input: Record<string, 
       if (scope.rootScoped && isProtectedProjectControlPath(root, target)) {
         return `pi-company root-scoped coder ${agent.name} cannot write pi-company or git control paths.`;
       }
+      // OKF enforcement (hook/gate-first): block implementation writes until the
+      // coder has a fresh ConsumptionManifest for the active contract. This is the
+      // agent-internal mirror of the git pre-push export gate. Permits .pi-company
+      // and control paths so the manifest/role-bundle can be written first.
+      const okfBlock = okfConsumptionBlockReason(root, target, agent);
+      if (okfBlock) return okfBlock;
       return null;
     }
     const allowed = nonCoderAllowedWriteReason(agent, target, root);
@@ -797,6 +900,36 @@ function workerToolBlockReason(event: { toolName: string; input: Record<string, 
 type CoderMutationScope =
   | { allowed: true; root: string; label: string; rootScoped: boolean }
   | { allowed: false; reason: string };
+
+function okfConsumptionBlockReason(root: string, target: string, agent: AgentRecord): string | null {
+  // Only enforce when there is a pi-company project AND the write targets real
+  // implementation files (not .pi-company knowledge itself).
+  if (!fs.existsSync(path.join(root, ".pi-company"))) return null;
+  const piCompanyDir = path.join(root, ".pi-company");
+  const normalized = path.resolve(target);
+  if (normalized === piCompanyDir || normalized.startsWith(piCompanyDir + path.sep)) return null;
+  // Only one contract is expected to be active at a time; check it.
+  let contractId: string | null = null;
+  try {
+    const concepts = listDeliveryOkfInventory(root, { kind: "contract", includeInactive: false });
+    const active = concepts.find((entry) => entry.status === "active");
+    if (!active) return null;
+    contractId = active.id;
+  } catch {
+    return null;
+  }
+  let check;
+  try {
+    check = checkOkfConsumption(root, contractId);
+  } catch {
+    return null;
+  }
+  if (check.fresh) return null;
+  const reConsume = check.manifest_id
+    ? `Re-consume updated bundles: \`okf use coder --contract ${contractId} --consume-as ${agent.name} --manifest ${check.manifest_id} --update\`.`
+    : `Record consumption: \`okf use coder --contract ${contractId} --consume-as ${agent.name}\`.`;
+  return `pi-company OKF enforcement: cannot edit implementation until OKF context is consumed. ${check.reason ?? ""} ${reConsume} This guard mirrors the git pre-push export gate; it ensures implementation is bound to auditable OKF consumption.`;
+}
 
 function coderMutationScope(agent: AgentRecord, root: string): CoderMutationScope {
   if (agent.worktree) {
@@ -1290,11 +1423,12 @@ function readRolePrompt(root: string, role: string): string {
 function registerTools(pi: ExtensionAPI, runtime: {
   root: string;
   agentName: string;
+  role: string;
   lead: string;
   isPaused(): boolean;
   refreshUi(ctx: ExtensionContext): Promise<void>;
 }): void {
-  const { root, agentName, lead, isPaused, refreshUi } = runtime;
+  const { root, agentName, role, lead, isPaused, refreshUi } = runtime;
   const registerCompanyTool: ExtensionAPI["registerTool"] = (tool) => {
     const execute = tool.execute;
     return pi.registerTool({
@@ -1340,6 +1474,501 @@ function registerTools(pi: ExtensionAPI, runtime: {
       await refreshUi(ctx);
       const brief = buildLeadBrief(root);
       return toolResult(renderLeadBrief(brief), { brief });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_create_sprint_contract",
+    label: "Create SprintContract",
+    description: "Lead-only helper to write a descriptive OKF SprintContract for delivery memory. It does not create or modify runtime issues or gates.",
+    promptSnippet: "Write an OKF SprintContract after an issue or sprint scope is stable enough to preserve as descriptive delivery memory.",
+    promptGuidelines: [
+      "Use this for OKF context only; runtime issues, events, PRs, tests, and merge gates remain authoritative.",
+      "Do not use a SprintContract as proof that work is complete. Check company_lead_brief and PR gates for runtime truth.",
+      "Use stable, path-safe contract_id values without slashes, hidden segments, or parent traversal.",
+    ],
+    parameters: Type.Object({
+      contract_id: Type.String(),
+      title: Type.String(),
+      owner: Type.String(),
+      scope: Type.String(),
+      issue_id: Type.Optional(Type.String()),
+      done_criteria: Type.Optional(Type.Array(Type.String())),
+      non_goals: Type.Optional(Type.Array(Type.String())),
+      required_evidence: Type.Optional(Type.Array(Type.String())),
+      evaluator_roles: Type.Optional(Type.Array(Type.String())),
+      status: Type.Optional(sprintContractStatusSchema),
+      update: Type.Optional(Type.Boolean({ description: "Replace an existing concept deliberately." })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const concept = createSprintContract(root, agentName, {
+        contract_id: params.contract_id,
+        issue_id: params.issue_id ?? null,
+        title: params.title,
+        owner: params.owner,
+        scope: params.scope,
+        done_criteria: params.done_criteria ?? [],
+        non_goals: params.non_goals ?? [],
+        required_evidence: params.required_evidence ?? [],
+        evaluator_roles: params.evaluator_roles ?? [],
+        status: params.status ?? "draft",
+      }, { update: params.update === true });
+      await refreshUi(ctx);
+      return toolResult(`Wrote SprintContract ${params.contract_id}: ${concept.file}`, { concept });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_record_evaluation_finding",
+    label: "Record EvaluationFinding",
+    description: "Role-scoped helper to write a descriptive OKF EvaluationFinding. It supports review/test/acceptance memory but does not satisfy PR gates.",
+    promptSnippet: "Record a durable OKF finding after submitting or investigating review, test, acceptance, or system evidence.",
+    promptGuidelines: [
+      "Submit runtime review/test/acceptance evidence with the existing company tools first when a PR gate must change.",
+      "Use this OKF finding as supporting memory only; it does not replace review.submitted, test.submitted, acceptance.submitted, automated tests, or merge gates.",
+      "Record concrete evidence and caveats truthfully; never turn caveated evidence into a clean pass.",
+    ],
+    parameters: Type.Object({
+      finding_id: Type.String(),
+      kind: evaluationFindingKindSchema,
+      verdict: evaluationFindingVerdictSchema,
+      summary: Type.String(),
+      contract_id: Type.Optional(Type.String()),
+      target: Type.Optional(Type.String()),
+      severity: Type.Optional(evaluationFindingSeveritySchema),
+      status: Type.Optional(evaluationFindingStatusSchema),
+      resolved_by: Type.Optional(Type.String()),
+      resolution_evidence: Type.Optional(Type.Array(Type.String())),
+      pr_id: Type.Optional(Type.String()),
+      pr_head: Type.Optional(Type.String()),
+      evidence: Type.Optional(Type.Array(Type.String())),
+      blockers: Type.Optional(Type.Array(Type.String())),
+      caveats: Type.Optional(Type.Array(Type.String())),
+      update: Type.Optional(Type.Boolean({ description: "Replace an existing concept deliberately." })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const concept = submitEvaluationFinding(root, agentName, {
+        finding_id: params.finding_id,
+        contract_id: params.contract_id ?? null,
+        pr_id: params.pr_id ?? null,
+        pr_head: params.pr_head ?? null,
+        kind: params.kind,
+        evaluator: agentName,
+        verdict: params.verdict,
+        severity: params.severity ?? "note",
+        target: params.target ?? null,
+        status: params.status ?? "active",
+        resolved_by: params.resolved_by ?? null,
+        resolution_evidence: params.resolution_evidence ?? [],
+        summary: params.summary,
+        evidence: params.evidence ?? [],
+        blockers: params.blockers ?? [],
+        caveats: params.caveats ?? [],
+      }, { update: params.update === true });
+      await refreshUi(ctx);
+      return toolResult(`Wrote EvaluationFinding ${params.finding_id}: ${concept.file}`, { concept });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_write_structured_handoff",
+    label: "Write StructuredHandoff",
+    description: "Write a descriptive OKF StructuredHandoff for durable role/session context transfer. It does not change task ownership or PR gates.",
+    promptSnippet: "Write an OKF handoff when another role/session needs durable context, blockers, and next actions.",
+    promptGuidelines: [
+      "Use this for context transfer only. Runtime events, issue assignment, git state, and PR gates remain authoritative.",
+      "If ownership must change, also use company_assign_issue or the appropriate runtime tool; the handoff itself does not reassign work.",
+      "Include blockers and next actions with enough evidence for the next owner to resume without stale chat memory.",
+    ],
+    parameters: Type.Object({
+      handoff_id: Type.String(),
+      from: Type.String(),
+      to: Type.String(),
+      summary: Type.String(),
+      current_owner: Type.Optional(Type.String()),
+      next_owner: Type.Optional(Type.String()),
+      contract_id: Type.Optional(Type.String()),
+      issue_id: Type.Optional(Type.String()),
+      pr_id: Type.Optional(Type.String()),
+      branch: Type.Optional(Type.String()),
+      head: Type.Optional(Type.String()),
+      blockers: Type.Optional(Type.Array(Type.String())),
+      next_actions: Type.Optional(Type.Array(Type.String())),
+      update: Type.Optional(Type.Boolean({ description: "Replace an existing concept deliberately." })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const concept = writeStructuredHandoff(root, agentName, {
+        handoff_id: params.handoff_id,
+        from: params.from,
+        to: params.to,
+        summary: params.summary,
+        current_owner: params.current_owner ?? null,
+        next_owner: params.next_owner ?? null,
+        contract_id: params.contract_id ?? null,
+        issue_id: params.issue_id ?? null,
+        pr_id: params.pr_id ?? null,
+        branch: params.branch ?? null,
+        head: params.head ?? null,
+        blockers: params.blockers ?? [],
+        next_actions: params.next_actions ?? [],
+      }, { update: params.update === true });
+      await refreshUi(ctx);
+      return toolResult(`Wrote StructuredHandoff ${params.handoff_id}: ${concept.file}`, { concept });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_read_delivery_okf",
+    label: "Read Delivery OKF",
+    description: "Read a descriptive OKF delivery concept by kind and id.",
+    promptSnippet: "Read OKF delivery memory for context, then verify runtime truth through company_lead_brief or PR gates before making execution claims.",
+    promptGuidelines: [
+      "Treat returned OKF as descriptive context only, not as permission, assignment, gate evidence, or completion truth.",
+      "Use company_lead_brief and PR gate tools for authoritative runtime state.",
+    ],
+    parameters: Type.Object({
+      kind: okfDeliveryKindSchema,
+      id: Type.String(),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const concept = readDeliveryOkfConcept(root, params.kind, params.id);
+      await refreshUi(ctx);
+      if (!concept) return toolResult(`No OKF ${params.kind} found for ${params.id}`, { concept: null });
+      return toolResult(`${concept.frontmatter.type ?? params.kind} ${params.id}: ${concept.file}\n\n${concept.body.trim()}`, { concept });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_write_role_bundle",
+    label: "Write Role Bundle",
+    description: "Write a role-specialized OKF bundle such as product quality bar, gameplay design, visual art direction, or research brief.",
+    promptSnippet: "Before implementation, specialist roles should write concise role bundles that coders can selectively consume.",
+    promptGuidelines: [
+      "Use this as specialist context only. Runtime events, issue assignment, and PR gates remain authoritative.",
+      "PM owns product_quality_bar; designer owns gameplay_design and visual_art_direction; researcher owns research_brief.",
+      "Make guidance concrete enough that the coder can cite it in a consumption manifest.",
+    ],
+    parameters: Type.Object({
+      bundle_id: Type.String(),
+      kind: roleBundleKindSchema,
+      title: Type.String(),
+      summary: Type.String(),
+      contract_id: Type.Optional(Type.String()),
+      guidance: Type.Optional(Type.Array(Type.String())),
+      acceptance_criteria: Type.Optional(Type.Array(Type.String())),
+      references: Type.Optional(Type.Array(Type.String())),
+      update: Type.Optional(Type.Boolean({ description: "Replace an existing concept deliberately." })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const concept = writeRoleBundle(root, agentName, {
+        bundle_id: params.bundle_id,
+        kind: params.kind,
+        contract_id: params.contract_id ?? null,
+        author: agentName,
+        title: params.title,
+        summary: params.summary,
+        guidance: params.guidance ?? [],
+        acceptance_criteria: params.acceptance_criteria ?? [],
+        references: params.references ?? [],
+      }, { update: params.update === true });
+      await refreshUi(ctx);
+      return toolResult(`Wrote RoleBundle ${params.bundle_id}: ${concept.file}`, { concept });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_record_consumption_manifest",
+    label: "Record Consumption Manifest",
+    description: "Coder-only helper to record which role bundles implementation consumed or ignored.",
+    promptSnippet: "After reading role bundles and before/following implementation, record exactly which specialist context influenced the code.",
+    promptGuidelines: [
+      "This makes clean context consumption auditable; it does not prove quality or satisfy gates.",
+      "List every role bundle you used in consumed_bundles. If you ignore a bundle, provide a reason.",
+      "Point output_paths at the files changed by the implementation.",
+    ],
+    parameters: Type.Object({
+      manifest_id: Type.String(),
+      summary: Type.String(),
+      contract_id: Type.Optional(Type.String()),
+      consumed_bundles: Type.Optional(Type.Array(Type.String())),
+      ignored_bundles: Type.Optional(Type.Array(Type.Object({
+        bundle_id: Type.String(),
+        reason: Type.String(),
+      }))),
+      output_paths: Type.Optional(Type.Array(Type.String())),
+      update: Type.Optional(Type.Boolean({ description: "Replace an existing concept deliberately." })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const concept = recordConsumptionManifest(root, agentName, {
+        manifest_id: params.manifest_id,
+        contract_id: params.contract_id ?? null,
+        implementation_owner: agentName,
+        summary: params.summary,
+        consumed_bundles: params.consumed_bundles ?? [],
+        ignored_bundles: params.ignored_bundles ?? [],
+        output_paths: params.output_paths ?? [],
+      }, { update: params.update === true });
+      await refreshUi(ctx);
+      return toolResult(`Wrote ImplementationConsumptionManifest ${params.manifest_id}: ${concept.file}`, { concept });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_record_preflight_report",
+    label: "Record PreflightReport",
+    description: "Evaluator-scoped helper to bind real preflight commands/evidence to the current patch hash before export.",
+    promptSnippet: "After running focused tests or review checks, record a PreflightReport before any patch export or completion claim.",
+    promptGuidelines: [
+      "Use verdict=pass only when the commands/evidence support the SprintContract and preserved behavior risks.",
+      "This tool automatically records the current git patch hash so later edits stale the preflight gate.",
+      "If any check is caveated, blocked, or failing, record fail/blocked and submit EvaluationFindings for blockers.",
+    ],
+    parameters: Type.Object({
+      preflight_id: Type.String(),
+      contract_id: Type.Optional(Type.String()),
+      verdict: preflightVerdictSchema,
+      summary: Type.String(),
+      commands: Type.Optional(Type.Array(Type.String())),
+      evidence: Type.Optional(Type.Array(Type.String())),
+      blockers: Type.Optional(Type.Array(Type.String())),
+      caveats: Type.Optional(Type.Array(Type.String())),
+      patch_hash: Type.Optional(Type.String({ description: "Override patch hash; defaults to current git diff hash." })),
+      update: Type.Optional(Type.Boolean({ description: "Replace an existing concept deliberately." })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const concept = recordPreflightReport(root, agentName, {
+        preflight_id: params.preflight_id,
+        contract_id: params.contract_id ?? null,
+        evaluator: agentName,
+        verdict: params.verdict,
+        patch_hash: params.patch_hash ?? null,
+        summary: params.summary,
+        commands: params.commands ?? [],
+        evidence: params.evidence ?? [],
+        blockers: params.blockers ?? [],
+        caveats: params.caveats ?? [],
+      }, { update: params.update === true });
+      await refreshUi(ctx);
+      return toolResult(`Wrote PreflightReport ${params.preflight_id}: ${concept.file}`, { concept });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_okf_export_gate",
+    label: "OKF Export Gate",
+    description: "Check whether the current patch may be exported under OKF lifecycle rules.",
+    promptSnippet: "Run this before claiming done, handing off for export, or asking lead to submit a patch.",
+    promptGuidelines: [
+      "If ready=false, satisfy the blockers instead of claiming completion.",
+      "A pass requires fresh consumption manifests, required role bundles, no blocking findings, and a preflight report matching the current patch hash.",
+      "The official benchmark or CI remains authoritative; this is a lifecycle gate before export.",
+    ],
+    parameters: Type.Object({
+      contract_id: Type.Optional(Type.String()),
+      required_role_bundle_kinds: Type.Optional(Type.Array(Type.String())),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const report = buildOkfExportGateReport(root, params.contract_id ?? null, {
+        requiredRoleBundleKinds: params.required_role_bundle_kinds ?? undefined,
+      });
+      const text = renderOkfExportGateReport(report);
+      await refreshUi(ctx);
+      return toolResult(text, { report });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_delivery_okf_report",
+    label: "Delivery OKF Report",
+    description: "Read a collaboration-hygiene report for role bundles, consumption manifests, and unresolved blocking OKF findings.",
+    promptSnippet: "Before implementation handoff or final claims, check whether specialist role bundles were produced and consumed.",
+    promptGuidelines: [
+      "This report is an OKF collaboration audit only; it is not a merge gate and does not replace company_lead_brief.",
+      "Treat missing role bundles, missing consumption manifests, and unresolved blocking findings as process warnings to resolve or explicitly explain.",
+    ],
+    parameters: Type.Object({
+      contract_id: Type.Optional(Type.String()),
+      required_role_bundle_kinds: Type.Optional(Type.Array(Type.String())),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const text = renderDeliveryOkfReport(root, params.contract_id ?? null, params.required_role_bundle_kinds ?? undefined);
+      await refreshUi(ctx);
+      return toolResult(text, { report: text });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_okf_working_set",
+    label: "OKF Working Set",
+    description: "Render the bounded active OKF working set and lifecycle protocol for a role.",
+    promptSnippet: "Use the OKF working set at the start of a role turn to avoid stale or retired context.",
+    promptGuidelines: [
+      "Read active/accepted OKF only; stale, retired, superseded, archived, and abandoned concepts are historical unless lead revives them.",
+      "Coders must record a consumption manifest before relying on role bundles for implementation.",
+      "Evaluators should submit blocking findings for missing behavior instead of relying on coder self-evaluation.",
+    ],
+    parameters: Type.Object({
+      role: Type.Optional(Type.String()),
+      contract_id: Type.Optional(Type.String()),
+      required_role_bundle_kinds: Type.Optional(Type.Array(Type.String())),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const text = renderRoleOkfWorkingSet(root, params.role ?? role, params.contract_id ?? null, params.required_role_bundle_kinds ?? undefined);
+      await refreshUi(ctx);
+      return toolResult(text, { working_set: text });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_okf_list",
+    label: "OKF List",
+    description: "List delivery OKF concepts with OpenKnowledge-style discovery output.",
+    promptSnippet: "List active OKF delivery concepts before deciding what context to read or consume.",
+    promptGuidelines: [
+      "This is discovery only; runtime state, git, tests, and PR gates remain authoritative.",
+      "Use contract_id to keep the working set bounded during implementation or evaluation.",
+    ],
+    parameters: Type.Object({
+      contract_id: Type.Optional(Type.String()),
+      kind: Type.Optional(okfDeliveryKindSchema),
+      include_inactive: Type.Optional(Type.Boolean()),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const entries = listDeliveryOkfInventory(root, {
+        contractId: params.contract_id ?? null,
+        kind: params.kind ?? null,
+        includeInactive: params.include_inactive === true,
+      });
+      const text = renderDeliveryOkfInventory(entries);
+      await refreshUi(ctx);
+      return toolResult(text, { entries });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_okf_query",
+    label: "OKF Query",
+    description: "Search OKF Markdown with lexical, source-excerpt retrieval.",
+    promptSnippet: "Query OKF when you know the topic but not the exact concept path.",
+    promptGuidelines: [
+      "Returned sections are source excerpts, not generated summaries.",
+      "Use query results as context only; verify runtime truth separately.",
+    ],
+    parameters: Type.Object({
+      query: Type.String(),
+      scope: Type.Optional(Type.String({ description: "all, project, delivery, or imported." })),
+      contract_id: Type.Optional(Type.String()),
+      kind: Type.Optional(okfDeliveryKindSchema),
+      include_inactive: Type.Optional(Type.Boolean()),
+      budget: Type.Optional(Type.Number()),
+      limit: Type.Optional(Type.Number()),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const scope = ["all", "project", "delivery", "imported"].includes(params.scope ?? "all")
+        ? params.scope as "all" | "project" | "delivery" | "imported"
+        : "all";
+      const report = queryOkfBundle(root, params.query, {
+        scope,
+        contractId: params.contract_id ?? null,
+        kind: params.kind ?? null,
+        includeInactive: params.include_inactive === true,
+        budget: params.budget,
+        limit: params.limit,
+      });
+      await refreshUi(ctx);
+      return toolResult(renderOkfQueryReport(report), { report });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_okf_validate",
+    label: "OKF Validate",
+    description: "Validate OKF Markdown shape and lifecycle hygiene.",
+    promptSnippet: "Run OKF validation after meaningful OKF edits or before export handoff.",
+    promptGuidelines: [
+      "Validation checks OKF shape and lifecycle hygiene only; it does not replace tests or PR gates.",
+      "Treat errors as blockers and warnings as risks to resolve or explicitly justify.",
+    ],
+    parameters: Type.Object({
+      contract_id: Type.Optional(Type.String()),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const report = validateOkfBundle(root, params.contract_id ?? null);
+      await refreshUi(ctx);
+      return toolResult(renderOkfValidationReport(report), { report });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_okf_use",
+    label: "OKF Use",
+    description: "Render role-scoped OKF and optionally record coder ConsumptionManifest evidence.",
+    promptSnippet: "Use this at the start of implementation to bind active role-bundle consumption to an auditable manifest.",
+    promptGuidelines: [
+      "Reading OKF is not enough for gated delivery; coders should record consumption when bundle guidance influences code.",
+      "The consumption manifest is evidence of context flow, not a quality pass or test result.",
+    ],
+    parameters: Type.Object({
+      role: Type.Optional(Type.String()),
+      contract_id: Type.Optional(Type.String()),
+      record_consumption: Type.Optional(Type.Boolean()),
+      manifest_id: Type.Optional(Type.String()),
+      consumed_bundles: Type.Optional(Type.Array(Type.String())),
+      ignored_bundles: Type.Optional(Type.Array(Type.Object({
+        bundle_id: Type.String(),
+        reason: Type.String(),
+      }))),
+      output_paths: Type.Optional(Type.Array(Type.String())),
+      summary: Type.Optional(Type.String()),
+      update: Type.Optional(Type.Boolean()),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const targetRole = params.role ?? role;
+      const text = renderRoleOkfWorkingSet(root, targetRole, params.contract_id ?? null);
+      let concept = null;
+      if (params.record_consumption === true) {
+        const consumed = params.consumed_bundles?.length ? params.consumed_bundles : activeRoleBundleIds(root, params.contract_id ?? null);
+        const manifestId = params.manifest_id ?? `use-${params.contract_id ?? "all"}-${agentName}`;
+        concept = recordConsumptionManifest(root, agentName, {
+          manifest_id: manifestId,
+          contract_id: params.contract_id ?? null,
+          implementation_owner: agentName,
+          summary: params.summary ?? `OKF use by ${agentName}: consumed ${consumed.length > 0 ? consumed.join(", ") : "no active role bundles"}.`,
+          consumed_bundles: consumed,
+          ignored_bundles: params.ignored_bundles ?? [],
+          output_paths: params.output_paths ?? [],
+        }, { update: params.update === true });
+      }
+      await refreshUi(ctx);
+      return toolResult(concept ? `${text}\n\nRecorded ConsumptionManifest: ${concept.file}` : text, { working_set: text, consumption_manifest: concept });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_transition_okf_lifecycle",
+    label: "Transition OKF Lifecycle",
+    description: "Lead-only tool to mark OKF concepts stale, retired, superseded, archived, active, or accepted.",
+    promptSnippet: "Lead should retire sprint-scoped OKF at handoff and mark stale concepts when source facts or bundles change.",
+    promptGuidelines: [
+      "Only lead should transition lifecycle state; this is maintenance metadata, not runtime truth.",
+      "Use retired/archived for sprint-scoped OKF that must leave the active working set.",
+      "Use stale when a concept is still relevant but must be refreshed before consumption.",
+    ],
+    parameters: Type.Object({
+      kind: okfDeliveryKindSchema,
+      id: Type.String(),
+      status: okfLifecycleStatusSchema,
+      reason: Type.String(),
+      superseded_by: Type.Optional(Type.String()),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const concept = transitionDeliveryOkfLifecycle(root, agentName, params.kind, params.id, {
+        status: params.status,
+        reason: params.reason,
+        superseded_by: params.superseded_by ?? null,
+      });
+      await refreshUi(ctx);
+      return toolResult(`Transitioned OKF ${params.kind} ${params.id} to ${params.status}: ${concept.file}`, { concept });
     },
   });
 

@@ -10,6 +10,8 @@ export function resolveProjectRoot(cwd = process.cwd()): string {
 export function companyPaths(root = process.cwd()): CompanyPaths {
   const resolved = resolveProjectRoot(root);
   const dir = path.join(resolved, COMPANY_DIR);
+  const okfDir = path.join(dir, "okf");
+  const runtimeDir = path.join(dir, "runtime");
   return {
     root: resolved,
     dir,
@@ -22,9 +24,15 @@ export function companyPaths(root = process.cwd()): CompanyPaths {
     issuesDir: path.join(dir, "issues"),
     prsDir: path.join(dir, "prs"),
     worktreesDir: path.join(dir, "worktrees"),
-    runtimeDir: path.join(dir, "runtime"),
-    runtimeAgentsDir: path.join(dir, "runtime", "agents"),
-    runtimeRecoveryDir: path.join(dir, "runtime", "recovery"),
+    runtimeDir,
+    runtimeAgentsDir: path.join(runtimeDir, "agents"),
+    runtimeRecoveryDir: path.join(runtimeDir, "recovery"),
+    metaDir: path.join(dir, "meta"),
+    initLock: path.join(dir, "meta", "init.lock"),
+    okfDir,
+    okfProjectDir: path.join(okfDir, "project"),
+    okfDeliveryDir: path.join(okfDir, "delivery"),
+    okfImportedDir: path.join(okfDir, "imported"),
   };
 }
 

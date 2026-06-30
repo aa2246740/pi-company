@@ -355,4 +355,10 @@ export interface CompanyPaths {
   runtimeDir: string;
   runtimeAgentsDir: string;
   runtimeRecoveryDir: string;
+  metaDir: string;
+  initLock: string;
+  okfDir: string;
+  okfProjectDir: string;
+  okfDeliveryDir: string;
+  okfImportedDir: string;
 }

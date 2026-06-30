@@ -26,6 +26,7 @@ import {
   submitTest,
 } from "../src/core/company.js";
 import { writeYaml } from "../src/core/io.js";
+import { readDeliveryOkfConcept } from "../src/core/okf.js";
 import { companyPaths } from "../src/core/paths.js";
 import { providerQueueSnapshot } from "../src/core/provider-queue.js";
 
@@ -149,6 +150,13 @@ describe("pi-company extension", () => {
 
     expect(loadConfig(root)?.id).toBe("friendly-company");
     expect(tools.some((tool) => tool.name === "company_status")).toBe(true);
+    expect(tools.some((tool) => tool.name === "company_create_sprint_contract")).toBe(true);
+    expect(tools.some((tool) => tool.name === "company_record_evaluation_finding")).toBe(true);
+    expect(tools.some((tool) => tool.name === "company_write_structured_handoff")).toBe(true);
+    expect(tools.some((tool) => tool.name === "company_read_delivery_okf")).toBe(true);
+    expect(tools.some((tool) => tool.name === "company_write_role_bundle")).toBe(true);
+    expect(tools.some((tool) => tool.name === "company_record_consumption_manifest")).toBe(true);
+    expect(tools.some((tool) => tool.name === "company_delivery_okf_report")).toBe(true);
     expect(tools.some((tool) => tool.name === "company_record_automated_tests")).toBe(true);
     expect(tools.some((tool) => tool.name === "company_record_auto_tests")).toBe(true);
     expect(ui.setWidget).toHaveBeenCalledWith(
@@ -162,6 +170,38 @@ describe("pi-company extension", () => {
     expect(ui.setStatus).toHaveBeenCalledWith("pi-company", "lead/lead inbox:0 · active");
     expect(ui.notify).toHaveBeenCalledWith(expect.stringContaining("Initialized pi-company"), "info");
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
+  });
+
+  it("exposes delivery OKF tools as descriptive context helpers", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-okf-tools" });
+    const { tools, pi } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx } = fakeContext(root);
+    companyExtension(pi);
+    const contractTool = tools.find((tool) => tool.name === "company_create_sprint_contract");
+    const readTool = tools.find((tool) => tool.name === "company_read_delivery_okf");
+    const reportTool = tools.find((tool) => tool.name === "company_delivery_okf_report");
+    if (!contractTool || !readTool || !reportTool) throw new Error("OKF tools were not registered");
+
+    const created = await contractTool.execute("tool-1", {
+      contract_id: "extension-contract",
+      title: "Extension contract",
+      owner: "lead",
+      scope: "Preserve descriptive delivery context.",
+      done_criteria: ["contract can be read back"],
+    }, undefined, undefined, ctx) as ToolResult;
+    const readBack = await readTool.execute("tool-2", { kind: "contract", id: "extension-contract" }, undefined, undefined, ctx) as ToolResult;
+
+    const report = await reportTool.execute("tool-3", { contract_id: "extension-contract" }, undefined, undefined, ctx) as ToolResult;
+
+    expect(created.content[0].text).toContain("Wrote SprintContract extension-contract");
+    expect(readBack.content[0].text).toContain("Runtime authority boundary");
+    expect(report.content[0].text).toContain("Missing required role bundle: product_quality_bar");
+    expect(readDeliveryOkfConcept(root, "contract", "extension-contract")?.frontmatter.type).toBe("SprintContract");
   });
 
   it("discovers a parent company project from a subdirectory", async () => {

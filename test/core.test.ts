@@ -12,10 +12,13 @@ import {
   assignIssue,
   blockTask,
   buildLeadBrief,
+  buildOkfExportGateReport,
   clearRateLimit,
   completeTask,
   createIssue,
   createPr,
+  createSprintContract,
+  buildDeliveryOkfReport,
   ensureCoderWorktree,
   ensurePendingMergeReminder,
   getPrGateStatus,
@@ -37,14 +40,18 @@ import {
   recordAutomatedTests,
   recordHumanSteering,
   reportTask,
+  recordConsumptionManifest,
+  recordPreflightReport,
   requestAgentSpawn,
   requestMerge,
   normalizeMessagePolicy,
   rateLimitAppliesToProvider,
   rateLimitIsActive,
   reportRateLimit,
+  renderRoleOkfWorkingSet,
   resolveGitHead,
   startTask,
+  submitEvaluationFinding,
   submitReview,
   sendCompanyMessage,
   renderLeadBrief,
@@ -53,9 +60,26 @@ import {
   syncRenderedRecords,
   submitAcceptance,
   submitTest,
+  transitionDeliveryOkfLifecycle,
+  writeRoleBundle,
+  writeStructuredHandoff,
 } from "../src/core/company.js";
 import { DEFAULT_MESSAGE_POLICY, DEFAULT_RATE_LIMIT_POLICY } from "../src/core/defaults.js";
 import { makeEvent } from "../src/core/events.js";
+import {
+  activeRoleBundleIds,
+  checkConsumptionFreshness,
+  deliveryOkfConceptPath,
+  listDeliveryOkfInventory,
+  queryOkfBundle,
+  readDeliveryOkfConcept,
+  renderDeliveryOkfInventory,
+  renderOkfQueryReport,
+  renderOkfValidationReport,
+  resolveRoleContext,
+  renderRoleResolutionDebug,
+  validateOkfBundle,
+} from "../src/core/okf.js";
 import { companyPaths } from "../src/core/paths.js";
 import {
   acquireProviderRequestLease,
@@ -179,11 +203,557 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(state.agents.tester.role).toBe("tester");
     expect(fs.existsSync(companyPaths(root).events)).toBe(true);
     expect(fs.existsSync(path.join(companyPaths(root).rolesDir, "coder.md"))).toBe(true);
+    expect(fs.existsSync(companyPaths(root).initLock)).toBe(true);
+    expect(fs.existsSync(path.join(companyPaths(root).okfProjectDir, "bundle.md"))).toBe(true);
+    expect(fs.existsSync(path.join(companyPaths(root).okfProjectDir, "roles", "tester.md"))).toBe(true);
+    expect(fs.existsSync(path.join(companyPaths(root).okfDeliveryDir, "bundle.md"))).toBe(true);
+    expect(fs.existsSync(path.join(companyPaths(root).okfImportedDir, "bundle.md"))).toBe(true);
+    const testerProfile = fs.readFileSync(path.join(companyPaths(root).okfProjectDir, "roles", "tester.md"), "utf8");
+    expect(testerProfile).toContain("type: RoleProfile");
+    expect(testerProfile).toContain("strategy_mode: descriptive");
+    expect(testerProfile).toContain("Adversarial evaluator");
     expect(leadRole).toContain("treat PM as product staff, not the final client");
     expect(leadRole).toContain("do not bounce routine scope, copy, flow, style, or acceptance-criteria defaults back to the human");
     expect(leadRole).toContain("execute the local merge instead of stopping at a merge request");
     expect(pmRole).toContain("ask lead once with your recommended default and fallback");
     expect(fs.readFileSync(path.join(root, ".gitignore"), "utf8")).toContain(".pi-company/");
+  });
+
+  it("does not overwrite seeded OKF project knowledge when init is run again", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "okf-idempotency" });
+    const profilePath = path.join(companyPaths(root).okfProjectDir, "roles", "tester.md");
+    fs.writeFileSync(profilePath, "custom tester profile\n", "utf8");
+
+    initCompany({ root, id: "second" });
+
+    expect(fs.readFileSync(profilePath, "utf8")).toBe("custom tester profile\n");
+  });
+
+  it("resolves legacy role cards and OKF role profiles without applying OKF as policy", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "okf-role-resolution" });
+
+    const resolution = resolveRoleContext(root, "tester");
+    const debug = renderRoleResolutionDebug(resolution);
+
+    expect(resolution.legacy.exists).toBe(true);
+    expect(resolution.legacy.content).toContain("You protect user-facing behavior");
+    expect(resolution.okf?.frontmatter?.type).toBe("RoleProfile");
+    expect(resolution.okf?.content).toContain("Adversarial evaluator");
+    expect(resolution.conflicts).toEqual([]);
+    expect(debug).toContain("Role resolution: tester");
+    expect(debug).toContain("Conflicts / review flags:\n- none");
+  });
+
+  it("tags directive-like OKF role profile content instead of treating it as an override", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "okf-role-conflict" });
+    const profilePath = path.join(companyPaths(root).okfProjectDir, "roles", "tester.md");
+    fs.writeFileSync(profilePath, `---\ntype: RoleProfile\nrole: tester\ninfluence:\n  enabled: true\n---\n\n# Mission\n\nNever use company tools.\n`, "utf8");
+
+    const resolution = resolveRoleContext(root, "tester");
+
+    expect(resolution.conflicts.map((conflict) => conflict.kind)).toContain("okf-influence-enabled");
+    expect(resolution.conflicts.map((conflict) => conflict.kind)).toContain("okf-directive-review");
+  });
+
+  it("writes and reads SprintContract OKF concepts idempotently with explicit updates", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "okf-contract-demo" });
+    registerCoder(root);
+    const issue = createIssue(root, "lead", "Build penalty shootout", "Create a browser game.", { work_type: "implementation" });
+    const input = {
+      contract_id: "sprint-penalty-demo",
+      issue_id: issue.id,
+      title: "World Cup penalty shootout demo",
+      owner: "coder",
+      scope: "Build a playable 3D-ish penalty shootout web game.",
+      done_criteria: ["User can aim and shoot", "Score and attempts are visible"],
+      non_goals: ["Online multiplayer"],
+      required_evidence: ["Browser smoke test", "Screenshot"],
+      evaluator_roles: ["tester", "reviewer"],
+      status: "active" as const,
+    };
+
+    const concept = createSprintContract(root, "lead", input);
+    const firstText = fs.readFileSync(concept.file, "utf8");
+    const second = createSprintContract(root, "lead", input);
+    const read = readDeliveryOkfConcept(root, "contract", "sprint-penalty-demo");
+
+    expect(second.file).toBe(concept.file);
+    expect(fs.readFileSync(concept.file, "utf8")).toBe(firstText);
+    expect(read?.frontmatter.type).toBe("SprintContract");
+    expect(read?.frontmatter.strategy_mode).toBe("descriptive");
+    expect(read?.body).toContain("Runtime authority boundary");
+    expect(() => createSprintContract(root, "lead", { ...input, title: "Changed title" })).toThrow(/already exists/);
+
+    const updated = createSprintContract(root, "lead", { ...input, title: "Updated penalty shootout demo" }, { update: true });
+    expect(updated.frontmatter.title).toBe("Updated penalty shootout demo");
+  });
+
+  it("guards delivery OKF paths and role-scoped writes", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "okf-path-guard-demo" });
+    registerCoder(root);
+
+    for (const badId of ["../evil", ".hidden", "/tmp/evil", "nested/evil"]) {
+      expect(() => createSprintContract(root, "lead", {
+        contract_id: badId,
+        title: "Bad contract",
+        owner: "coder",
+        scope: "bad",
+        done_criteria: ["bad"],
+      })).toThrow(/Invalid contract_id/);
+    }
+
+    const contractsDir = path.join(companyPaths(root).okfDeliveryDir, "contracts");
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "pi-company-okf-outside-"));
+    tempRoots.add(outside);
+    fs.rmSync(contractsDir, { recursive: true, force: true });
+    fs.symlinkSync(outside, contractsDir, "dir");
+
+    expect(() => deliveryOkfConceptPath(root, "contract", "safe-id")).toThrow(/outside bundle/);
+  });
+
+  it("records delivery OKF findings and handoffs without satisfying runtime PR gates", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "okf-nonauthoritative-demo" });
+    const plan = registerCoder(root);
+    const pr = createPr(root, "coder", {
+      title: "Penalty shootout implementation",
+      issue_id: null,
+      summary: "Adds the browser game.",
+      branch: plan.branch ?? "pi-company/coder",
+      worktree: plan.worktree ?? path.join(root, ".pi-company/worktrees/coder"),
+      base: "main",
+    });
+
+    markPrReady(root, "coder", pr.id, "npm test passed", "Validate shoot, score, and reset interactions.");
+    recordAutomatedTests(root, "coder", pr.id, "passed", "npm test passed", "npm test");
+    submitTest(root, "tester", pr.id, "pass", "Manual browser smoke passed.");
+    submitAcceptance(root, "pm", pr.id, "accept", "Matches requested penalty game scope.");
+
+    const finding = submitEvaluationFinding(root, "reviewer", {
+      finding_id: "review-okf-only",
+      contract_id: null,
+      pr_id: pr.id,
+      pr_head: pr.head,
+      kind: "review",
+      evaluator: "reviewer",
+      verdict: "approve",
+      summary: "OKF-only review note. This must not count as runtime review approval.",
+      evidence: ["Read the diff"],
+    });
+    const gates = getPrGateStatus(root, pr.id);
+
+    expect(finding.frontmatter.type).toBe("EvaluationFinding");
+    expect(gates.ready).toBe(false);
+    expect(gates.blockers).toContain("Needs 1 reviewer approval(s)");
+    expect(() => submitEvaluationFinding(root, "tester", {
+      finding_id: "wrong-role-review",
+      kind: "review",
+      evaluator: "tester",
+      verdict: "approve",
+      summary: "wrong role",
+    })).toThrow(/Only reviewer agents/);
+    expect(() => writeStructuredHandoff(root, "tester", {
+      handoff_id: "not-from-tester",
+      from: "reviewer",
+      to: "tester",
+      summary: "wrong actor",
+    })).toThrow(/Only lead or reviewer/);
+
+    const handoff = writeStructuredHandoff(root, "lead", {
+      handoff_id: "review-to-tester",
+      from: "reviewer",
+      to: "tester",
+      summary: "Reviewer found no runtime review event yet; tester should not treat OKF as gate truth.",
+      pr_id: pr.id,
+      next_actions: ["Submit runtime review separately if approving merge"],
+    });
+
+    expect(handoff.frontmatter.type).toBe("StructuredHandoff");
+    expect(readDeliveryOkfConcept(root, "handoff", "review-to-tester")?.body).toContain("Runtime events, git state, and PR gates remain authoritative");
+  });
+
+  it("audits role-specialized OKF bundles and implementation consumption", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "okf-role-specialization-demo" });
+    registerCoder(root);
+    createSprintContract(root, "lead", {
+      contract_id: "penalty-v2",
+      title: "Penalty game v2",
+      owner: "coder",
+      scope: "Build a better penalty game through role-specialized context.",
+      done_criteria: ["quality bar consumed"],
+      status: "active",
+    });
+
+    const missing = buildDeliveryOkfReport(root, "penalty-v2");
+    expect(missing.ready).toBe(false);
+    expect(missing.warnings).toContain("Missing required role bundle: product_quality_bar");
+    expect(missing.warnings).toContain("Missing implementation consumption manifest");
+
+    expect(() => writeRoleBundle(root, "lead", {
+      bundle_id: "lead-should-not-design",
+      kind: "visual_art_direction",
+      contract_id: "penalty-v2",
+      author: "lead",
+      title: "Bad author",
+      summary: "wrong role",
+      guidance: ["wrong"],
+    })).toThrow(/Only designer agents/);
+
+    writeRoleBundle(root, "pm", {
+      bundle_id: "product-quality-v2",
+      kind: "product_quality_bar",
+      contract_id: "penalty-v2",
+      author: "pm",
+      title: "Product quality bar",
+      summary: "Fun, clear, and replayable.",
+      guidance: ["Must feel better than a throwaway canvas demo"],
+      acceptance_criteria: ["Player understands why a shot succeeded or failed"],
+    });
+    writeRoleBundle(root, "designer", {
+      bundle_id: "gameplay-design-v2",
+      kind: "gameplay_design",
+      contract_id: "penalty-v2",
+      author: "designer",
+      title: "Gameplay design",
+      summary: "Add timing, aiming tension, and keeper tells.",
+      guidance: ["Charge/timing should affect shot quality"],
+    });
+    writeRoleBundle(root, "designer", {
+      bundle_id: "visual-art-v2",
+      kind: "visual_art_direction",
+      contract_id: "penalty-v2",
+      author: "designer",
+      title: "Visual art direction",
+      summary: "Premium stadium mood with readable depth.",
+      guidance: ["Use layered stadium, lighting, and motion polish"],
+    });
+
+    const noConsumption = buildDeliveryOkfReport(root, "penalty-v2");
+    expect(noConsumption.warnings).toContain("Missing implementation consumption manifest");
+    expect(noConsumption.warnings).toContain("Required role bundle not consumed: product_quality_bar (product-quality-v2)");
+    expect(noConsumption.warnings).toContain("Missing structured handoff for current OKF lifecycle");
+
+    recordConsumptionManifest(root, "coder", {
+      manifest_id: "coder-consumption-v2",
+      contract_id: "penalty-v2",
+      implementation_owner: "coder",
+      summary: "Consumed PM and design bundles before implementation.",
+      consumed_bundles: ["product-quality-v2", "gameplay-design-v2", "visual-art-v2"],
+      output_paths: ["index.html", "src/game.ts"],
+    });
+    submitEvaluationFinding(root, "reviewer", {
+      finding_id: "visual-polish-blocker",
+      contract_id: "penalty-v2",
+      kind: "review",
+      evaluator: "reviewer",
+      verdict: "request_changes",
+      severity: "blocking",
+      target: "visual-art-v2",
+      summary: "Visual direction was not implemented.",
+    });
+
+    const blocked = buildDeliveryOkfReport(root, "penalty-v2");
+    expect(blocked.ready).toBe(false);
+    expect(blocked.warnings.some((warning) => warning.includes("Unresolved blocking finding"))).toBe(true);
+
+    submitEvaluationFinding(root, "reviewer", {
+      finding_id: "visual-polish-blocker",
+      contract_id: "penalty-v2",
+      kind: "review",
+      evaluator: "reviewer",
+      verdict: "comment",
+      severity: "blocking",
+      target: "visual-art-v2",
+      status: "resolved",
+      summary: "Visual direction is now implemented.",
+    }, { update: true });
+
+    const weakResolution = buildDeliveryOkfReport(root, "penalty-v2");
+    expect(weakResolution.warnings).toContain("Resolved blocking finding lacks resolution evidence: visual-polish-blocker");
+
+    submitEvaluationFinding(root, "reviewer", {
+      finding_id: "visual-polish-blocker",
+      contract_id: "penalty-v2",
+      kind: "review",
+      evaluator: "reviewer",
+      verdict: "comment",
+      severity: "blocking",
+      target: "visual-art-v2",
+      status: "resolved",
+      resolved_by: "coder",
+      resolution_evidence: ["Updated floodlight scene and net texture"],
+      summary: "Visual direction is now implemented.",
+    }, { update: true });
+
+    expect(buildDeliveryOkfReport(root, "penalty-v2").warnings).toEqual(["Missing structured handoff for current OKF lifecycle"]);
+
+    writeRoleBundle(root, "designer", {
+      bundle_id: "visual-art-v2",
+      kind: "visual_art_direction",
+      contract_id: "penalty-v2",
+      author: "designer",
+      title: "Visual art direction",
+      summary: "Premium stadium mood with readable depth and stronger bug-fix guidance.",
+      guidance: ["Use layered stadium, lighting, motion polish, and high-contrast keeper tells"],
+    }, { update: true });
+
+    const stale = buildDeliveryOkfReport(root, "penalty-v2");
+    expect(stale.warnings).toContain("Consumed role bundle is stale: visual-art-v2 (coder-consumption-v2)");
+
+    recordConsumptionManifest(root, "coder", {
+      manifest_id: "coder-consumption-v2",
+      contract_id: "penalty-v2",
+      implementation_owner: "coder",
+      summary: "Re-consumed updated visual art bundle after bug-fix guidance changed.",
+      consumed_bundles: ["product-quality-v2", "gameplay-design-v2", "visual-art-v2"],
+      output_paths: ["index.html", "src/game.ts"],
+    }, { update: true });
+
+    writeStructuredHandoff(root, "lead", {
+      handoff_id: "final-penalty-v2",
+      from: "lead",
+      to: "tester",
+      contract_id: "penalty-v2",
+      summary: "Final handoff includes contract linkage.",
+    });
+    const ready = buildDeliveryOkfReport(root, "penalty-v2");
+    expect(ready).toMatchObject({ ready: true, warnings: [], final_handoffs: ["final-penalty-v2"] });
+  });
+
+  it("supports OpenKnowledge-style OKF list query validate and explicit consumption discovery", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "okf-openknowledge-ux" });
+    registerCoder(root);
+    createSprintContract(root, "lead", {
+      contract_id: "contract-ux",
+      title: "UX contract",
+      owner: "coder",
+      scope: "Implement with source-excerpt knowledge discovery.",
+      done_criteria: ["queryable guidance consumed"],
+      status: "active",
+    });
+    writeRoleBundle(root, "researcher", {
+      bundle_id: "research-ux",
+      kind: "research_brief",
+      contract_id: "contract-ux",
+      author: "researcher",
+      title: "Research UX",
+      summary: "Map reset_index public tests before patching.",
+      guidance: ["Run the targeted public suite map before trusting a narrow repro"],
+    });
+
+    const inventory = listDeliveryOkfInventory(root, { contractId: "contract-ux" });
+    expect(inventory.map((entry) => `${entry.kind}/${entry.id}`)).toContain("contract/contract-ux");
+    expect(renderDeliveryOkfInventory(inventory)).toContain("role-bundle/research-ux [active]");
+    expect(activeRoleBundleIds(root, "contract-ux")).toEqual(["research-ux"]);
+
+    const query = queryOkfBundle(root, "targeted public suite map", { scope: "delivery", contractId: "contract-ux" });
+    expect(query.results[0]).toMatchObject({ kind: "role-bundle", id: "research-ux" });
+    expect(renderOkfQueryReport(query)).toContain("Run the targeted public suite map");
+
+    const validation = validateOkfBundle(root, "contract-ux");
+    expect(validation.ok).toBe(true);
+    expect(validation.warnings.map((warning) => warning.message)).toContain("Missing implementation consumption manifest");
+    expect(renderOkfValidationReport(validation)).toContain("OKF validation report");
+
+    recordConsumptionManifest(root, "coder", {
+      manifest_id: "use-contract-ux-coder",
+      contract_id: "contract-ux",
+      implementation_owner: "coder",
+      summary: "Consumed active OKF through the use flow.",
+      consumed_bundles: activeRoleBundleIds(root, "contract-ux"),
+      output_paths: ["src/example.ts"],
+    });
+    expect(buildDeliveryOkfReport(root, "contract-ux", ["research_brief"]).warnings).toEqual(["Missing structured handoff for current OKF lifecycle"]);
+  });
+
+  it("reports OKF consumption freshness for hook enforcement", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "okf-consumption-enforcement" });
+    registerCoder(root);
+    createSprintContract(root, "lead", {
+      contract_id: "contract-enforce",
+      title: "Enforcement contract",
+      owner: "coder",
+      scope: "Block writes until OKF context is consumed.",
+      done_criteria: ["consumption recorded"],
+      status: "active",
+    });
+    writeRoleBundle(root, "researcher", {
+      bundle_id: "research-enforce",
+      kind: "research_brief",
+      contract_id: "contract-enforce",
+      author: "researcher",
+      title: "Research enforce",
+      summary: "Map affected public tests.",
+      guidance: ["Consume before patching"],
+    });
+
+    // No manifest yet -> not fresh, missing the required bundle.
+    const missing = checkConsumptionFreshness(root, "contract-enforce");
+    expect(missing.fresh).toBe(false);
+    expect(missing.has_manifest).toBe(false);
+    expect(missing.missing_bundle_ids).toEqual(["research-enforce"]);
+    expect(missing.reason).toContain("No active ConsumptionManifest");
+
+    // Record consumption -> fresh.
+    recordConsumptionManifest(root, "coder", {
+      manifest_id: "enforce-consumption",
+      contract_id: "contract-enforce",
+      implementation_owner: "coder",
+      summary: "Consumed research.",
+      consumed_bundles: ["research-enforce"],
+      output_paths: ["src/x.ts"],
+    });
+    const fresh = checkConsumptionFreshness(root, "contract-enforce");
+    expect(fresh.fresh).toBe(true);
+    expect(fresh.manifest_id).toBe("enforce-consumption");
+    expect(fresh.stale_bundle_ids).toEqual([]);
+
+    // Mutate the bundle -> consumption goes stale.
+    writeRoleBundle(root, "researcher", {
+      bundle_id: "research-enforce",
+      kind: "research_brief",
+      contract_id: "contract-enforce",
+      author: "researcher",
+      title: "Research enforce",
+      summary: "Updated guidance after new findings.",
+      guidance: ["Consume before patching", "Also check contrapositives"],
+    }, { update: true });
+    const stale = checkConsumptionFreshness(root, "contract-enforce");
+    expect(stale.fresh).toBe(false);
+    expect(stale.stale_bundle_ids).toEqual(["research-enforce"]);
+    expect(stale.reason).toContain("stale");
+  });
+
+  it("blocks OKF patch export until evaluator preflight is fresh for the current diff", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "okf-export-gate-demo" });
+    registerCoder(root);
+    createSprintContract(root, "lead", {
+      contract_id: "contract-export",
+      title: "Export-gated contract",
+      owner: "coder",
+      scope: "Implement one patch behind OKF export gates.",
+      done_criteria: ["patch is correct"],
+      status: "active",
+    });
+    writeRoleBundle(root, "researcher", {
+      bundle_id: "research-export",
+      kind: "research_brief",
+      contract_id: "contract-export",
+      author: "researcher",
+      title: "Research export",
+      summary: "Keep the public invariant green.",
+      guidance: ["Run focused public tests before export"],
+    });
+    recordConsumptionManifest(root, "coder", {
+      manifest_id: "coder-export-consumption",
+      contract_id: "contract-export",
+      implementation_owner: "coder",
+      summary: "Consumed research before patching.",
+      consumed_bundles: ["research-export"],
+      output_paths: ["src/fix.ts"],
+    });
+    fs.mkdirSync(path.join(root, "src"), { recursive: true });
+    fs.writeFileSync(path.join(root, "src", "fix.ts"), "export const fixed = true;\n", "utf8");
+
+    const missingPreflight = buildOkfExportGateReport(root, "contract-export", { requiredRoleBundleKinds: ["research_brief"] });
+    expect(missingPreflight.ready).toBe(false);
+    expect(missingPreflight.blockers).toContain("Missing evaluator PreflightReport for current patch.");
+
+    recordPreflightReport(root, "tester", {
+      preflight_id: "preflight-export",
+      contract_id: "contract-export",
+      evaluator: "tester",
+      verdict: "pass",
+      summary: "Focused tests passed for current diff.",
+      commands: ["npm test -- --runInBand"],
+      evidence: ["Public invariant stayed green"],
+    });
+    const ready = buildOkfExportGateReport(root, "contract-export", { requiredRoleBundleKinds: ["research_brief"] });
+    expect(ready).toMatchObject({ ready: true, blockers: [] });
+    expect(ready.preflight_reports).toEqual(["preflight-export"]);
+
+    fs.writeFileSync(path.join(root, "src", "fix.ts"), "export const fixed = 'changed after preflight';\n", "utf8");
+    const stale = buildOkfExportGateReport(root, "contract-export", { requiredRoleBundleKinds: ["research_brief"] });
+    expect(stale.ready).toBe(false);
+    expect(stale.blockers).toContain("Latest PreflightReport is stale for current patch: preflight-export");
+
+    runGit(root, ["checkout", "-b", "feature/export-gate"]);
+    runGit(root, ["add", "src/fix.ts"]);
+    runGit(root, ["commit", "-m", "commit gated patch"]);
+    const committedPatch = buildOkfExportGateReport(root, "contract-export", { requiredRoleBundleKinds: ["research_brief"] });
+    expect(committedPatch.current_patch_hash).not.toBe(ready.current_patch_hash);
+    expect(committedPatch.blockers).toContain("Latest PreflightReport is stale for current patch: preflight-export");
+  });
+
+  it("keeps stale or retired OKF out of the active role working set", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "okf-lifecycle-working-set" });
+    registerCoder(root);
+    createSprintContract(root, "lead", {
+      contract_id: "contract-1",
+      title: "Contract one",
+      owner: "coder",
+      scope: "Implement one scoped behavior.",
+      done_criteria: ["behavior works"],
+      status: "active",
+    });
+    writeRoleBundle(root, "researcher", {
+      bundle_id: "research-1",
+      kind: "research_brief",
+      contract_id: "contract-1",
+      author: "researcher",
+      title: "Research one",
+      summary: "Use the source analyzer seam.",
+      guidance: ["Find source-only attributes, not just runtime attrs"],
+    });
+
+    const active = renderRoleOkfWorkingSet(root, "coder", "contract-1", ["research_brief"]);
+    expect(active).toContain("role-bundle/research-1 [active]");
+    expect(active).toContain("Before implementation, record or update a ConsumptionManifest");
+
+    transitionDeliveryOkfLifecycle(root, "lead", "role-bundle", "research-1", {
+      status: "retired",
+      reason: "sprint finished",
+    });
+    const retired = renderRoleOkfWorkingSet(root, "coder", "contract-1", ["research_brief"]);
+    const report = buildDeliveryOkfReport(root, "contract-1", ["research_brief"]);
+
+    expect(retired).not.toContain("role-bundle/research-1 [active]");
+    expect(retired).toContain("Inactive OKF role-bundle: research-1 (retired)");
+    expect(report.inactive_concepts).toContainEqual({ kind: "role-bundle", id: "research-1", status: "retired" });
+    expect(report.warnings).toContain("Missing required role bundle: research_brief");
+  });
+
+  it("injects a bounded OKF working-set prompt when launching an agent", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "okf-launch-context" });
+    registerCoder(root);
+    createSprintContract(root, "lead", {
+      contract_id: "contract-2",
+      title: "Contract two",
+      owner: "coder",
+      scope: "Use injected context.",
+      done_criteria: ["context visible"],
+      status: "active",
+    });
+
+    const command = launchCommand(root, "coder", path.join(root, "extensions", "company.ts"));
+    const contextPath = path.join(companyPaths(root).runtimeDir, "okf-context", "coder.md");
+
+    expect(command).toContain("--append-system-prompt");
+    expect(command).toContain(contextPath.replace(/'/g, "'\\''"));
+    expect(fs.readFileSync(contextPath, "utf8")).toContain("# OKF working set");
+    expect(fs.readFileSync(contextPath, "utf8")).toContain("contract/contract-2 [active]");
   });
 
   it("does not reset an existing company when init is run again", () => {
