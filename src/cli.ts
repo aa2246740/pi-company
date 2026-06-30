@@ -36,9 +36,11 @@ import {
   requestMerge,
   rateLimitIsActive,
   recordConsumptionManifest,
+  recordPreflightReport,
   reportRateLimit,
   sendCompanyMessage,
   renderDeliveryOkfReport,
+  renderOkfExportGateReport,
   renderRoleOkfWorkingSet,
   renderLeadBrief,
   startTask,
@@ -48,6 +50,7 @@ import {
   submitReview,
   submitTest,
   transitionDeliveryOkfLifecycle,
+  buildOkfExportGateReport,
   writeRoleBundle,
   writeStructuredHandoff,
   listInbox,
@@ -278,6 +281,54 @@ okfConsumption.command("record")
       output_paths: opts.output ?? [],
     }, { update: opts.update === true });
     console.log(`Wrote ImplementationConsumptionManifest ${manifestId}: ${concept.file}`);
+  });
+
+const okfPreflight = okf.command("preflight").description("Manage evaluator preflight reports");
+
+okfPreflight.command("record")
+  .argument("<preflight-id>")
+  .requiredOption("--actor <agent>")
+  .requiredOption("--verdict <verdict>", "pass | fail | blocked")
+  .option("--contract <id>")
+  .option("--summary <text>")
+  .option("--summary-file <path>")
+  .option("--summary-stdin")
+  .option("--command <text>", "Command or check performed; repeat for multiple entries", collectOption, [])
+  .option("--evidence <text>", "Evidence item; repeat for multiple entries", collectOption, [])
+  .option("--blocker <text>", "Blocker; repeat for multiple entries", collectOption, [])
+  .option("--caveat <text>", "Caveat; repeat for multiple entries", collectOption, [])
+  .option("--patch-hash <hash>", "Patch hash to bind this report to; defaults to current git diff hash")
+  .option("--update", "Replace an existing concept deliberately")
+  .action((preflightId, opts) => {
+    const summary = readTextOption(opts.summary, opts.summaryFile, opts.summaryStdin === true, "summary", true) ?? "";
+    const concept = recordPreflightReport(rootOpt(), opts.actor, {
+      preflight_id: preflightId,
+      contract_id: opts.contract ?? null,
+      evaluator: opts.actor,
+      verdict: validatePreflightVerdict(opts.verdict),
+      patch_hash: opts.patchHash ?? null,
+      summary,
+      commands: opts.command ?? [],
+      evidence: opts.evidence ?? [],
+      blockers: opts.blocker ?? [],
+      caveats: opts.caveat ?? [],
+    }, { update: opts.update === true });
+    console.log(`Wrote PreflightReport ${preflightId}: ${concept.file}`);
+  });
+
+const okfGate = okf.command("gate").description("Run OKF lifecycle gates");
+
+okfGate.command("export")
+  .description("Check whether the current patch may be exported under OKF lifecycle rules")
+  .option("--contract <id>")
+  .option("--required <kind>", "Required role bundle kind; repeat for multiple entries", collectOption, [])
+  .option("--strict", "Exit non-zero when export gate is not ready")
+  .action((opts) => {
+    const report = buildOkfExportGateReport(rootOpt(), opts.contract ?? null, {
+      requiredRoleBundleKinds: opts.required?.length ? opts.required : undefined,
+    });
+    console.log(renderOkfExportGateReport(report));
+    if (opts.strict === true && !report.ready) process.exitCode = 1;
   });
 
 okf.command("report")
@@ -854,8 +905,14 @@ function gateEvidenceOptions(opts: { clean?: boolean; caveat?: string[] }): { cl
 
 function validateDeliveryOkfKind(value: unknown): DeliveryOkfKind {
   const text = String(value);
-  if (["contract", "evaluation", "handoff", "role-bundle", "consumption"].includes(text)) return text as DeliveryOkfKind;
-  throw new Error(`Invalid OKF kind ${text}. Expected contract, evaluation, handoff, role-bundle, or consumption.`);
+  if (["contract", "evaluation", "handoff", "role-bundle", "consumption", "preflight"].includes(text)) return text as DeliveryOkfKind;
+  throw new Error(`Invalid OKF kind ${text}. Expected contract, evaluation, handoff, role-bundle, consumption, or preflight.`);
+}
+
+function validatePreflightVerdict(value: unknown): "pass" | "fail" | "blocked" {
+  const text = String(value);
+  if (["pass", "fail", "blocked"].includes(text)) return text as "pass" | "fail" | "blocked";
+  throw new Error(`Invalid preflight verdict ${text}.`);
 }
 
 function validateRoleBundleKind(value: unknown): RoleBundleKind {

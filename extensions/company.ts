@@ -12,6 +12,7 @@ import {
   assignIssue,
   blockTask,
   buildLeadBrief,
+  buildOkfExportGateReport,
   clearRateLimit,
   completeTask,
   createIssue,
@@ -33,6 +34,7 @@ import {
   pendingMergeRequests,
   planAgentSpawn,
   recordConsumptionManifest,
+  recordPreflightReport,
   reportRateLimit,
   recordAgentLaunch,
   recordAgentRuntime,
@@ -44,6 +46,7 @@ import {
   requestMerge,
   rateLimitIsActive,
   renderDeliveryOkfReport,
+  renderOkfExportGateReport,
   renderRoleOkfWorkingSet,
   renderLeadBrief,
   sendCompanyMessage,
@@ -128,6 +131,7 @@ const okfDeliveryKindSchema = Type.Union([
   Type.Literal("handoff"),
   Type.Literal("role-bundle"),
   Type.Literal("consumption"),
+  Type.Literal("preflight"),
 ]);
 
 const sprintContractStatusSchema = Type.Union([
@@ -165,6 +169,12 @@ const evaluationFindingStatusSchema = Type.Union([
   Type.Literal("active"),
   Type.Literal("resolved"),
   Type.Literal("superseded"),
+]);
+
+const preflightVerdictSchema = Type.Union([
+  Type.Literal("pass"),
+  Type.Literal("fail"),
+  Type.Literal("blocked"),
 ]);
 
 const okfLifecycleStatusSchema = Type.Union([
@@ -1654,6 +1664,70 @@ function registerTools(pi: ExtensionAPI, runtime: {
       }, { update: params.update === true });
       await refreshUi(ctx);
       return toolResult(`Wrote ImplementationConsumptionManifest ${params.manifest_id}: ${concept.file}`, { concept });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_record_preflight_report",
+    label: "Record PreflightReport",
+    description: "Evaluator-scoped helper to bind real preflight commands/evidence to the current patch hash before export.",
+    promptSnippet: "After running focused tests or review checks, record a PreflightReport before any patch export or completion claim.",
+    promptGuidelines: [
+      "Use verdict=pass only when the commands/evidence support the SprintContract and preserved behavior risks.",
+      "This tool automatically records the current git patch hash so later edits stale the preflight gate.",
+      "If any check is caveated, blocked, or failing, record fail/blocked and submit EvaluationFindings for blockers.",
+    ],
+    parameters: Type.Object({
+      preflight_id: Type.String(),
+      contract_id: Type.Optional(Type.String()),
+      verdict: preflightVerdictSchema,
+      summary: Type.String(),
+      commands: Type.Optional(Type.Array(Type.String())),
+      evidence: Type.Optional(Type.Array(Type.String())),
+      blockers: Type.Optional(Type.Array(Type.String())),
+      caveats: Type.Optional(Type.Array(Type.String())),
+      patch_hash: Type.Optional(Type.String({ description: "Override patch hash; defaults to current git diff hash." })),
+      update: Type.Optional(Type.Boolean({ description: "Replace an existing concept deliberately." })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const concept = recordPreflightReport(root, agentName, {
+        preflight_id: params.preflight_id,
+        contract_id: params.contract_id ?? null,
+        evaluator: agentName,
+        verdict: params.verdict,
+        patch_hash: params.patch_hash ?? null,
+        summary: params.summary,
+        commands: params.commands ?? [],
+        evidence: params.evidence ?? [],
+        blockers: params.blockers ?? [],
+        caveats: params.caveats ?? [],
+      }, { update: params.update === true });
+      await refreshUi(ctx);
+      return toolResult(`Wrote PreflightReport ${params.preflight_id}: ${concept.file}`, { concept });
+    },
+  });
+
+  registerCompanyTool({
+    name: "company_okf_export_gate",
+    label: "OKF Export Gate",
+    description: "Check whether the current patch may be exported under OKF lifecycle rules.",
+    promptSnippet: "Run this before claiming done, handing off for export, or asking lead to submit a patch.",
+    promptGuidelines: [
+      "If ready=false, satisfy the blockers instead of claiming completion.",
+      "A pass requires fresh consumption manifests, required role bundles, no blocking findings, and a preflight report matching the current patch hash.",
+      "The official benchmark or CI remains authoritative; this is a lifecycle gate before export.",
+    ],
+    parameters: Type.Object({
+      contract_id: Type.Optional(Type.String()),
+      required_role_bundle_kinds: Type.Optional(Type.Array(Type.String())),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const report = buildOkfExportGateReport(root, params.contract_id ?? null, {
+        requiredRoleBundleKinds: params.required_role_bundle_kinds ?? undefined,
+      });
+      const text = renderOkfExportGateReport(report);
+      await refreshUi(ctx);
+      return toolResult(text, { report });
     },
   });
 

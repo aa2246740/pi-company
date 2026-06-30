@@ -40,7 +40,7 @@ export interface RoleContextResolution {
   conflicts: RoleResolutionConflict[];
 }
 
-export type DeliveryOkfKind = "contract" | "evaluation" | "handoff" | "role-bundle" | "consumption";
+export type DeliveryOkfKind = "contract" | "evaluation" | "handoff" | "role-bundle" | "consumption" | "preflight";
 
 export type RoleBundleKind = "product_quality_bar" | "gameplay_design" | "visual_art_direction" | "research_brief";
 
@@ -164,6 +164,19 @@ export interface ConsumptionManifestInput {
   output_paths?: string[];
 }
 
+export interface PreflightReportInput {
+  preflight_id: string;
+  contract_id?: string | null;
+  evaluator: string;
+  verdict: "pass" | "fail" | "blocked";
+  patch_hash?: string | null;
+  summary: string;
+  commands: string[];
+  evidence?: string[];
+  blockers?: string[];
+  caveats?: string[];
+}
+
 export interface DeliveryOkfProtocolReport {
   contract_id: string | null;
   required_role_bundles: Array<{ kind: string; present: boolean; ids: string[] }>;
@@ -200,6 +213,7 @@ export function seedOkfBundles(root: string, config: CompanyConfig, roster: Reco
     path.join(paths.okfDeliveryDir, "handoffs"),
     path.join(paths.okfDeliveryDir, "role-bundles"),
     path.join(paths.okfDeliveryDir, "consumption"),
+    path.join(paths.okfDeliveryDir, "preflight-reports"),
     path.join(paths.okfDeliveryDir, "traces"),
   ]) {
     ensureDir(dir);
@@ -570,6 +584,36 @@ export function writeConsumptionManifestConcept(root: string, input: Consumption
   return writeDeliveryOkfConcept(root, "consumption", id, frontmatter, body, options);
 }
 
+export function writePreflightReportConcept(root: string, input: PreflightReportInput, options: DeliveryOkfWriteOptions = {}): OkfConcept {
+  const id = safeOkfId(input.preflight_id, "preflight_id");
+  const frontmatter = deliveryBaseFrontmatter({
+    type: "PreflightReport",
+    title: `Preflight report ${id}`,
+    preflight_id: id,
+    contract_id: input.contract_id ?? null,
+    evaluator: input.evaluator,
+    verdict: input.verdict,
+    patch_hash: input.patch_hash ?? null,
+    commands: input.commands,
+    status: "active",
+  });
+  const body = [
+    "# Summary",
+    input.summary.trim() || "(summary not provided)",
+    "# Commands",
+    markdownList(input.commands),
+    "# Evidence",
+    markdownList(input.evidence ?? []),
+    "# Blockers",
+    markdownList(input.blockers ?? []),
+    "# Caveats",
+    markdownList(input.caveats ?? []),
+    "# Runtime authority boundary",
+    "This preflight records evaluator evidence for the current patch hash. It does not replace the official test harness, git, PR gates, or human review.",
+  ].join("\n\n");
+  return writeDeliveryOkfConcept(root, "preflight", id, frontmatter, body, options);
+}
+
 export function readDeliveryOkfConcept(root: string, kind: DeliveryOkfKind, id: string): OkfConcept | null {
   return readOkfConcept(deliveryOkfConceptPath(root, kind, id));
 }
@@ -742,7 +786,7 @@ export function renderDeliveryOkfProtocolReport(report: DeliveryOkfProtocolRepor
 export function buildOkfWorkingSet(root: string, role: string, contractId: string | null = null, requiredKinds?: string[]): OkfWorkingSet {
   const contract = contractId ? safeOkfId(contractId, "contract_id") : null;
   const concepts: OkfWorkingSetConcept[] = [];
-  for (const kind of ["contract", "role-bundle", "consumption", "evaluation", "handoff"] as DeliveryOkfKind[]) {
+  for (const kind of ["contract", "role-bundle", "consumption", "evaluation", "preflight", "handoff"] as DeliveryOkfKind[]) {
     for (const concept of listDeliveryOkfConcepts(root, kind)) {
       if (!conceptMatchesContract(concept, contract)) continue;
       if (!isDeliveryOkfConceptActive(concept)) continue;
@@ -845,6 +889,7 @@ function deliveryKindDir(deliveryDir: string, kind: DeliveryOkfKind): string {
     handoff: "handoffs",
     "role-bundle": "role-bundles",
     consumption: "consumption",
+    preflight: "preflight-reports",
   } satisfies Record<DeliveryOkfKind, string>)[kind]);
 }
 
@@ -938,6 +983,7 @@ function conceptVisibleToRole(kind: DeliveryOkfKind, concept: OkfConcept, role: 
   }
   if (kind === "consumption") return ["lead", "reviewer", "tester", "pm", "coder"].includes(role);
   if (kind === "evaluation") return ["lead", "reviewer", "tester", "pm", "coder"].includes(role);
+  if (kind === "preflight") return ["lead", "reviewer", "tester", "pm", "coder"].includes(role);
   if (kind === "handoff") return ["lead", "reviewer", "tester", "pm", "coder", "researcher", "designer"].includes(role)
     || concept.frontmatter.to === role
     || concept.frontmatter.from === role;
@@ -994,6 +1040,7 @@ function summarizeConceptForWorkingSet(kind: DeliveryOkfKind, concept: OkfConcep
   if (kind === "contract") return firstSectionText(concept.body, "Scope");
   if (kind === "role-bundle") return firstSectionText(concept.body, "Summary");
   if (kind === "evaluation") return firstSectionText(concept.body, "Summary");
+  if (kind === "preflight") return firstSectionText(concept.body, "Summary");
   if (kind === "handoff") return firstSectionText(concept.body, "Summary");
   if (kind === "consumption") return firstSectionText(concept.body, "Summary");
   return firstSectionText(concept.body, "Summary");
@@ -1006,6 +1053,7 @@ function conceptDeliveryId(kind: DeliveryOkfKind, concept: OkfConcept): string {
     handoff: "handoff_id",
     "role-bundle": "bundle_id",
     consumption: "manifest_id",
+    preflight: "preflight_id",
   } satisfies Record<DeliveryOkfKind, string>)[kind];
   return String(concept.frontmatter[key] ?? path.basename(concept.file, ".md"));
 }

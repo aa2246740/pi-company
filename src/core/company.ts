@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -40,6 +41,10 @@ import { withCompanyLock } from "./lock.js";
 import {
   buildDeliveryOkfProtocolReport,
   buildOkfWorkingSet,
+  conceptLifecycleStatus,
+  isDeliveryOkfConceptActive,
+  listDeliveryOkfConcepts,
+  readDeliveryOkfConcept,
   renderDeliveryOkfProtocolReport,
   renderOkfWorkingSet,
   seedOkfBundles,
@@ -47,6 +52,7 @@ import {
   writeAgentOkfContextFile,
   writeConsumptionManifestConcept,
   writeEvaluationFindingConcept,
+  writePreflightReportConcept,
   writeRoleBundleConcept,
   writeSprintContractConcept,
   writeStructuredHandoffConcept,
@@ -54,6 +60,8 @@ import {
   type DeliveryOkfKind,
   type DeliveryOkfLifecycleTransitionInput,
   type EvaluationFindingInput,
+  type OkfConcept,
+  type PreflightReportInput,
   type RoleBundleInput,
   type SprintContractInput,
   type StructuredHandoffInput,
@@ -126,6 +134,20 @@ export interface LeadBrief {
   root_worktree_changes: string[];
   recovery_snapshots: AgentRecoverySnapshot[];
   next_actions: string[];
+}
+
+export interface OkfExportGateOptions {
+  requiredRoleBundleKinds?: string[];
+}
+
+export interface OkfExportGateReport {
+  contract_id: string | null;
+  current_patch_hash: string;
+  ready: boolean;
+  blockers: string[];
+  warnings: string[];
+  consumption_manifests: string[];
+  preflight_reports: string[];
 }
 
 export function initCompany(options: InitOptions = {}): CompanyState {
@@ -227,12 +249,77 @@ export function recordConsumptionManifest(root: string, actor: string, input: Co
   return writeConsumptionManifestConcept(root, { ...input, implementation_owner: actor }, options);
 }
 
+export function recordPreflightReport(root: string, actor: string, input: PreflightReportInput, options: { update?: boolean } = {}) {
+  const state = loadState(root);
+  const lead = state.config?.lead ?? "lead";
+  const agent = state.agents[actor];
+  if (actor !== "system" && actor !== lead && !["reviewer", "tester", "pm"].includes(agent?.role ?? "")) {
+    if (!agent) throw new Error(`Unknown preflight actor ${actor}.`);
+    throw new Error(`Only reviewer, tester, pm, ${lead}, or system can record preflight reports. ${actor} has role ${agent.role}.`);
+  }
+  return writePreflightReportConcept(root, {
+    ...input,
+    evaluator: actor,
+    patch_hash: input.patch_hash ?? currentPatchHash(root),
+  }, options);
+}
+
 export function buildDeliveryOkfReport(root: string, contractId?: string | null, requiredKinds?: string[]) {
   return buildDeliveryOkfProtocolReport(root, contractId ?? null, requiredKinds);
 }
 
 export function renderDeliveryOkfReport(root: string, contractId?: string | null, requiredKinds?: string[]): string {
   return renderDeliveryOkfProtocolReport(buildDeliveryOkfReport(root, contractId, requiredKinds));
+}
+
+export function buildOkfExportGateReport(root: string, contractId?: string | null, options: OkfExportGateOptions = {}): OkfExportGateReport {
+  const contract = contractId ?? null;
+  const requiredKinds = options.requiredRoleBundleKinds ?? ["research_brief"];
+  const blockers: string[] = [];
+  const warnings: string[] = [];
+  const currentHash = currentPatchHash(root);
+
+  const contractConcept = contract ? readDeliveryOkfConcept(root, "contract", contract) : null;
+  if (!contract) blockers.push("Missing SprintContract id for export gate.");
+  else if (!contractConcept) blockers.push(`Missing SprintContract: ${contract}`);
+  else if (!isDeliveryOkfConceptActive(contractConcept)) blockers.push(`SprintContract is not active: ${contract} (${conceptLifecycleStatus(contractConcept)})`);
+
+  const protocol = buildDeliveryOkfProtocolReport(root, contract, requiredKinds);
+  const gateRelevantWarnings = protocol.warnings.filter((warning) => !warning.startsWith("Missing structured handoff") && !warning.startsWith("Structured handoff is stale"));
+  blockers.push(...gateRelevantWarnings);
+  warnings.push(...protocol.warnings.filter((warning) => !gateRelevantWarnings.includes(warning)));
+
+  const preflights = listDeliveryOkfConcepts(root, "preflight")
+    .filter((concept) => conceptMatchesContractForGate(concept, contract))
+    .filter(isDeliveryOkfConceptActive)
+    .sort((a, b) => conceptGateTimestamp(b) - conceptGateTimestamp(a));
+  if (preflights.length === 0) {
+    blockers.push("Missing evaluator PreflightReport for current patch.");
+  } else {
+    const latest = preflights[0];
+    const id = String(latest.frontmatter.preflight_id ?? path.basename(latest.file, ".md"));
+    const verdict = String(latest.frontmatter.verdict ?? "");
+    const patchHash = typeof latest.frontmatter.patch_hash === "string" ? latest.frontmatter.patch_hash : "";
+    if (verdict !== "pass") blockers.push(`Latest PreflightReport is not pass: ${id} (${verdict || "missing verdict"})`);
+    if (!patchHash) blockers.push(`Latest PreflightReport lacks patch hash: ${id}`);
+    else if (patchHash !== currentHash) blockers.push(`Latest PreflightReport is stale for current patch: ${id}`);
+  }
+
+  return {
+    contract_id: contract,
+    current_patch_hash: currentHash,
+    ready: blockers.length === 0,
+    blockers,
+    warnings,
+    consumption_manifests: protocol.consumption_manifests,
+    preflight_reports: preflights.map((concept) => String(concept.frontmatter.preflight_id ?? path.basename(concept.file, ".md"))),
+  };
+}
+
+export function renderOkfExportGateReport(report: OkfExportGateReport): string {
+  const blockers = report.blockers.length > 0 ? report.blockers.map((item) => `- ${item}`).join("\n") : "- none";
+  const warnings = report.warnings.length > 0 ? report.warnings.map((item) => `- ${item}`).join("\n") : "- none";
+  return `OKF export gate${report.contract_id ? ` for ${report.contract_id}` : ""}\nReady: ${report.ready ? "yes" : "no"}\n\nCurrent patch hash:\n${report.current_patch_hash}\n\nConsumption manifests:\n${markdownListText(report.consumption_manifests)}\n\nPreflight reports:\n${markdownListText(report.preflight_reports)}\n\nBlockers:\n${blockers}\n\nWarnings:\n${warnings}\n\nAuthority boundary: this gate enforces OKF lifecycle obligations before exporting a patch. Official tests, git, PR gates, and human review remain authoritative.`;
 }
 
 export function renderRoleOkfWorkingSet(root: string, role: string, contractId?: string | null, requiredKinds?: string[]): string {
@@ -242,6 +329,54 @@ export function renderRoleOkfWorkingSet(root: string, role: string, contractId?:
 export function transitionDeliveryOkfLifecycle(root: string, actor: string, kind: DeliveryOkfKind, id: string, input: Omit<DeliveryOkfLifecycleTransitionInput, "actor">) {
   requireLead(root, actor, "transition OKF lifecycle state");
   return transitionDeliveryOkfLifecycleConcept(root, kind, id, { ...input, actor });
+}
+
+export function currentPatchHash(root: string): string {
+  const tracked = runGitText(root, ["diff", "--binary", "--no-ext-diff", "--", ".", ":(exclude).pi-company"]);
+  const untrackedList = runGitText(root, ["ls-files", "--others", "--exclude-standard", "--", ".", ":(exclude).pi-company"])
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .sort();
+  const hash = createHash("sha256");
+  hash.update("tracked\0");
+  hash.update(tracked);
+  hash.update("\0untracked\0");
+  for (const file of untrackedList) {
+    if (file === ".pi-company" || file.startsWith(".pi-company/")) continue;
+    const fullPath = path.join(root, file);
+    if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) continue;
+    hash.update(file);
+    hash.update("\0");
+    hash.update(fs.readFileSync(fullPath));
+    hash.update("\0");
+  }
+  return hash.digest("hex");
+}
+
+function runGitText(root: string, args: string[]): string {
+  const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
+  if (result.status !== 0) {
+    const stderr = String(result.stderr ?? "").trim();
+    throw new Error(`git ${args.join(" ")} failed${stderr ? `: ${stderr}` : ""}`);
+  }
+  return String(result.stdout ?? "");
+}
+
+function conceptMatchesContractForGate(concept: OkfConcept, contractId: string | null): boolean {
+  if (!contractId) return true;
+  return concept.frontmatter.contract_id === contractId;
+}
+
+function conceptGateTimestamp(concept: OkfConcept): number {
+  const value = concept.frontmatter.updated_at ?? concept.frontmatter.timestamp ?? concept.frontmatter.created_at;
+  if (typeof value !== "string") return 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function markdownListText(items: string[]): string {
+  return items.length > 0 ? items.map((item) => `- ${item}`).join("\n") : "- none";
 }
 
 function requireEvaluationActor(state: CompanyState, actor: string, kind: EvaluationFindingInput["kind"]): void {

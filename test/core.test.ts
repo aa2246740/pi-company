@@ -12,6 +12,7 @@ import {
   assignIssue,
   blockTask,
   buildLeadBrief,
+  buildOkfExportGateReport,
   clearRateLimit,
   completeTask,
   createIssue,
@@ -40,6 +41,7 @@ import {
   recordHumanSteering,
   reportTask,
   recordConsumptionManifest,
+  recordPreflightReport,
   requestAgentSpawn,
   requestMerge,
   normalizeMessagePolicy,
@@ -509,6 +511,62 @@ Rate limit 已过期，可以恢复正常工作`);
     });
     const ready = buildDeliveryOkfReport(root, "penalty-v2");
     expect(ready).toMatchObject({ ready: true, warnings: [], final_handoffs: ["final-penalty-v2"] });
+  });
+
+  it("blocks OKF patch export until evaluator preflight is fresh for the current diff", () => {
+    const root = tempRoot();
+    initGitRepo(root);
+    initCompany({ root, id: "okf-export-gate-demo" });
+    registerCoder(root);
+    createSprintContract(root, "lead", {
+      contract_id: "contract-export",
+      title: "Export-gated contract",
+      owner: "coder",
+      scope: "Implement one patch behind OKF export gates.",
+      done_criteria: ["patch is correct"],
+      status: "active",
+    });
+    writeRoleBundle(root, "researcher", {
+      bundle_id: "research-export",
+      kind: "research_brief",
+      contract_id: "contract-export",
+      author: "researcher",
+      title: "Research export",
+      summary: "Keep the public invariant green.",
+      guidance: ["Run focused public tests before export"],
+    });
+    recordConsumptionManifest(root, "coder", {
+      manifest_id: "coder-export-consumption",
+      contract_id: "contract-export",
+      implementation_owner: "coder",
+      summary: "Consumed research before patching.",
+      consumed_bundles: ["research-export"],
+      output_paths: ["src/fix.ts"],
+    });
+    fs.mkdirSync(path.join(root, "src"), { recursive: true });
+    fs.writeFileSync(path.join(root, "src", "fix.ts"), "export const fixed = true;\n", "utf8");
+
+    const missingPreflight = buildOkfExportGateReport(root, "contract-export", { requiredRoleBundleKinds: ["research_brief"] });
+    expect(missingPreflight.ready).toBe(false);
+    expect(missingPreflight.blockers).toContain("Missing evaluator PreflightReport for current patch.");
+
+    recordPreflightReport(root, "tester", {
+      preflight_id: "preflight-export",
+      contract_id: "contract-export",
+      evaluator: "tester",
+      verdict: "pass",
+      summary: "Focused tests passed for current diff.",
+      commands: ["npm test -- --runInBand"],
+      evidence: ["Public invariant stayed green"],
+    });
+    const ready = buildOkfExportGateReport(root, "contract-export", { requiredRoleBundleKinds: ["research_brief"] });
+    expect(ready).toMatchObject({ ready: true, blockers: [] });
+    expect(ready.preflight_reports).toEqual(["preflight-export"]);
+
+    fs.writeFileSync(path.join(root, "src", "fix.ts"), "export const fixed = 'changed after preflight';\n", "utf8");
+    const stale = buildOkfExportGateReport(root, "contract-export", { requiredRoleBundleKinds: ["research_brief"] });
+    expect(stale.ready).toBe(false);
+    expect(stale.blockers).toContain("Latest PreflightReport is stale for current patch: preflight-export");
   });
 
   it("keeps stale or retired OKF out of the active role working set", () => {
