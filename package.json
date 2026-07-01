@@ -1,6 +1,6 @@
 {
   "name": "pi-company",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Run visible Pi agents like a local project team.",
   "license": "Apache-2.0",
   "homepage": "https://aa2246740.github.io/pi-company/",
@@ -29,6 +29,7 @@
     "PRD.md",
     "CHANGELOG.md",
     "docs/okf/OKF_AGENT_LIFECYCLE.md",
+    "docs/okf/OKF_V3_BENCHMARK.md",
     "LICENSE"
   ],
   "scripts": {

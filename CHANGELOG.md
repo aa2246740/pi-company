@@ -3,6 +3,46 @@
 All notable changes to `pi-company` are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## 0.3.0 — OKF v3 adversarial orchestration
+
+Adds the **negotiation + multi-round adversarial loop** pattern (from Anthropic's
+"How to Build Agents That Run for Hours" workshop) as a deterministic driver on
+top of the OKF operating layer. First time company beats plain on the official
+SWE-bench Verified harness.
+
+### Benchmark evidence (same model, official harness)
+
+On 4 Verified instances, OKF v3 vs plain: **1 win, 3 ties, 0 losses**.
+Resolve rate **plain 25% → v3 50%**. v3 never scored below plain. The win
+(django-13212: 3/5 → 5/5) is mechanistically explained: contract negotiation
+surfaced the hidden `DecimalField`/`FileField`/`NaN` paths *before coding*, so
+the coder edited a file plain never touched. Full evidence in
+[`docs/okf/OKF_V3_BENCHMARK.md`](docs/okf/OKF_V3_BENCHMARK.md).
+
+### Added
+- `src/core/adversarial.ts`: deterministic driver (Ralph-style, not a daemon):
+  - `collectNegotiationProposals`: coder + tester each propose concrete testable
+    Done assertions; driver merges (union/dedup) and detects divergences.
+  - `runAdversarialCycle`: evaluator → blocking finding → message coder → coder
+    fixes → re-verify, up to `maxRounds`, with anti-thrash escalation.
+  - `runAgentSession`: bounded pi spawn with hard timeout (out-of-process).
+  - Pure, unit-tested helpers: `mergeAssertions`, `detectDivergences`,
+    `shouldEscalate`, `runAdversarialCycleLogic`.
+- CLI: `pi-company adversarial negotiate` + `pi-company adversarial run`.
+- 4 unit tests for negotiation merge/divergence and cycle resolve/escalate.
+
+### Design
+Runs OUTSIDE the extension process so it can spawn agent sessions in a loop
+without blocking hooks. Reuses existing OKF primitives (mailbox, finding,
+contract, handoff, preflight, gate) — no new runtime truth sources.
+
+### Honest limits
+- v3 wins when negotiation surfaces a hidden path; it ties when negotiation
+  itself misses the coupling (reported honestly, not hidden).
+- ~3× tokens, ~1.5× wall-clock vs plain.
+- n=4 is small; the win is mechanistically explained, the 0-loss record is
+  consistent, but a larger clean batch is needed for an aggregate claim.
+
 ## 0.2.0 — OKF operating layer
 
 The OKF (Open Knowledge Format) layer moves from descriptive-only notes to a
