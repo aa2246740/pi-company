@@ -282,6 +282,36 @@ const zhToEn: Record<string, string> = {
   '已复制': 'Copied',
   '复制命令': 'Copy command',
   '复制': 'Copy',
+  '从未低于 plain': 'Never below plain',
+  '经官方 SWE-bench 验证的多智能体协作运行时': 'Multi-agent collaboration runtime, validated on official SWE-bench',
+  '让多个可见、可控的 Pi 智能体在一个项目中协同工作——用角色隔离、对抗验证和交付闸门取代单 agent 的自检自批。': 'Coordinate multiple visible, steerable Pi agents on one project — replacing single-agent self-review with role isolation, adversarial verification, and delivery gates.',
+  '看 Benchmark': 'View Benchmark',
+  '🏆 官方 SWE-bench Verified': '🏆 Official SWE-bench Verified',
+  '官方 SWE-bench 上首次超越单 agent': 'First time beating single-agent on official SWE-bench',
+  '独立 coder 工作树并行编辑': 'Isolated coder worktrees for parallel editing',
+  '同一模型（': 'Same model (',
+  '）、同一 instance、同一 base commit，由官方 harness 评分。唯一差别：编排方式。': '), same instance, same base commit, scored by the official harness. Only difference: orchestration.',
+  '1 胜 · 3 平 · 0 负': '1 Win · 3 Ties · 0 Losses',
+  'v3 vs plain': 'v3 vs plain',
+  'plain 25% → v3 50%': 'plain 25% → v3 50%',
+  'RESOLVE 率': 'RESOLVE RATE',
+  '难度': 'Difficulty',
+  '结果': 'Result',
+  'v3 胜': 'v3 wins',
+  '平': 'tie',
+  '为什么能赢——不是运气，是机制': 'Why it wins — a mechanism, not luck',
+  '之前': 'before',
+  '这正是「能跑数小时的 agent」模式的核心论点：谈判出的合同把「用户故事」桥接到「可测行为」，对抗 evaluator 强制执行它。': 'This is the core thesis of the “agents that run for hours” pattern made concrete: a negotiated contract bridges “user story” to “testable behavior”, and an adversarial evaluator enforces it.',
+  'Pi 原生，本地单机运行': 'Pi-native, local single-machine runtime',
+  '角色隔离：coder/reviewer/tester 物理上无法越权': 'Role isolation: coder/reviewer/tester physically cannot exceed their authority',
+  'OKF 知识层 + hook 强制的交付闸门': 'OKF knowledge layer + hook-enforced delivery gates',
+  '对抗编排：合同谈判 + 多轮验证循环': 'Adversarial orchestration: contract negotiation + multi-round verification loop',
+  '本地 issues 与 PR 门控': 'Local issues and PR gating',
+  '人类 steering 自动镜像到 lead': 'Human steering auto-mirrored to lead',
+  'Provider 请求门控减少 429': 'Provider request gating to reduce 429s',
+  '可选 cmux 启动适配器': 'Optional cmux launch adapter',
+  'Resolve 率': 'Resolve rate',
+  '条': '',
 }
 
 function readInitialLocale(): Locale {
@@ -386,6 +416,12 @@ function translateAttribute(element: HTMLElement, attribute: string) {
 }
 
 function translate(input: string): string {
+  const trimmed = input.trim()
+  // Exact full-string match first, so short keys like '角色' cannot fragment
+  // a longer exact key like '角色隔离：...'.
+  if (trimmed && Object.prototype.hasOwnProperty.call(zhToEn, trimmed)) {
+    return zhToEn[trimmed]
+  }
   let output = input
   for (const [zh, en] of Object.entries(zhToEn)) {
     output = output.replaceAll(zh, en)

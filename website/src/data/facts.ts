@@ -41,6 +41,46 @@ export const benchmarkSummary = {
   neverBelow: '从未低于 plain',
 }
 
+export const benchmarkCopy = {
+  badge: {
+    'en': '🏆 Official SWE-bench Verified',
+    'zh-CN': '🏆 官方 SWE-bench Verified',
+  },
+  lead: {
+    'en': 'Same model, same instance, same base commit, scored by the official harness. Only difference: orchestration.',
+    'zh-CN': '同一模型、同一 instance、同一 base commit，由官方 harness 评分。唯一差别：编排方式。',
+  },
+  statLabelRecord: { 'en': 'v3 vs plain', 'zh-CN': 'v3 vs plain' },
+  statLabelRate: { 'en': 'RESOLVE RATE', 'zh-CN': 'RESOLVE 率' },
+  thInstance: { 'en': 'Instance', 'zh-CN': 'Instance' },
+  thDifficulty: { 'en': 'Difficulty', 'zh-CN': '难度' },
+  thPlain: { 'en': 'plain', 'zh-CN': 'plain' },
+  thV3: { 'en': 'pi-company v3', 'zh-CN': 'pi-company v3' },
+  thResult: { 'en': 'Result', 'zh-CN': '结果' },
+  resultWin: { 'en': 'v3 wins', 'zh-CN': 'v3 胜' },
+  resultTie: { 'en': 'tie', 'zh-CN': '平' },
+  whyTitle: {
+    'en': 'Why it wins — a mechanism, not luck',
+    'zh-CN': '为什么能赢——不是运气，是机制',
+  },
+  whyBody: {
+    'en': 'Both plain and the older version scored 3/5 — both missed forms/fields.py: DecimalField rejects NaN before reaching the validator. v3 contract negotiation (coder and tester each propose testable Done assertions before coding) forced this hidden path into the open, so the coder edited a file plain never touched, and the adversarial evaluator re-verified every field type.',
+    'zh-CN': 'plain 和旧版都打 3/5，都漏了 forms/fields.py——DecimalField 在到达 validator 前就拒了 NaN。v3 的合同谈判（coder 与 tester 在写代码之前各自提出可测的 Done 断言）明确逼出了这条隐藏路径，于是 coder 改了 plain 从没碰过的文件，对抗 evaluator 再逐条验证。',
+  },
+  whyDetail: {
+    'en': 'This is the core thesis of the “agents that run for hours” pattern made concrete: a negotiated contract bridges “user story” to “testable behavior”, and an adversarial evaluator enforces it.',
+    'zh-CN': '这正是「能跑数小时的 agent」模式的核心论点：谈判出的合同把「用户故事」桥接到「可测行为」，对抗 evaluator 强制执行它。',
+  },
+  headline: {
+    'en': 'First time beating single-agent on official SWE-bench',
+    'zh-CN': '官方 SWE-bench 上首次超越单 agent',
+  },
+  neverBelowBadge: {
+    'en': 'Never below plain',
+    'zh-CN': '从未低于 plain',
+  },
+} as const
+
 export const benchmarkRows: BenchmarkRow[] = [
   {
     instance: 'django__django-13212',

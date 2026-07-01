@@ -3,10 +3,28 @@
  * HomePage — pi-company 首页
  * 清晰的视觉层次，充足的呼吸空间
  */
-import { ref } from 'vue'
-import { productSummary, roles, benchmarkSummary, benchmarkRows } from '@/data/facts'
+import { computed, ref } from 'vue'
+import { productSummary, roles, benchmarkSummary, benchmarkRows, benchmarkCopy } from '@/data/facts'
+import { useLocale } from '@/i18n/runtime'
 import TerminalPane from '@/components/terminal/TerminalPane.vue'
 import StatusBar from '@/components/terminal/StatusBar.vue'
+
+const { locale } = useLocale()
+const t = <K extends keyof typeof benchmarkCopy>(k: K) => benchmarkCopy[k][locale.value]
+const whyTitle = computed(() => t('whyTitle'))
+const whyBody = computed(() => t('whyBody'))
+const whyDetail = computed(() => t('whyDetail'))
+const badgeText = computed(() => t('badge'))
+const leadText = computed(() => t('lead'))
+const headlineText = computed(() => t('headline'))
+const neverBelowText = computed(() => t('neverBelowBadge'))
+const recordText = computed(() => locale.value === 'en' ? '1 Win · 3 Ties · 0 Losses' : '1 胜 · 3 平 · 0 负')
+const rateText = computed(() => benchmarkSummary.resolveRate)
+const descText = computed(() => locale.value === 'en'
+  ? 'Coordinate multiple visible, steerable Pi agents on one project — replacing single-agent self-review with role isolation, adversarial verification, and delivery gates.'
+  : productSummary.description)
+const quickStartText = computed(() => locale.value === 'en' ? 'Quick Start' : '快速开始')
+const viewBenchText = computed(() => locale.value === 'en' ? 'View Benchmark' : '看 Benchmark')
 
 interface ConceptNode {
   id: string
@@ -50,20 +68,20 @@ const statusAgents = [
 <template>
   <div class="home">
     <!-- Hero — 充足的呼吸空间 -->
-    <section class="hero">
+    <section class="hero" data-no-i18n>
       <div class="hero__container">
         <div class="hero__badge font-mono">
           <span class="hero__badge-dot"></span>
-          {{ benchmarkSummary.neverBelow }}
+          {{ neverBelowText }}
         </div>
 
         <h1 class="hero__title">
           <span class="glow-green font-pixel">{{ productSummary.name }}</span>
         </h1>
 
-        <p class="hero__subtitle">{{ productSummary.tagline }}</p>
+        <p class="hero__subtitle">{{ headlineText }}</p>
 
-        <p class="hero__desc">{{ productSummary.description }}</p>
+        <p class="hero__desc">{{ descText }}</p>
 
         <div class="hero__workflow">
           <TerminalPane title="core-workflow" :show-dots="true">
@@ -74,35 +92,33 @@ const statusAgents = [
         <div class="hero__actions">
           <router-link to="/quickstart" class="btn btn--primary">
             <span class="btn__icon">▶</span>
-            快速开始
+            {{ quickStartText }}
           </router-link>
           <a href="#benchmark" class="btn btn--ghost">
             <span class="btn__icon">≡</span>
-            看 Benchmark
+            {{ viewBenchText }}
           </a>
         </div>
       </div>
     </section>
 
     <!-- Benchmark — 最突出的证据区块 -->
-    <section id="benchmark" class="section section--benchmark">
+    <section id="benchmark" class="section section--benchmark" data-no-i18n>
       <div class="section__container">
         <div class="section__header">
-          <div class="benchmark__badge">🏆 官方 SWE-bench Verified</div>
-          <h2>{{ benchmarkSummary.headline }}</h2>
-          <p class="section__lead">
-            同一模型（<code class="inline-code">{{ benchmarkSummary.model }}</code>）、同一 instance、同一 base commit，由官方 harness 评分。唯一差别：编排方式。
-          </p>
+          <div class="benchmark__badge">{{ badgeText }}</div>
+          <h2>{{ headlineText }}</h2>
+          <p class="section__lead">{{ leadText }}</p>
         </div>
 
         <div class="benchmark__stats">
           <div class="stat">
-            <span class="stat__value glow-green">{{ benchmarkSummary.record }}</span>
-            <span class="stat__label">v3 vs plain</span>
+            <span class="stat__value glow-green">{{ recordText }}</span>
+            <span class="stat__label">{{ t('statLabelRecord') }}</span>
           </div>
           <div class="stat">
-            <span class="stat__value" style="color: var(--cyan)">{{ benchmarkSummary.resolveRate }}</span>
-            <span class="stat__label">Resolve 率</span>
+            <span class="stat__value" style="color: var(--cyan)">{{ rateText }}</span>
+            <span class="stat__label">{{ t('statLabelRate') }}</span>
           </div>
         </div>
 
@@ -111,11 +127,11 @@ const statusAgents = [
             <table class="benchmark-table">
               <thead>
                 <tr>
-                  <th>Instance</th>
-                  <th class="ta-center">难度</th>
-                  <th class="ta-center">plain</th>
-                  <th class="ta-center">pi-company v3</th>
-                  <th class="ta-center">结果</th>
+                  <th>{{ t('thInstance') }}</th>
+                  <th class="ta-center">{{ t('thDifficulty') }}</th>
+                  <th class="ta-center">{{ t('thPlain') }}</th>
+                  <th class="ta-center">{{ t('thV3') }}</th>
+                  <th class="ta-center">{{ t('thResult') }}</th>
                 </tr>
               </thead>
               <tbody>
@@ -130,7 +146,7 @@ const statusAgents = [
                   <td class="ta-center">{{ row.v3 }} <span class="muted">{{ row.v3Tests }}</span></td>
                   <td class="ta-center">
                     <span :class="['result-pill', `result-pill--${row.result}`]">
-                      {{ row.result === 'win' ? 'v3 胜' : row.result === 'tie-win' ? '平' : '平' }}
+                      {{ row.result === 'win' ? t('resultWin') : t('resultTie') }}
                     </span>
                   </td>
                 </tr>
@@ -140,14 +156,9 @@ const statusAgents = [
         </div>
 
         <div class="benchmark__why">
-          <h3>为什么能赢——不是运气，是机制</h3>
-          <p>
-            plain 和旧版都打 3/5，都漏了 <code class="inline-code">forms/fields.py</code>（<code class="inline-code">DecimalField</code> 在到达 validator 前就拒了 <code class="inline-code">NaN</code>）。
-            <strong>v3 的合同谈判</strong>（coder 与 tester 在写代码<em>之前</em>各自提出可测的 Done 断言）明确逼出了这条隐藏路径，于是 coder 改了 plain 从没碰过的文件，对抗 evaluator 再逐条验证。
-          </p>
-          <p class="benchmark__why-detail">
-            这正是「能跑数小时的 agent」模式的核心论点：谈判出的合同把「用户故事」桥接到「可测行为」，对抗 evaluator 强制执行它。
-          </p>
+          <h3>{{ whyTitle }}</h3>
+          <p class="why-sentence">{{ whyBody }}</p>
+          <p class="benchmark__why-detail">{{ whyDetail }}</p>
         </div>
       </div>
     </section>
