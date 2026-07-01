@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import YAML from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
+import { detectDivergences, mergeAssertions, runAdversarialCycleLogic } from "../src/core/adversarial.js";
 import {
   acknowledgeInbox,
   abandonPr,
@@ -4716,6 +4717,65 @@ Rate limit 已过期，可以恢复正常工作`);
     const state = loadState(root);
     expect(state.config?.quality_gates.required_reviews).toBe(1);
     expect(state.config?.quality_gates.require_tests).toBe(true);
+  });
+});
+
+describe("OKF v3 adversarial orchestration", () => {
+  it("merges coder and tester Done-assertion proposals with divergence detection", () => {
+    const proposals = [
+      { agent: "coder", role: "coder", done_assertions: ["X returns Y", "Z stays null"], file: "" },
+      { agent: "tester", role: "tester", done_assertions: ["x returns y", "W handles NaN"], file: "" },
+    ];
+    const merged = mergeAssertions(proposals);
+    // 'X returns Y' and 'x returns y' normalize to the same key, so de-duped.
+    expect(merged).toHaveLength(3);
+    const divergences = detectDivergences(proposals);
+    // 'Z stays null' (only coder) and 'W handles NaN' (only tester) are divergences.
+    expect(divergences.length).toBe(2);
+    expect(divergences.some((d) => d.includes("coder") && d.includes("Z stays null"))).toBe(true);
+    expect(divergences.some((d) => d.includes("tester") && d.includes("W handles NaN"))).toBe(true);
+  });
+
+  it("resolves when evaluator passes and gate is ready", () => {
+    const r = runAdversarialCycleLogic(
+      [[], []], // round1: no blocking, round2 unused
+      [true],   // gate ready at round1
+      3,
+    );
+    expect(r.resolved).toBe(true);
+    expect(r.roundsUsed).toBe(1);
+    expect(r.escalated).toBe(false);
+  });
+
+  it("escalates to human when a blocking finding persists across 2 rounds", () => {
+    const r = runAdversarialCycleLogic(
+      [
+        [{ id: "F1", summary: "decimal field broken" }],
+        [{ id: "F1", summary: "decimal field broken" }], // same id seen at round1, now round2 -> round-2=0, first<=current-2
+        [{ id: "F1", summary: "decimal field broken" }], // round3: first=1, current-2=1 -> escalate
+      ],
+      [false, false, false],
+      3,
+    );
+    expect(r.escalated).toBe(true);
+    expect(r.resolved).toBe(false);
+    expect(r.reason).toContain("persisted since round 1");
+  });
+
+  it("exhausts max rounds without resolution when findings keep changing", () => {
+    const r = runAdversarialCycleLogic(
+      [
+        [{ id: "F1", summary: "a" }],
+        [{ id: "F2", summary: "b" }], // different id each round -> no escalation
+        [{ id: "F3", summary: "c" }],
+      ],
+      [false, false, false],
+      3,
+    );
+    expect(r.resolved).toBe(false);
+    expect(r.escalated).toBe(false);
+    expect(r.roundsUsed).toBe(3);
+    expect(r.reason).toContain("max rounds");
   });
 });
 
