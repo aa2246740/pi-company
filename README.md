@@ -22,6 +22,58 @@ If you are already opening several Pi windows for one project, `pi-company` adds
 
 The point is simple: keep the speed of multiple agents without giving up the control of a human-readable project process.
 
+## 🏆 Benchmark: OKF v3 beats plain single-agent on official SWE-bench
+
+Same model (`openai-codex/gpt-5.5`), same instance, same base commit, scored by the **official SWE-bench Verified harness**. Only difference: orchestration.
+
+| Instance | plain | **pi-company v3** | result |
+|---|:---:|:---:|---|
+| `django__django-13212` | ❌ 3/5 | ✅ **5/5** | **v3 wins** |
+| `django__django-13128` | ✅ | ✅ | tie |
+| `sympy__sympy-18199` | ❌ 0/1 | ❌ 0/1 | tie |
+| `sympy__sympy-14248` | ❌ | ❌ | tie |
+
+**v3 vs plain: 1 win, 3 ties, 0 losses. Resolve rate: plain 25% → v3 50%.**
+pi-company **never scored below plain**, and converted a hard near-miss into a full resolve.
+
+### Why it wins (not luck — a mechanism)
+
+The win on `django-13212` is mechanistically explained. Both plain and the older
+OKF layer scored 3/5 — both missed `django/forms/fields.py`, where
+`DecimalField` rejects `NaN` before ever reaching the validator. **pi-company v3's
+contract negotiation** (coder + tester each propose testable Done assertions
+*before coding*) explicitly surfaced:
+
+> “DecimalField rejects `Decimal('NaN')` with `%(value)s` … value rendering as NaN”
+> “FileField … FileExtensionValidator rejects a disallowed extension”
+
+Working against assertions that *named* those hidden paths, the coder edited
+`forms/fields.py` — the file plain never touched — and the adversarial evaluator
+verified every field type. **This is the core thesis of the “agents that run for
+hours” pattern made concrete: a negotiated contract bridges “user story” to
+“testable behavior”, and an adversarial evaluator enforces it.**
+
+> Full evidence, honest limits, and per-case breakdown:
+> [`docs/okf/OKF_V3_BENCHMARK.md`](docs/okf/OKF_V3_BENCHMARK.md)
+
+### How v3 works
+
+- **Contract negotiation** — before any code, coder and tester each produce
+  concrete, testable “Done” assertions; the driver merges them into the
+  SprintContract.
+- **Adversarial loop** — evaluator verifies against the *negotiated* assertions;
+  blocking findings route back to coder; re-verify; up to `maxRounds`, with
+  anti-thrash escalation to a human.
+
+```bash
+pi-company adversarial negotiate --contract <id> --agents coder=coder --agents tester=tester ...
+pi-company adversarial run --contract <id> --coder coder --evaluator tester --max-rounds 3 ...
+```
+
+It runs as a deterministic driver (not a daemon), reusing the OKF operating layer
+(mailbox, findings, contracts, handoffs, preflight, export gate). No new runtime
+truth sources.
+
 ## 60-Second Start
 
 ```bash

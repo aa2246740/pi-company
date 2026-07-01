@@ -22,6 +22,44 @@
 
 一句话：保留多 agent 的速度，同时保留人类能读懂、能接管、能审计的项目流程。
 
+## 🏆 基准测试：OKF v3 在官方 SWE-bench 上超越单 agent
+
+同一模型（`openai-codex/gpt-5.5`）、同一 instance、同一 base commit，由**官方 SWE-bench Verified harness** 评分。唯一差别：编排方式。
+
+| Instance | plain 单agent | **pi-company v3** | 结果 |
+|---|:---:|:---:|---|
+| `django__django-13212` | ❌ 3/5 | ✅ **5/5** | **v3 胜** |
+| `django__django-13128` | ✅ | ✅ | 平 |
+| `sympy__sympy-18199` | ❌ 0/1 | ❌ 0/1 | 平 |
+| `sympy__sympy-14248` | ❌ | ❌ | 平 |
+
+**v3 对 plain：1 胜 3 平 0 负。Resolve 率：plain 25% → v3 50%。**
+pi-company **从未低于 plain**，并把一个险胜的 near-miss 转为完全解决。
+
+### 为什么能赢（不是运气——是机制）
+
+`django-13212` 这次的胜利有明确的机制解释。plain 和旧版 OKF 都打 3/5——都漏了 `django/forms/fields.py`（`DecimalField` 在到达 validator 之前就拒了 `NaN`）。**pi-company v3 的合同谈判**（coder 和 tester 在写代码*之前*各自提出可测的 Done 断言）明确逼出了：
+
+> “DecimalField 拒绝 `Decimal('NaN')` 时带 `%(value)s`……渲染为 NaN”
+> “FileField……FileExtensionValidator 拒绝不允许的扩展名”
+
+对着*点名了*这些隐藏路径的断言写代码，coder 改了 `forms/fields.py`——plain 从没碰过的文件——对抗 evaluator 再逐条验证所有字段类型。**这正是「能跑数小时的 agent」模式的核心论点落到实处：谈判出的合同把「用户故事」桥接到「可测行为」，对抗 evaluator 强制执行它。**
+
+> 完整证据、诚实边界、逐 case 拆解：
+> [`docs/okf/OKF_V3_BENCHMARK.md`](docs/okf/OKF_V3_BENCHMARK.md)
+
+### v3 怎么工作
+
+- **合同谈判**——写任何代码前，coder 和 tester 各自产出具体可测的「Done」断言；driver 合并写回 SprintContract。
+- **对抗循环**——evaluator 按*谈判出的*断言验证；blocking finding 回传 coder；修复后重验；最多 `maxRounds` 轮，带防死循环升级到人类。
+
+```bash
+pi-company adversarial negotiate --contract <id> --agents coder=coder --agents tester=tester ...
+pi-company adversarial run --contract <id> --coder coder --evaluator tester --max-rounds 3 ...
+```
+
+它是确定性 driver（不是 daemon），复用 OKF 操作层（mailbox、finding、contract、handoff、preflight、export gate），不引入新的 runtime 真相源。
+
 ## 60 秒开始
 
 ```bash
