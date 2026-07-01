@@ -6,6 +6,8 @@ import { describe, it, expect } from 'vitest'
 import {
   productSummary,
   roles,
+  benchmarkSummary,
+  benchmarkRows,
   cliCommands,
   extensionCommands,
   piTools,
@@ -29,8 +31,13 @@ describe('productSummary', () => {
 
   it('should have scope items', () => {
     expect(productSummary.scope.length).toBeGreaterThan(0)
-    expect(productSummary.scope).toContain('Pi 必需')
-    expect(productSummary.scope).toContain('本地单机运行时')
+    expect(productSummary.scope).toContain('Pi 原生，本地单机运行')
+  })
+
+  it('should have benchmark evidence', () => {
+    expect(benchmarkSummary.record).toContain('0 负')
+    expect(benchmarkRows.length).toBe(4)
+    expect(benchmarkRows[0].result).toBe('win')
   })
 })
 

@@ -6,38 +6,79 @@
 /** 产品摘要 */
 export const productSummary = {
   name: 'pi-company',
-  tagline: '让多个 Pi 像一个可见的本地项目团队一样工作。',
-  description: '把普通 Pi 窗口接成本地协作流程：lead 管全局真相，worker 用 mailbox 协作，coder 在独立 worktree 里并行改代码，合并必须经过 review、test 和产品验收。',
+  tagline: '经官方 SWE-bench 验证的多智能体协作运行时',
+  description: '让多个可见、可控的 Pi 智能体在一个项目中协同工作——用角色隔离、对抗验证和交付闸门取代单 agent 的自检自批。',
   coreWorkflow: 'human → lead → local issues → coder worktrees → local PR → reviewer + tester → PM/lead acceptance → gates → lead merge',
-  shortPitch: 'Run Pi agents like a visible local project team.',
-  valueProps: [
-    {
-      title: '看得见',
-      body: '每个 agent 都是可见 Pi session。你可以看它做什么，必要时随时打断。',
-    },
-    {
-      title: '接得住',
-      body: '任何窗口里的人类 steering 都会同步到 lead，团队不会只听见局部指令。',
-    },
-    {
-      title: '合得稳',
-      body: '代码走本地 PR、隔离 worktree、review、tester 验证和 PM/lead 验收。',
-    },
-  ],
   scope: [
-    'Pi 必需',
-    '本地单机运行时',
-    '每个公司一个项目',
-    '项目级 `.pi-company/` 状态',
-    '事件日志 + reducer + 邮箱文件',
-    '本地 issues 和 PR 门控',
+    'Pi 原生，本地单机运行',
+    '角色隔离：coder/reviewer/tester 物理上无法越权',
+    'OKF 知识层 + hook 强制的交付闸门',
+    '对抗编排：合同谈判 + 多轮验证循环',
+    '本地 issues 与 PR 门控',
     '独立 coder 工作树并行编辑',
-    '人类引导自动镜像到 lead',
-    '组织级速率限制退避和交错恢复',
-    'Provider 请求门控减少过载失败',
+    '人类 steering 自动镜像到 lead',
+    'Provider 请求门控减少 429',
     '可选 cmux 启动适配器',
   ],
 }
+
+/** Benchmark 证据（官方 SWE-bench Verified harness） */
+export interface BenchmarkRow {
+  instance: string
+  difficulty: string
+  plain: string
+  v3: string
+  result: 'win' | 'tie-win' | 'tie-fail'
+  plainTests: string
+  v3Tests: string
+}
+
+export const benchmarkSummary = {
+  headline: '官方 SWE-bench 上首次超越单 agent',
+  model: 'openai-codex/gpt-5.5',
+  record: '1 胜 · 3 平 · 0 负',
+  resolveRate: 'plain 25% → v3 50%',
+  neverBelow: '从未低于 plain',
+}
+
+export const benchmarkRows: BenchmarkRow[] = [
+  {
+    instance: 'django__django-13212',
+    difficulty: '1-4h',
+    plain: '✗',
+    v3: '✓',
+    result: 'win',
+    plainTests: '3/5',
+    v3Tests: '5/5',
+  },
+  {
+    instance: 'django__django-13128',
+    difficulty: '1-4h',
+    plain: '✓',
+    v3: '✓',
+    result: 'tie-win',
+    plainTests: 'resolved',
+    v3Tests: 'resolved',
+  },
+  {
+    instance: 'sympy__sympy-18199',
+    difficulty: '1-4h',
+    plain: '✗',
+    v3: '✗',
+    result: 'tie-fail',
+    plainTests: '0/1',
+    v3Tests: '0/1',
+  },
+  {
+    instance: 'sympy__sympy-14248',
+    difficulty: '1-4h',
+    plain: '✗',
+    v3: '✗',
+    result: 'tie-fail',
+    plainTests: '—',
+    v3Tests: '—',
+  },
+]
 
 /** 角色定义 */
 export interface Role {
@@ -152,114 +193,111 @@ export interface CliCommand {
 
 export const cliCommands: CliCommand[] = [
   {
-    command: 'pi-company init --id <id>',
+    command: 'pi-company --root <project> init --id <id>',
     description: '初始化 .pi-company 目录',
-    example: 'pi-company init --id tarot-draw',
+    example: 'pi-company --root ./my-project init --id demo',
     category: '初始化',
   },
   {
-    command: 'pi-company status',
+    command: 'pi-company --root <project> status',
     description: '显示 agents、issues、PRs、待合并项和速率限制状态',
-    example: 'pi-company status',
+    example: 'pi-company --root ./my-project status',
     category: '状态',
   },
   {
-    command: 'pi-company brief',
+    command: 'pi-company --root <project> brief',
     description: '显示 lead 的权威全局交付摘要',
-    example: 'pi-company brief',
+    example: 'pi-company --root ./my-project brief',
     category: '状态',
   },
   {
-    command: 'pi-company reduce',
+    command: 'pi-company --root <project> reduce',
     description: '从事件重建状态和渲染的 issue/PR 快照',
-    example: 'pi-company reduce',
+    example: 'pi-company --root ./my-project reduce',
     category: '状态',
   },
   {
-    command: 'pi-company launch-command <agent>',
+    command: 'pi-company --root <project> launch-command <agent>',
     description: '打印启动已有 agent 的命令',
-    example: 'pi-company launch-command lead',
+    example: 'pi-company --root ./my-project launch-command lead',
     category: '启动',
   },
   {
-    command: 'pi-company spawn <role>',
+    command: 'pi-company --root <project> spawn <role>',
     description: '规划或启动 agent',
-    example: 'pi-company spawn tester --manual',
+    example: 'pi-company --root ./my-project spawn tester --manual',
     category: '启动',
   },
   {
-    command: 'pi-company spawn coder --name <name> --yes --cmux',
+    command: 'pi-company --root <project> spawn coder --name <name> --yes --cmux',
     description: '启动带隔离工作树的 coder',
-    example: 'pi-company spawn coder --name coder-ui --yes --cmux',
+    example: 'pi-company --root ./my-project spawn coder --name coder-ui --yes --cmux',
     category: '启动',
   },
   {
-    command: 'pi-company steer',
+    command: 'pi-company --root <project> steer',
     description: '为 agent 记录人类引导并镜像到 lead',
-    example: 'pi-company steer --agent coder --text "Keep the UI minimal"',
+    example: 'pi-company --root ./my-project steer',
     category: '消息',
   },
   {
-    command: 'pi-company inbox',
+    command: 'pi-company --root <project> inbox',
     description: '显示或确认邮箱消息',
-    example: 'pi-company inbox',
+    example: 'pi-company --root ./my-project inbox',
     category: '消息',
   },
   {
-    command: 'pi-company issue',
+    command: 'pi-company --root <project> issue',
     description: '管理本地 issues',
-    example: 'pi-company issue create "Build UI" --work-type implementation',
+    example: 'pi-company --root ./my-project issue create --title "Build UI"',
     category: 'Issues',
   },
   {
-    command: 'pi-company task',
+    command: 'pi-company --root <project> task',
     description: '记录任务进度',
-    example: 'pi-company task start ISSUE-001 --actor coder',
+    example: 'pi-company --root ./my-project task start --issue ISSUE-001',
     category: 'Issues',
   },
   {
-    command: 'pi-company pr',
+    command: 'pi-company --root <project> pr',
     description: '管理本地 PRs',
-    example: 'pi-company pr create --title "feat: add UI" --author coder --branch pi-company/coder --worktree .pi-company/worktrees/coder',
+    example: 'pi-company --root ./my-project pr create --title "feat: add UI"',
     category: 'PR',
   },
   {
-    command: 'pi-company message',
+    command: 'pi-company --root <project> message',
     description: '发送邮箱消息',
-    example: 'pi-company message --from lead --to coder --type assignment --text "Start now"',
+    example: 'pi-company --root ./my-project message --to coder --text "Start now"',
     category: '消息',
   },
   {
-    command: 'pi-company rate-limit --actor <agent> --reason <reason>',
-    description: '报告 provider 过载/配额压力',
-    example: 'pi-company rate-limit --actor tester --reason "provider overload"',
+    command: 'pi-company --root <project> rate-limit --actor <agent> --reason <reason>',
+    description: '报告 provider 429/配额压力',
+    example: 'pi-company --root ./my-project rate-limit --actor tester --reason "429 Too many requests"',
     category: '速率限制',
   },
   {
-    command: 'pi-company rate-limit-clear',
+    command: 'pi-company --root <project> rate-limit-clear',
     description: '清除已验证的误报退避',
-    example: 'pi-company rate-limit-clear',
+    example: 'pi-company --root ./my-project rate-limit-clear',
     category: '速率限制',
   },
   {
-    command: 'pi-company cmux-rate-limit-scan',
-    description: '扫描可见 cmux pi-company 表面的 provider 过载提示',
-    example: 'pi-company cmux-rate-limit-scan --workspace workspace:16',
+    command: 'pi-company --root <project> cmux-rate-limit-scan',
+    description: '扫描可见 cmux pi-company 表面的 429',
+    example: 'pi-company --root ./my-project cmux-rate-limit-scan --workspace workspace:16',
     category: '速率限制',
   },
   {
-    command: 'pi-company cmux-status',
+    command: 'pi-company --root <project> cmux-status',
     description: '设置 cmux 侧边栏状态',
-    example: 'pi-company cmux-status',
+    example: 'pi-company --root ./my-project cmux-status',
     category: 'cmux',
   },
 ]
 
 /** Pi 扩展命令 */
 export const extensionCommands = [
-  { command: '/company-init', description: '在当前 Pi session 里初始化 .pi-company 并接入 lead' },
-  { command: '/company-start', description: '手动刷新角色职责和 lead brief 到当前 Pi 对话' },
-  { command: '/company-resume', description: '/company-start 的兼容别名' },
   { command: '/company-status', description: '刷新并显示 pi-company 面板' },
   { command: '/company-brief', description: '注入权威的 lead/全局交付摘要' },
   { command: '/company-inbox', description: '注入未读邮箱消息' },
@@ -273,7 +311,7 @@ export const piTools = [
   { name: 'company_status', description: '读取本地 pi-company 状态' },
   { name: 'company_lead_brief', description: '读取权威全局交付摘要' },
   { name: 'company_inbox', description: '读取或确认邮箱消息' },
-  { name: 'company_report_rate_limit', description: '报告 provider 过载/配额压力' },
+  { name: 'company_report_rate_limit', description: '报告 provider 429/配额压力' },
   { name: 'company_clear_rate_limit', description: '清除误报退避（仅 lead）' },
   { name: 'company_configure_model_policy', description: '配置角色/agent 模型策略' },
   { name: 'company_send_message', description: '发送邮箱消息给另一个 agent' },
@@ -286,8 +324,7 @@ export const piTools = [
   { name: 'company_submit_review', description: '提交 reviewer 审批/评论/请求变更' },
   { name: 'company_submit_test', description: '提交独立 tester 验证' },
   { name: 'company_submit_acceptance', description: '提交 PM/lead 产品验收' },
-  { name: 'company_record_automated_tests', description: '记录自动化测试命令结果' },
-  { name: 'company_record_auto_tests', description: '记录自动化测试命令结果（兼容别名）' },
+  { name: 'company_record_auto_tests', description: '记录自动化测试命令结果' },
   { name: 'company_pr_gates', description: '检查本地 PR 是否可合并' },
   { name: 'company_merge_pr', description: '请求或执行门控的本地 PR 合并' },
 ]
@@ -360,7 +397,7 @@ export const troubleshooting = [
     solution: '先停止 pi 进程，返回 shell，再运行启动命令',
   },
   {
-    symptom: '反复 provider overload 或 quota exhausted',
+    symptom: '反复 429 或 quota exhausted',
     diagnosis: 'Provider 压力过大',
     solution: '使用 rate-limit 报告，等待退避恢复，或切换模型/提供商',
   },

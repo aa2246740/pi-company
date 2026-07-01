@@ -1,11 +1,43 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { productSummary, roles } from '@/data/facts'
+/**
+ * HomePage — pi-company 首页
+ * 清晰的视觉层次，充足的呼吸空间
+ */
+import { ref } from 'vue'
+import { productSummary, roles, benchmarkSummary, benchmarkRows } from '@/data/facts'
 import TerminalPane from '@/components/terminal/TerminalPane.vue'
 import StatusBar from '@/components/terminal/StatusBar.vue'
 
-const selectedRoleId = ref('lead')
-const selectedRole = computed(() => roles.find(role => role.id === selectedRoleId.value) ?? roles[0])
+interface ConceptNode {
+  id: string
+  label: string
+  type: 'role' | 'system'
+  color: string
+  description: string
+  commands?: string[]
+}
+
+const nodes: ConceptNode[] = [
+  { id: 'human', label: 'Human', type: 'role', color: 'var(--text-1)', description: '提出需求，做出不可逆决策' },
+  { id: 'lead', label: 'Lead', type: 'role', color: 'var(--green)', description: '人类代理，协调所有 agent，使用 brief 验证真相', commands: ['company_lead_brief', 'company_merge_pr'] },
+  { id: 'pm', label: 'PM', type: 'role', color: 'var(--amber)', description: '保护用户价值、范围和验收标准', commands: ['company_submit_acceptance'] },
+  { id: 'researcher', label: 'Researcher', type: 'role', color: 'var(--magenta)', description: '处理跨职能未知和外部研究' },
+  { id: 'coder', label: 'Coder', type: 'role', color: 'var(--cyan)', description: '实现代码，在隔离工作树中并行编辑', commands: ['company_create_pr', 'company_mark_pr_ready'] },
+  { id: 'reviewer', label: 'Reviewer', type: 'role', color: 'var(--cyan-soft)', description: '保护代码质量、安全性和可维护性', commands: ['company_submit_review'] },
+  { id: 'tester', label: 'Tester', type: 'role', color: 'var(--amber)', description: '验证用户行为、边界情况和回归', commands: ['company_submit_test'] },
+]
+
+const systemNodes: ConceptNode[] = [
+  { id: 'issues', label: 'Issues', type: 'system', color: 'var(--info)', description: '本地问题跟踪，lead 创建和分配' },
+  { id: 'pr-gates', label: 'PR Gates', type: 'system', color: 'var(--warning)', description: '合并门控：自测、测试、审查、验收' },
+  { id: 'mailbox', label: 'Mailbox', type: 'system', color: 'var(--magenta)', description: 'Agent 邮箱消息系统' },
+]
+
+const selectedNode = ref<ConceptNode | null>(null)
+
+function selectNode(node: ConceptNode) {
+  selectedNode.value = selectedNode.value?.id === node.id ? null : node
+}
 
 const statusAgents = [
   { name: 'lead', status: 'online' as const },
@@ -13,122 +45,121 @@ const statusAgents = [
   { name: 'coder-ui', status: 'online' as const },
   { name: 'tester', status: 'planned' as const },
 ]
-
-const beforeAfter = [
-  {
-    before: '多个 Pi 窗口各自理解上下文。',
-    after: 'Lead 用本地 brief 保持一个交付真相。',
-  },
-  {
-    before: 'Agent 说 done，但你不知道证据在哪里。',
-    after: 'PR gate 记录自测、review、tester 和产品验收。',
-  },
-  {
-    before: '并行改代码容易互相覆盖。',
-    after: 'Coder 在隔离 git worktree 里工作，再走本地 PR。',
-  },
-]
-
-const operatingLoop = [
-  '人类把目标交给 lead',
-  'Lead 创建本地 issue 并分配角色',
-  'Coder 在独立 worktree 里实现',
-  'Reviewer 和 tester 分别提交证据',
-  'PM 或 lead 做产品验收',
-  'Gates 全绿后 lead 合并',
-]
-
-const trustRails = [
-  {
-    title: '本地优先',
-    body: '状态写在项目的 .pi-company 目录里：事件日志、mailbox、issues、PRs 和 runtime 快照。',
-  },
-  {
-    title: '人类在环',
-    body: '你对任意 Pi session 的 steering 会镜像给 lead。你仍然能接管任何可见窗口。',
-  },
-  {
-    title: '默认防乱',
-    body: '请求按 provider 限流错峰；worker 消失时写恢复快照；合并前检查 root worktree。',
-  },
-]
 </script>
 
 <template>
   <div class="home">
+    <!-- Hero — 充足的呼吸空间 -->
     <section class="hero">
-      <div class="hero__grid">
-        <div class="hero__copy">
-          <p class="hero__kicker">Pi 原生协作层</p>
-          <h1>{{ productSummary.tagline }}</h1>
-          <p class="hero__lead">{{ productSummary.description }}</p>
+      <div class="hero__container">
+        <div class="hero__badge font-mono">
+          <span class="hero__badge-dot"></span>
+          {{ benchmarkSummary.neverBelow }}
+        </div>
 
-          <div class="hero__actions">
-            <router-link to="/quickstart" class="btn btn--primary">快速开始</router-link>
-            <a class="btn btn--ghost" href="https://github.com/aa2246740/pi-company" target="_blank" rel="noreferrer">查看 GitHub</a>
+        <h1 class="hero__title">
+          <span class="glow-green font-pixel">{{ productSummary.name }}</span>
+        </h1>
+
+        <p class="hero__subtitle">{{ productSummary.tagline }}</p>
+
+        <p class="hero__desc">{{ productSummary.description }}</p>
+
+        <div class="hero__workflow">
+          <TerminalPane title="core-workflow" :show-dots="true">
+            <code class="workflow-code">{{ productSummary.coreWorkflow }}</code>
+          </TerminalPane>
+        </div>
+
+        <div class="hero__actions">
+          <router-link to="/quickstart" class="btn btn--primary">
+            <span class="btn__icon">▶</span>
+            快速开始
+          </router-link>
+          <a href="#benchmark" class="btn btn--ghost">
+            <span class="btn__icon">≡</span>
+            看 Benchmark
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <!-- Benchmark — 最突出的证据区块 -->
+    <section id="benchmark" class="section section--benchmark">
+      <div class="section__container">
+        <div class="section__header">
+          <div class="benchmark__badge">🏆 官方 SWE-bench Verified</div>
+          <h2>{{ benchmarkSummary.headline }}</h2>
+          <p class="section__lead">
+            同一模型（<code class="inline-code">{{ benchmarkSummary.model }}</code>）、同一 instance、同一 base commit，由官方 harness 评分。唯一差别：编排方式。
+          </p>
+        </div>
+
+        <div class="benchmark__stats">
+          <div class="stat">
+            <span class="stat__value glow-green">{{ benchmarkSummary.record }}</span>
+            <span class="stat__label">v3 vs plain</span>
+          </div>
+          <div class="stat">
+            <span class="stat__value" style="color: var(--cyan)">{{ benchmarkSummary.resolveRate }}</span>
+            <span class="stat__label">Resolve 率</span>
           </div>
         </div>
 
-        <TerminalPane title="lead-brief" :show-dots="true" class="hero__terminal">
-          <pre class="brief-snapshot"><code>pi-company tarot-draw | lead
-focus: ship the current feature
-inbox: human steering mirrored
-issue: ISSUE-024 done
-pr: PR-026 merged
-gates: review pass | test pass | acceptance pass
-next: no incomplete work</code></pre>
-        </TerminalPane>
-      </div>
-    </section>
+        <div class="benchmark__table-wrap">
+          <TerminalPane title="swebench-results" :show-dots="true">
+            <table class="benchmark-table">
+              <thead>
+                <tr>
+                  <th>Instance</th>
+                  <th class="ta-center">难度</th>
+                  <th class="ta-center">plain</th>
+                  <th class="ta-center">pi-company v3</th>
+                  <th class="ta-center">结果</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="row in benchmarkRows"
+                  :key="row.instance"
+                  :class="{ 'row--win': row.result === 'win' }"
+                >
+                  <td class="font-mono">{{ row.instance }}</td>
+                  <td class="ta-center muted">{{ row.difficulty }}</td>
+                  <td class="ta-center">{{ row.plain }} <span class="muted">{{ row.plainTests }}</span></td>
+                  <td class="ta-center">{{ row.v3 }} <span class="muted">{{ row.v3Tests }}</span></td>
+                  <td class="ta-center">
+                    <span :class="['result-pill', `result-pill--${row.result}`]">
+                      {{ row.result === 'win' ? 'v3 胜' : row.result === 'tie-win' ? '平' : '平' }}
+                    </span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </TerminalPane>
+        </div>
 
-    <section class="section section--tight">
-      <div class="section__container">
-        <div class="value-strip">
-          <article v-for="item in productSummary.valueProps" :key="item.title" class="value-card">
-            <h2>{{ item.title }}</h2>
-            <p>{{ item.body }}</p>
-          </article>
+        <div class="benchmark__why">
+          <h3>为什么能赢——不是运气，是机制</h3>
+          <p>
+            plain 和旧版都打 3/5，都漏了 <code class="inline-code">forms/fields.py</code>（<code class="inline-code">DecimalField</code> 在到达 validator 前就拒了 <code class="inline-code">NaN</code>）。
+            <strong>v3 的合同谈判</strong>（coder 与 tester 在写代码<em>之前</em>各自提出可测的 Done 断言）明确逼出了这条隐藏路径，于是 coder 改了 plain 从没碰过的文件，对抗 evaluator 再逐条验证。
+          </p>
+          <p class="benchmark__why-detail">
+            这正是「能跑数小时的 agent」模式的核心论点：谈判出的合同把「用户故事」桥接到「可测行为」，对抗 evaluator 强制执行它。
+          </p>
         </div>
       </div>
     </section>
 
+    <!-- 状态面板 — 独立的视觉区块 -->
     <section class="section">
-      <div class="section__container two-column">
-        <div class="section__intro">
-          <p class="section__kicker">为什么存在</p>
-          <h2>多开 Pi 很快，但项目会失去共享真相。</h2>
-          <p>pi-company 不是再造一个聊天机器人。它给可见 Pi agents 加上本地协作纪律：谁负责、做到哪一步、证据在哪里、什么时候能合并。</p>
-        </div>
-
-        <div class="comparison">
-          <div v-for="item in beforeAfter" :key="item.before" class="comparison__row">
-            <p class="comparison__before">{{ item.before }}</p>
-            <p class="comparison__after">{{ item.after }}</p>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section class="section section--panel">
       <div class="section__container">
-        <div class="section__intro section__intro--center">
-          <p class="section__kicker">工作方式</p>
-          <h2>从一句需求，到一条可审计的本地 PR。</h2>
-          <p>{{ productSummary.coreWorkflow }}</p>
+        <div class="section__header">
+          <h2>实时状态面板</h2>
+          <p class="section__lead">每个 agent 都有可见的状态面板，一目了然</p>
         </div>
-
-        <ol class="loop">
-          <li v-for="(step, index) in operatingLoop" :key="step">
-            <span class="loop__index">{{ String(index + 1).padStart(2, '0') }}</span>
-            <span>{{ step }}</span>
-          </li>
-        </ol>
-      </div>
-    </section>
-
-    <section class="section">
-      <div class="section__container two-column two-column--reverse">
-        <div class="terminal-stack">
+        <div class="section__content">
           <StatusBar
             :agents="statusAgents"
             :issue-count="5"
@@ -136,85 +167,130 @@ next: no incomplete work</code></pre>
             rate-limit="none"
             root-status="clean"
           />
-          <TerminalPane title="human-steering" :show-dots="true">
-            <pre class="brief-snapshot"><code>human -> coder-ui:
-Keep the UI minimal and use $impeccable.
-
-pi-company mirrors this to lead:
-lead updates issue scope
-lead routes design requirement to the owner</code></pre>
-          </TerminalPane>
-        </div>
-
-        <div class="section__intro">
-          <p class="section__kicker">可见接管</p>
-          <h2>不是把 agent 藏进后台，而是让每个窗口都能被你 steering。</h2>
-          <p>你可以直接对 worker 说话，也可以让 lead 分发。pi-company 会把人类 steering 镜像给 lead，让局部修正进入全局协调。</p>
         </div>
       </div>
     </section>
 
-    <section class="section section--panel">
-      <div class="section__container two-column">
-        <div class="section__intro">
-          <p class="section__kicker">可信边界</p>
-          <h2>角色不是人设，是上下文隔离。</h2>
-          <p>分角色的目的不是模拟公司层级，而是控制上下文污染：实现、测试、产品验收和最终合并各自留下证据。</p>
+    <!-- 系统架构 — 清晰的卡片布局 -->
+    <section class="section">
+      <div class="section__container">
+        <div class="section__header">
+          <h2>系统架构</h2>
+          <p class="section__lead">点击角色了解职责和相关工具</p>
         </div>
 
-        <div class="role-lab">
-          <div class="role-tabs" role="tablist" aria-label="角色">
-            <button
-              v-for="role in roles"
-              :key="role.id"
-              class="role-tab"
-              :class="{ 'role-tab--active': selectedRoleId === role.id }"
-              type="button"
-              @click="selectedRoleId = role.id"
-            >
-              <span :style="{ color: role.color }">{{ role.icon }}</span>
-              {{ role.name }}
-            </button>
+        <div class="concept-grid">
+          <!-- 角色节点 -->
+          <div class="concept-group">
+            <h3 class="concept-group__title">
+              <span class="concept-group__icon">◇</span>
+              角色
+            </h3>
+            <div class="concept-nodes">
+              <button
+                v-for="node in nodes"
+                :key="node.id"
+                class="concept-node"
+                :class="{ 'concept-node--active': selectedNode?.id === node.id }"
+                @click="selectNode(node)"
+              >
+                <span class="concept-node__dot" :style="{ background: node.color }"></span>
+                <span class="concept-node__label">{{ node.label }}</span>
+              </button>
+            </div>
           </div>
 
-          <TerminalPane :title="selectedRole.id" :show-dots="true">
-            <div class="role-detail">
-              <h3 :style="{ color: selectedRole.color }">{{ selectedRole.name }}</h3>
-              <p>{{ selectedRole.responsibility }}</p>
-              <div class="role-detail__grid">
-                <div>
-                  <strong>边界</strong>
-                  <ul>
-                    <li v-for="item in selectedRole.boundaries" :key="item">{{ item }}</li>
-                  </ul>
-                </div>
-                <div>
-                  <strong>常见错误</strong>
-                  <ul>
-                    <li v-for="item in selectedRole.commonMistakes" :key="item">{{ item }}</li>
-                  </ul>
-                </div>
+          <!-- 系统节点 -->
+          <div class="concept-group">
+            <h3 class="concept-group__title">
+              <span class="concept-group__icon">⚙</span>
+              系统组件
+            </h3>
+            <div class="concept-nodes">
+              <button
+                v-for="node in systemNodes"
+                :key="node.id"
+                class="concept-node concept-node--system"
+                :class="{ 'concept-node--active': selectedNode?.id === node.id }"
+                @click="selectNode(node)"
+              >
+                <span class="concept-node__dot" :style="{ background: node.color }"></span>
+                <span class="concept-node__label">{{ node.label }}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 选中详情 -->
+        <Transition name="detail">
+          <div v-if="selectedNode" class="concept-detail">
+            <TerminalPane :title="selectedNode.id" :show-dots="true">
+              <div class="detail__header">
+                <span class="detail__name" :style="{ color: selectedNode.color }">
+                  {{ selectedNode.label }}
+                </span>
+                <span class="detail__type">{{ selectedNode.type }}</span>
+              </div>
+              <p class="detail__desc">{{ selectedNode.description }}</p>
+              <div v-if="selectedNode.commands" class="detail__commands">
+                <span class="detail__commands-label">工具：</span>
+                <code v-for="cmd in selectedNode.commands" :key="cmd" class="detail__cmd">{{ cmd }}</code>
+              </div>
+            </TerminalPane>
+          </div>
+        </Transition>
+      </div>
+    </section>
+
+    <!-- 核心特性 — 卡片网格 -->
+    <section class="section">
+      <div class="section__container">
+        <div class="section__header">
+          <h2>核心特性</h2>
+          <p class="section__lead">pi-company 的设计原则和能力</p>
+        </div>
+
+        <div class="features">
+          <div v-for="(item, i) in productSummary.scope" :key="i" class="feature">
+            <div class="feature__icon">
+              <span class="feature__bullet">▸</span>
+            </div>
+            <div class="feature__content">
+              <span class="feature__text">{{ item }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 角色概览 — 详细卡片 -->
+    <section class="section section--last">
+      <div class="section__container">
+        <div class="section__header">
+          <h2>六大角色</h2>
+          <p class="section__lead">每个角色有明确的职责边界</p>
+        </div>
+
+        <div class="roles">
+          <div v-for="role in roles" :key="role.id" class="role">
+            <div class="role__header">
+              <span class="role__icon" :style="{ color: role.color }">{{ role.icon }}</span>
+              <div class="role__info">
+                <h3 class="role__name" :style="{ color: role.color }">{{ role.name }}</h3>
+                <span class="role__type">角色</span>
               </div>
             </div>
-          </TerminalPane>
-        </div>
-      </div>
-    </section>
-
-    <section class="section final-cta">
-      <div class="section__container">
-        <div class="final-cta__grid">
-          <div>
-            <p class="section__kicker">本地安全感</p>
-            <h2>装上之后，普通 Pi 还是普通 Pi。</h2>
-            <p>只有项目里存在 .pi-company 状态时，pi-company 才会接入。没有 company 的目录不会被接管，不会创建状态，也不会注册 company tools。</p>
-          </div>
-
-          <div class="trust-list">
-            <article v-for="item in trustRails" :key="item.title" class="trust-item">
-              <h3>{{ item.title }}</h3>
-              <p>{{ item.body }}</p>
-            </article>
+            <p class="role__desc">{{ role.responsibility }}</p>
+            <div class="role__meta">
+              <span class="role__meta-item">
+                <span class="role__meta-label">边界：</span>
+                {{ role.boundaries.length }} 条
+              </span>
+              <span class="role__meta-item">
+                <span class="role__meta-label">常见错误：</span>
+                {{ role.commonMistakes.length }} 条
+              </span>
+            </div>
           </div>
         </div>
       </div>
@@ -223,435 +299,653 @@ lead routes design requirement to the owner</code></pre>
 </template>
 
 <style scoped>
+.home {
+  padding-top: var(--header-h);
+}
+
+/* ── Hero — 充足的呼吸空间 ── */
 .hero {
-  padding: clamp(72px, 12vw, 136px) 0 clamp(48px, 8vw, 96px);
-  border-bottom: 1px solid var(--border-2);
-  background:
-    radial-gradient(circle at 20% 20%, rgba(0, 204, 255, 0.08), transparent 28%),
-    radial-gradient(circle at 82% 18%, rgba(255, 170, 0, 0.08), transparent 24%),
-    var(--bg-1);
+  padding: var(--space-32) 0 var(--space-24);
+  text-align: center;
+  background: linear-gradient(
+    180deg,
+    var(--bg-1) 0%,
+    var(--bg-2) 100%
+  );
 }
 
-.hero__grid,
-.section__container {
-  width: min(1180px, calc(100% - 40px));
+.hero__container {
+  max-width: var(--content-max);
   margin: 0 auto;
-}
-
-.hero__grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.08fr) minmax(360px, 0.92fr);
-  gap: clamp(32px, 6vw, 72px);
-  align-items: center;
-}
-
-.hero__copy {
-  min-width: 0;
-}
-
-.hero__kicker,
-.section__kicker {
-  max-width: none;
-  margin: 0 0 var(--space-4);
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  color: var(--cyan);
-}
-
-.hero h1 {
-  max-width: 12ch;
-  margin: 0 0 var(--space-6);
-  font-size: clamp(3rem, 7vw, 5.75rem);
-  line-height: 0.95;
-  letter-spacing: -0.035em;
-}
-
-.hero__lead {
-  max-width: 62ch;
-  margin-bottom: var(--space-8);
-  font-size: clamp(1rem, 1.7vw, 1.25rem);
-  color: var(--text-2);
-  overflow-wrap: anywhere;
-}
-
-.hero__actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-3);
-}
-
-.btn {
-  display: inline-flex;
-  min-height: 46px;
-  align-items: center;
-  justify-content: center;
   padding: 0 var(--space-6);
-  border: 1px solid var(--border-3);
-  border-radius: var(--radius-md);
-  font-weight: 700;
-  text-decoration: none;
-  transition: background var(--duration-fast) var(--ease-out), border-color var(--duration-fast) var(--ease-out), color var(--duration-fast) var(--ease-out), transform var(--duration-fast) var(--ease-out);
 }
 
-.btn:hover {
-  transform: translateY(-1px);
-  text-decoration: none;
+.hero__badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--green);
+  background: var(--green-bg);
+  border: 1px solid rgba(0, 255, 65, 0.2);
+  border-radius: var(--radius-full);
+  padding: var(--space-2) var(--space-4);
+  margin-bottom: var(--space-10);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
-.btn--primary {
-  border-color: var(--green);
+.hero__badge-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
   background: var(--green);
-  color: var(--bg-0);
+  box-shadow: 0 0 8px rgba(0, 255, 65, 0.6);
+  animation: pulse 2s var(--ease-out) infinite;
 }
 
-.btn--primary:hover {
-  border-color: var(--green-soft);
-  background: var(--green-soft);
-  color: var(--bg-0);
-}
-
-.btn--ghost {
-  color: var(--text-1);
-  background: var(--bg-2);
-}
-
-.btn--ghost:hover {
-  border-color: var(--cyan);
-  color: var(--cyan);
-}
-
-.hero__terminal {
-  min-width: 0;
-}
-
-.brief-snapshot {
-  max-width: 100%;
-  margin: 0;
-  padding: 0;
-  overflow-x: auto;
-  border: 0;
-  background: transparent;
-}
-
-.brief-snapshot code {
-  display: block;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--text-2);
-  white-space: pre;
-}
-
-.section {
-  padding: clamp(64px, 9vw, 112px) 0;
-  border-bottom: 1px solid var(--border-1);
-}
-
-.section--tight {
-  padding: var(--space-10) 0;
-}
-
-.section--panel {
-  background: var(--bg-2);
-}
-
-.section__intro h2,
-.final-cta h2 {
-  max-width: 12ch;
-  margin-top: 0;
-  margin-bottom: var(--space-5);
-  padding: 0;
-  border: 0;
-  font-size: clamp(2rem, 4vw, 3.75rem);
-  line-height: 1;
+.hero__title {
+  font-size: clamp(3rem, 10vw, var(--text-5xl));
+  margin-bottom: var(--space-8);
+  font-weight: 700;
   letter-spacing: -0.03em;
 }
 
-.section__intro p:not(.section__kicker),
-.final-cta p {
-  color: var(--text-3);
-  font-size: var(--text-lg);
-}
-
-.section__intro--center {
-  max-width: 780px;
-  margin: 0 auto var(--space-10);
-  text-align: center;
-}
-
-.section__intro--center h2,
-.section__intro--center p {
+.hero__subtitle {
+  font-size: var(--text-xl);
+  color: var(--cyan);
+  margin-bottom: var(--space-6);
+  font-weight: 500;
+  max-width: 50ch;
   margin-left: auto;
   margin-right: auto;
 }
 
-.two-column,
-.final-cta__grid {
-  display: grid;
-  grid-template-columns: minmax(0, 0.92fr) minmax(360px, 1.08fr);
-  gap: clamp(32px, 6vw, 72px);
-  align-items: start;
-}
-
-.two-column--reverse {
-  grid-template-columns: minmax(360px, 1.08fr) minmax(0, 0.92fr);
-}
-
-.value-strip {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  border: 1px solid var(--border-2);
-  border-radius: var(--radius-lg);
-  overflow: hidden;
-  background: var(--bg-2);
-}
-
-.value-card {
-  padding: var(--space-6);
-  border-right: 1px solid var(--border-2);
-}
-
-.value-card:last-child {
-  border-right: 0;
-}
-
-.value-card h2 {
-  margin: 0 0 var(--space-3);
-  padding: 0;
-  border: 0;
-  color: var(--green);
-  font-size: var(--text-2xl);
-}
-
-.value-card p {
-  margin: 0;
+.hero__desc {
+  font-size: var(--text-lg);
   color: var(--text-3);
+  max-width: 50ch;
+  margin: 0 auto var(--space-12);
+  line-height: var(--leading-relaxed);
 }
 
-.comparison {
-  border: 1px solid var(--border-2);
+.hero__workflow {
+  max-width: 600px;
+  margin: 0 auto var(--space-12);
+  text-align: left;
+}
+
+.workflow-code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--green);
+  font-size: var(--text-sm);
+  word-break: break-all;
+  line-height: var(--leading-relaxed);
+}
+
+.hero__actions {
+  display: flex;
+  gap: var(--space-4);
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+/* ── Buttons — 清晰的交互 ── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-8);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  font-weight: 600;
   border-radius: var(--radius-lg);
-  overflow: hidden;
-  background: var(--bg-2);
+  text-decoration: none;
+  transition: all var(--duration-fast) var(--ease-out);
+  cursor: pointer;
+  border: 2px solid transparent;
+  min-height: 48px;
+  letter-spacing: 0.01em;
 }
 
-.comparison__row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  border-bottom: 1px solid var(--border-2);
+.btn__icon {
+  font-size: var(--text-lg);
 }
 
-.comparison__row:last-child {
-  border-bottom: 0;
+.btn--primary {
+  color: var(--bg-0);
+  background: var(--green);
+  border-color: var(--green);
 }
 
-.comparison__before,
-.comparison__after {
-  max-width: none;
-  margin: 0;
-  padding: var(--space-5);
+.btn--primary:hover {
+  background: var(--green-soft);
+  border-color: var(--green-soft);
+  text-decoration: none;
+  color: var(--bg-0);
+  box-shadow: var(--glow-green);
+  transform: translateY(-1px);
+}
+
+.btn--ghost {
+  color: var(--text-1);
+  background: transparent;
+  border-color: var(--border-3);
+}
+
+.btn--ghost:hover {
+  background: var(--bg-3);
+  border-color: var(--text-3);
+  text-decoration: none;
+  color: var(--text-1);
+  transform: translateY(-1px);
+}
+
+/* ── Sections — 清晰的视觉分隔 ── */
+.section {
+  padding: var(--space-20) 0;
+  border-top: 1px solid var(--border-1);
+}
+
+/* ── Benchmark 区块 ── */
+.section--benchmark {
+  background:
+    radial-gradient(circle at 50% 0%, var(--green-bg) 0%, transparent 60%),
+    var(--bg-1);
+}
+
+.benchmark__badge {
+  display: inline-block;
+  font-size: var(--text-sm);
+  color: var(--amber);
+  background: var(--amber-glow);
+  border: 1px solid rgba(255, 170, 0, 0.25);
+  border-radius: var(--radius-full);
+  padding: var(--space-2) var(--space-4);
+  margin-bottom: var(--space-4);
+  letter-spacing: 0.04em;
+}
+
+.benchmark__stats {
+  display: flex;
+  gap: var(--space-12);
+  justify-content: center;
+  flex-wrap: wrap;
+  margin: var(--space-10) 0;
+}
+
+.stat {
+  text-align: center;
+}
+
+.stat__value {
+  display: block;
+  font-size: clamp(1.75rem, 5vw, var(--text-4xl));
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+
+.stat__label {
+  display: block;
+  font-size: var(--text-xs);
+  color: var(--text-4);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-top: var(--space-2);
+}
+
+.benchmark__table-wrap {
+  max-width: 820px;
+  margin: 0 auto;
+}
+
+.benchmark-table {
+  width: 100%;
+  border-collapse: collapse;
   font-size: var(--text-sm);
 }
 
-.comparison__before {
+.benchmark-table th {
+  text-align: left;
+  font-size: var(--text-xs);
   color: var(--text-4);
-  background: var(--bg-1);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-2);
 }
 
-.comparison__after {
-  color: var(--text-1);
-}
-
-.loop {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 1px;
-  padding: 1px;
-  margin: 0;
-  list-style: none;
-  border: 1px solid var(--border-2);
-  border-radius: var(--radius-lg);
-  background: var(--border-2);
-  overflow: hidden;
-}
-
-.loop li {
-  display: flex;
-  min-height: 132px;
-  flex-direction: column;
-  gap: var(--space-4);
-  margin: 0;
-  padding: var(--space-5);
-  background: var(--bg-1);
+.benchmark-table td {
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--border-1);
   color: var(--text-2);
 }
 
-.loop__index {
+.benchmark-table .row--win td {
+  background: var(--green-bg);
+}
+
+.ta-center { text-align: center; }
+.muted { color: var(--text-4); font-size: var(--text-xs); }
+
+.inline-code {
   font-family: var(--font-mono);
-  color: var(--amber);
+  font-size: 0.85em;
+  background: var(--bg-3);
+  padding: 0.1em 0.4em;
+  border-radius: var(--radius-sm);
+  color: var(--green);
 }
 
-.terminal-stack {
+.result-pill {
+  display: inline-block;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  padding: 2px var(--space-3);
+  border-radius: var(--radius-full);
+}
+
+.result-pill--win {
+  color: var(--bg-0);
+  background: var(--green);
+}
+
+.result-pill--tie-win {
+  color: var(--cyan);
+  background: var(--cyan-bg);
+  border: 1px solid rgba(0, 204, 255, 0.25);
+}
+
+.result-pill--tie-fail {
+  color: var(--text-4);
+  background: var(--bg-3);
+  border: 1px solid var(--border-2);
+}
+
+.benchmark__why {
+  max-width: 680px;
+  margin: var(--space-12) auto 0;
+  padding: var(--space-8);
+  background: var(--bg-2);
+  border: 1px solid var(--border-2);
+  border-left: 3px solid var(--green);
+  border-radius: var(--radius-xl);
+}
+
+.benchmark__why h3 {
+  font-size: var(--text-lg);
+  margin-top: 0;
+  margin-bottom: var(--space-4);
+  color: var(--text-1);
+}
+
+.benchmark__why p {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+  line-height: var(--leading-relaxed);
+  margin-bottom: var(--space-3);
+}
+
+.benchmark__why-detail {
+  font-size: var(--text-xs) !important;
+  color: var(--text-4) !important;
+  font-style: italic;
+}
+
+.section--last {
+  padding-bottom: var(--space-32);
+}
+
+.section__container {
+  max-width: var(--page-max);
+  margin: 0 auto;
+  padding: 0 var(--space-8);
+}
+
+.section__header {
+  margin-bottom: var(--space-12);
+}
+
+.section__header h2 {
+  font-size: var(--text-3xl);
+  margin-top: 0;
+  margin-bottom: var(--space-4);
+  padding-bottom: var(--space-4);
+  border-bottom: 2px solid var(--border-2);
+}
+
+.section__lead {
+  font-size: var(--text-lg);
+  color: var(--text-3);
+  max-width: 50ch;
+  line-height: var(--leading-relaxed);
+}
+
+.section__content {
+  margin-top: var(--space-8);
+}
+
+/* ── Concept Grid — 清晰的分组 ── */
+.concept-grid {
   display: grid;
-  gap: var(--space-5);
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: var(--space-8);
+  margin-bottom: var(--space-10);
 }
 
-.role-lab {
-  display: grid;
-  gap: var(--space-5);
+.concept-group {
+  background: var(--bg-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-xl);
+  padding: var(--space-6);
 }
 
-.role-tabs {
+.concept-group__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: var(--space-5);
+  font-weight: 600;
+  margin-top: 0;
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.concept-group__icon {
+  font-size: var(--text-base);
+}
+
+.concept-nodes {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
 }
 
-.role-tab {
-  display: inline-flex;
+.concept-node {
+  display: flex;
   align-items: center;
   gap: var(--space-2);
-  min-height: 38px;
-  padding: 0 var(--space-4);
+  padding: var(--space-2) var(--space-4);
+  background: var(--bg-3);
   border: 1px solid var(--border-2);
-  border-radius: var(--radius-md);
-  background: var(--bg-1);
-  color: var(--text-3);
-  font-family: var(--font-mono);
-  cursor: pointer;
-}
-
-.role-tab:hover,
-.role-tab--active {
-  border-color: var(--cyan);
-  color: var(--text-1);
-  background: var(--cyan-bg);
-}
-
-.role-detail h3 {
-  margin: 0 0 var(--space-3);
-  padding: 0;
-  border: 0;
-}
-
-.role-detail p {
+  border-radius: var(--radius-lg);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  font-weight: 500;
   color: var(--text-2);
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
 }
 
-.role-detail__grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-6);
+.concept-node:hover {
+  border-color: var(--border-4);
+  background: var(--bg-4);
+  color: var(--text-1);
+}
+
+.concept-node--active {
+  border-color: var(--cyan);
+  background: var(--cyan-bg);
+  color: var(--cyan);
+}
+
+.concept-node__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.concept-node--system {
+  border-style: dashed;
+}
+
+/* ── Concept Detail ── */
+.concept-detail {
+  margin-top: var(--space-6);
+}
+
+.detail__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.detail__name {
+  font-size: var(--text-2xl);
+  font-weight: 700;
+}
+
+.detail__type {
+  font-size: var(--text-xs);
+  color: var(--text-4);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  background: var(--bg-4);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+}
+
+.detail__desc {
+  color: var(--text-2);
+  margin-bottom: var(--space-6);
+  line-height: var(--leading-relaxed);
+  font-size: var(--text-lg);
+}
+
+.detail__commands {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
   padding-top: var(--space-4);
   border-top: 1px solid var(--border-2);
 }
 
-.role-detail strong {
-  display: block;
-  margin-bottom: var(--space-3);
-  color: var(--cyan);
-}
-
-.role-detail ul {
-  margin: 0;
-  padding-left: var(--space-5);
-}
-
-.role-detail li {
-  color: var(--text-3);
+.detail__commands-label {
   font-size: var(--text-sm);
+  color: var(--text-4);
+  font-weight: 500;
 }
 
-.final-cta {
-  padding-bottom: clamp(80px, 12vw, 144px);
+.detail__cmd {
+  font-size: var(--text-xs);
 }
 
-.trust-list {
+/* ── Features — 清晰的卡片 ── */
+.features {
   display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
   gap: var(--space-4);
 }
 
-.trust-item {
+.feature {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
   padding: var(--space-5);
-  border: 1px solid var(--border-2);
-  border-radius: var(--radius-lg);
   background: var(--bg-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-xl);
+  transition: all var(--duration-fast) var(--ease-out);
 }
 
-.trust-item h3 {
-  margin: 0 0 var(--space-2);
+.feature:hover {
+  border-color: var(--border-3);
+  background: var(--bg-3);
+}
+
+.feature__icon {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--green-bg);
+  border-radius: var(--radius-md);
+}
+
+.feature__bullet {
   color: var(--green);
   font-size: var(--text-lg);
 }
 
-.trust-item p {
-  margin: 0;
+.feature__content {
+  flex: 1;
+}
+
+.feature__text {
   font-size: var(--text-sm);
+  color: var(--text-2);
+  line-height: var(--leading-relaxed);
+}
+
+/* ── Roles — 详细卡片 ── */
+.roles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--space-6);
+}
+
+.role {
+  padding: var(--space-8);
+  background: var(--bg-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-xl);
+  transition: all var(--duration-fast) var(--ease-out);
+}
+
+.role:hover {
+  border-color: var(--border-3);
+  box-shadow: var(--shadow-md);
+}
+
+.role__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+
+.role__icon {
+  font-size: var(--text-3xl);
+  line-height: 1;
+}
+
+.role__info {
+  flex: 1;
+}
+
+.role__name {
+  font-size: var(--text-xl);
+  font-weight: 700;
+  margin: 0 0 var(--space-1);
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.role__type {
+  font-size: var(--text-xs);
+  color: var(--text-4);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 500;
+}
+
+.role__desc {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+  line-height: var(--leading-relaxed);
+  margin-bottom: var(--space-5);
+}
+
+.role__meta {
+  display: flex;
+  gap: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-2);
+}
+
+.role__meta-item {
+  font-size: var(--text-xs);
+  color: var(--text-4);
+}
+
+.role__meta-label {
+  font-weight: 500;
   color: var(--text-3);
 }
 
-@media (max-width: 980px) {
-  .hero__grid,
-  .two-column,
-  .two-column--reverse,
-  .final-cta__grid {
-    grid-template-columns: 1fr;
-  }
-
-  .hero h1,
-  .section__intro h2,
-  .final-cta h2 {
-    max-width: 14ch;
-  }
-
-  .value-strip,
-  .loop {
-    grid-template-columns: 1fr;
-  }
-
-  .value-card {
-    border-right: 0;
-    border-bottom: 1px solid var(--border-2);
-  }
-
-  .value-card:last-child {
-    border-bottom: 0;
-  }
+/* ── Transitions ── */
+.detail-enter-active {
+  transition: all var(--duration-normal) var(--ease-out);
 }
 
-@media (max-width: 640px) {
-  .hero__grid,
-  .section__container {
-    width: calc(100% - 28px);
+.detail-leave-active {
+  transition: all var(--duration-fast) var(--ease-out);
+}
+
+.detail-enter-from,
+.detail-leave-to {
+  opacity: 0;
+  transform: translateY(-12px);
+}
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  .hero {
+    padding: var(--space-16) 0 var(--space-12);
   }
 
-  .hero h1 {
-    font-size: clamp(2.7rem, 12vw, 3.4rem);
-    line-height: 1.02;
+  .hero__title {
+    font-size: var(--text-4xl);
   }
 
-  .brief-snapshot code {
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
+  .hero__subtitle {
+    font-size: var(--text-lg);
   }
 
-  .comparison__row,
-  .role-detail__grid {
+  .section {
+    padding: var(--space-12) 0;
+  }
+
+  .section__header h2 {
+    font-size: var(--text-2xl);
+  }
+
+  .concept-grid {
     grid-template-columns: 1fr;
   }
 
-  .comparison__before {
-    border-bottom: 1px solid var(--border-2);
+  .features,
+  .roles {
+    grid-template-columns: 1fr;
+  }
+
+  .role {
+    padding: var(--space-6);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .btn {
+  .detail-enter-active,
+  .detail-leave-active {
     transition: none;
   }
 
-  .btn:hover {
-    transform: none;
+  .hero__badge-dot {
+    animation: none;
   }
 }
 </style>
