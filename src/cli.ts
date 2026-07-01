@@ -58,6 +58,10 @@ import {
   listInbox,
 } from "./core/company.js";
 import {
+  collectNegotiationProposals,
+  runAdversarialCycle,
+} from "./core/adversarial.js";
+import {
   activeRoleBundleIds,
   listDeliveryOkfInventory,
   queryOkfBundle,
@@ -375,6 +379,7 @@ okfGate.command("consumption")
     }
     if (!check.fresh) process.exitCode = 1;
   });
+
 
 okf.command("report")
   .option("--contract <id>")
@@ -1016,6 +1021,62 @@ process.on("unhandledRejection", (error) => {
   console.error(`Error: ${errorMessage(error)}`);
   process.exitCode = 1;
 });
+
+// OKF v3 adversarial orchestration (workshop pattern: negotiation + multi-round verification)
+const adv = program.command("adversarial").description("OKF v3 adversarial orchestration");
+
+adv.command("negotiate")
+  .description("Collect coder/tester Done-assertion proposals and merge them into the SprintContract")
+  .requiredOption("--contract <id>")
+  .requiredOption("--prompt-dir <dir>")
+  .requiredOption("--agents <pairs>", "Comma-separated name=role pairs (repeatable)", collectOption, [])
+  .option("--model <model>", "Default: openai-codex/gpt-5.5", "openai-codex/gpt-5.5")
+  .option("--pi-bin <path>", "Default: pi", "pi")
+  .option("--timeout <seconds>", "Per-agent timeout", parseIntegerOption, 900)
+  .action((opts) => {
+    const agentList = (opts.agents ?? []).map((pair: string) => {
+      const [name, role] = pair.split("=");
+      return { name, role };
+    });
+    if (agentList.length === 0) throw new Error("--agents is required");
+    const result = collectNegotiationProposals(rootOpt(), opts.contract, agentList, opts.promptDir, {
+      timeoutMs: opts.timeout * 1000,
+      model: opts.model,
+      piBin: opts.piBin,
+    });
+    createSprintContract(rootOpt(), "lead", {
+      contract_id: opts.contract,
+      title: "Negotiated contract " + opts.contract,
+      owner: "coder",
+      scope: "(negotiated)",
+      done_criteria: result.merged_assertions,
+      status: "active",
+    }, { update: true });
+    console.log("Negotiation merged " + result.merged_assertions.length + " assertions into " + opts.contract);
+    console.log(JSON.stringify(result, null, 2));
+  });
+
+adv.command("run")
+  .description("Run evaluator<->coder adversarial loop until export gate passes or max rounds")
+  .requiredOption("--contract <id>")
+  .requiredOption("--prompt-dir <dir>")
+  .requiredOption("--coder <agent>")
+  .requiredOption("--evaluator <agent>")
+  .option("--model <model>", "Default: openai-codex/gpt-5.5", "openai-codex/gpt-5.5")
+  .option("--pi-bin <path>", "Default: pi", "pi")
+  .option("--max-rounds <n>", "Maximum adversarial rounds", parseIntegerOption, 3)
+  .option("--timeout <seconds>", "Per-agent timeout", parseIntegerOption, 1200)
+  .action((opts) => {
+    const result = runAdversarialCycle(rootOpt(), opts.contract, { coder: opts.coder, evaluator: opts.evaluator }, opts.promptDir, {
+      maxRounds: opts.maxRounds,
+      timeoutMs: opts.timeout * 1000,
+      model: opts.model,
+      piBin: opts.piBin,
+    });
+    console.log(JSON.stringify(result, null, 2));
+    if (!result.resolved) process.exitCode = 1;
+  });
+
 
 program.parse(process.argv);
 
