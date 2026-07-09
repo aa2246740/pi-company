@@ -30,6 +30,7 @@ export type EventType =
   | "merge.requested"
   | "merge.completed"
   | "merge.blocked"
+  | "advisor.invoked"
   | "rate_limit.reported"
   | "rate_limit.cleared";
 
@@ -59,6 +60,7 @@ export interface CompanyConfig {
   message_policy?: MessagePolicy;
   rate_limit_policy?: RateLimitPolicy;
   provider_request_policy?: ProviderRequestPolicy;
+  advisor_policy?: AdvisorPolicy;
   lifecycle_policy?: LifecyclePolicy;
   model_policy?: ModelPolicy;
 }
@@ -133,6 +135,18 @@ export interface ProviderRequestPolicy {
   min_start_interval_ms: number;
   lease_timeout_ms: number;
   poll_interval_ms: number;
+}
+
+export interface AdvisorPolicy {
+  /** Exposes the advisor tool. A model must still be explicitly configured. */
+  enabled: boolean;
+  /** Claude-style max_uses guard, reset for each executor turn. */
+  max_uses_per_turn: number;
+  timeout_ms: number;
+  max_output_tokens: number;
+  /** Hard privacy/cost ceiling applied after model-context sizing. */
+  max_transcript_chars: number;
+  max_company_context_chars: number;
 }
 
 export interface LifecyclePolicy {

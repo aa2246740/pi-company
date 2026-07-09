@@ -10,6 +10,7 @@ import type {
   AgentRuntimeState,
   AgentRuntimeStatus,
   AcceptanceRecord,
+  AdvisorPolicy,
   AutomatedTestRecord,
   CompanyMaintenanceAction,
   CompanyMaintenanceResult,
@@ -34,7 +35,7 @@ import type {
 } from "./types.js";
 import { appendEvent, appendMailbox, ensureCompanyDirs, readEvents, readJson, readMailbox, readYaml, writeJson, writeYaml, atomicWriteText } from "./io.js";
 import { companyPaths, issuePath, prPath } from "./paths.js";
-import { defaultCoderWorktree, defaultConfig, DEFAULT_LIFECYCLE_POLICY, DEFAULT_MESSAGE_POLICY, DEFAULT_RATE_LIMIT_POLICY, DEFAULT_ROLES, defaultRoster } from "./defaults.js";
+import { defaultCoderWorktree, defaultConfig, DEFAULT_ADVISOR_POLICY, DEFAULT_LIFECYCLE_POLICY, DEFAULT_MESSAGE_POLICY, DEFAULT_RATE_LIMIT_POLICY, DEFAULT_ROLES, defaultRoster } from "./defaults.js";
 import { makeEvent } from "./events.js";
 import { newId, nowIso, slug } from "./id.js";
 import { withCompanyLock } from "./lock.js";
@@ -200,6 +201,7 @@ export function loadConfig(root = process.cwd()): CompanyConfig | null {
   // quality_gates block. The merge gate reads these fields unguarded, so
   // normalize against defaults rather than crashing every command on a PR.
   config.quality_gates = normalizeQualityGates(config.quality_gates);
+  config.advisor_policy = normalizeAdvisorPolicy(config.advisor_policy);
   return config;
 }
 
@@ -879,6 +881,17 @@ export function normalizeRateLimitPolicy(policy?: Partial<RateLimitPolicy> | nul
     max_backoff_ms: finitePositiveNumber(policy?.max_backoff_ms, DEFAULT_RATE_LIMIT_POLICY.max_backoff_ms),
     quota_backoff_ms: finitePositiveNumber(policy?.quota_backoff_ms, DEFAULT_RATE_LIMIT_POLICY.quota_backoff_ms),
     recovery_stagger_ms: finiteNonNegativeNumber(policy?.recovery_stagger_ms, DEFAULT_RATE_LIMIT_POLICY.recovery_stagger_ms),
+  };
+}
+
+export function normalizeAdvisorPolicy(policy?: Partial<AdvisorPolicy> | null): AdvisorPolicy {
+  return {
+    enabled: typeof policy?.enabled === "boolean" ? policy.enabled : DEFAULT_ADVISOR_POLICY.enabled,
+    max_uses_per_turn: Math.max(1, Math.floor(finitePositiveNumber(policy?.max_uses_per_turn, DEFAULT_ADVISOR_POLICY.max_uses_per_turn))),
+    timeout_ms: finitePositiveNumber(policy?.timeout_ms, DEFAULT_ADVISOR_POLICY.timeout_ms),
+    max_output_tokens: Math.max(256, Math.floor(finitePositiveNumber(policy?.max_output_tokens, DEFAULT_ADVISOR_POLICY.max_output_tokens))),
+    max_transcript_chars: Math.max(4_000, Math.floor(finitePositiveNumber(policy?.max_transcript_chars, DEFAULT_ADVISOR_POLICY.max_transcript_chars))),
+    max_company_context_chars: Math.max(1_000, Math.floor(finitePositiveNumber(policy?.max_company_context_chars, DEFAULT_ADVISOR_POLICY.max_company_context_chars))),
   };
 }
 

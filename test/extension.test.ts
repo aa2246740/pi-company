@@ -30,9 +30,19 @@ import { readDeliveryOkfConcept } from "../src/core/okf.js";
 import { companyPaths } from "../src/core/paths.js";
 import { providerQueueSnapshot } from "../src/core/provider-queue.js";
 
+const piAiMocks = vi.hoisted(() => ({
+  complete: vi.fn(),
+}));
+
+vi.mock("@earendil-works/pi-ai", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@earendil-works/pi-ai")>()),
+  complete: piAiMocks.complete,
+}));
+
 const tempRoots = new Set<string>();
 
 afterEach(() => {
+  piAiMocks.complete.mockReset();
   for (const root of tempRoots) {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -40,6 +50,199 @@ afterEach(() => {
 });
 
 describe("pi-company extension", () => {
+  it("does not inspect or send the branch when no advisor model is configured", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "advisor-unconfigured" });
+    const { handlers, pi, tools } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx } = fakeContext(root);
+    const getBranch = vi.fn(() => [
+      { type: "message", message: { role: "user", content: "private transcript" } },
+    ]);
+    (ctx as unknown as { sessionManager: unknown }).sessionManager = {
+      getBranch,
+      getSessionId: vi.fn(() => "session-unconfigured"),
+    };
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const tool = tools.find((item) => item.name === "company_consult_advisor");
+    if (!tool) throw new Error("company_consult_advisor was not registered");
+    const result = await tool.execute("advisor-1", {}, undefined, undefined, ctx) as ToolResult;
+    await handlers.session_shutdown?.({}, ctx);
+
+    expect(result.content[0].text).toContain("not configured");
+    expect(result.content[0].text).toContain("no transcript was sent");
+    expect(getBranch).not.toHaveBeenCalled();
+    expect(piAiMocks.complete).not.toHaveBeenCalled();
+  });
+
+  it("audits a disabled advisor invocation without inspecting the branch", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "advisor-disabled" });
+    const config = loadConfig(root);
+    if (!config) throw new Error("company config missing");
+    writeYaml(companyPaths(root).config, {
+      ...config,
+      advisor_policy: { ...config.advisor_policy!, enabled: false },
+    });
+    const { handlers, pi, tools } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx } = fakeContext(root);
+    const getBranch = vi.fn(() => []);
+    (ctx as unknown as { sessionManager: unknown }).sessionManager = {
+      getBranch,
+      getSessionId: vi.fn(() => "session-disabled"),
+    };
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const tool = tools.find((item) => item.name === "company_consult_advisor");
+    if (!tool) throw new Error("company_consult_advisor was not registered");
+    const result = await tool.execute("advisor-disabled", {}, undefined, undefined, ctx) as ToolResult;
+    await handlers.session_shutdown?.({}, ctx);
+
+    expect(result.content[0].text).toContain("disabled");
+    expect(getBranch).not.toHaveBeenCalled();
+    expect(piAiMocks.complete).not.toHaveBeenCalled();
+    const audit = fs.readFileSync(companyPaths(root).events, "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line) as { type: string; data: Record<string, unknown> })
+      .filter((event) => event.type === "advisor.invoked");
+    expect(audit).toHaveLength(1);
+    expect(audit[0].data).toMatchObject({ status: "disabled", sent: false });
+  });
+
+  it("consults inline, enforces the turn limit, releases leases, and exposes audit write failures", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "advisor-inline" });
+    setModelPolicy(root, "lead", "role", "advisor", {
+      provider: "strong-provider",
+      model: "reasoner",
+      thinking: "high",
+    });
+    writeYaml(companyPaths(root).config, {
+      ...loadConfig(root),
+      provider_request_policy: {
+        max_concurrent_per_provider: 2,
+        min_start_interval_ms: 0,
+        lease_timeout_ms: 5_000,
+        poll_interval_ms: 5,
+      },
+    });
+    const { handlers, pi, tools } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx } = fakeContext(root);
+    const advisorModel = {
+      id: "reasoner",
+      name: "Reasoner",
+      provider: "strong-provider",
+      api: "faux",
+      baseUrl: "https://example.invalid",
+      reasoning: true,
+      input: ["text"],
+      cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: 8_192,
+    };
+    (ctx as unknown as { modelRegistry: unknown }).modelRegistry = {
+      refresh: vi.fn(),
+      find: vi.fn(() => advisorModel),
+      getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "advisor-key" })),
+    };
+    (ctx as unknown as { sessionManager: unknown }).sessionManager = {
+      getBranch: vi.fn(() => [
+        { type: "message", message: { role: "user", content: "Build the advisor feature." } },
+        { type: "message", message: { role: "assistant", content: [{ type: "text", text: "I need a plan." }] } },
+      ]),
+      getSessionId: vi.fn(() => "session-inline"),
+    };
+    piAiMocks.complete.mockResolvedValue({
+      content: [{ type: "text", text: "Verdict: proceed with the narrow synchronous design." }],
+      stopReason: "stop",
+      usage: { input: 500, output: 40 },
+    });
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    await handlers.before_agent_start?.({ systemPrompt: "base" }, ctx);
+    const tool = tools.find((item) => item.name === "company_consult_advisor");
+    if (!tool) throw new Error("company_consult_advisor was not registered");
+    const first = await tool.execute("advisor-1", {}, undefined, vi.fn(), ctx) as ToolResult;
+    const originalAppendFileSync = fs.appendFileSync;
+    let failNextAuditWrite = true;
+    const appendSpy = vi.spyOn(fs, "appendFileSync").mockImplementation(((file: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+      if (failNextAuditWrite && path.resolve(String(file)) === path.resolve(companyPaths(root).events)) {
+        failNextAuditWrite = false;
+        throw new Error("simulated advisor audit disk failure");
+      }
+      return Reflect.apply(originalAppendFileSync, fs, [file, ...args]);
+    }) as typeof fs.appendFileSync);
+    const second = await tool.execute("advisor-2", {}, undefined, vi.fn(), ctx) as ToolResult;
+    appendSpy.mockRestore();
+    const limited = await tool.execute("advisor-3", {}, undefined, vi.fn(), ctx) as ToolResult;
+    await handlers.session_shutdown?.({}, ctx);
+
+    expect(first.content[0].text).toContain("[company advisor: strong-provider/reasoner");
+    expect(first.content[0].text).toContain("Verdict: proceed");
+    expect(second.content[0].text).toContain("use 2/2");
+    expect(second.content[0].text).toContain("advisor audit was not recorded");
+    expect((second.details.advisor as { audit_status: string }).audit_status).toBe("failed");
+    expect(limited.content[0].text).toContain("use limit reached");
+    expect((limited.details.advisor as { audit_status: string }).audit_status).toBe("recorded");
+    expect(piAiMocks.complete).toHaveBeenCalledTimes(2);
+    const [, request, options] = piAiMocks.complete.mock.calls[0];
+    expect(request.systemPrompt).toContain("untrusted evidence");
+    expect(request.messages[0].content[0].text).toContain("Build the advisor feature.");
+    expect(options).toMatchObject({
+      apiKey: "advisor-key",
+      reasoningEffort: "high",
+      timeoutMs: 120_000,
+    });
+    expect(providerQueueSnapshot(root, "strong-provider").leases).toHaveLength(0);
+
+    const eventText = fs.readFileSync(companyPaths(root).events, "utf8");
+    const advisorEvents = eventText
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line) as { type: string; data: Record<string, unknown> })
+      .filter((event) => event.type === "advisor.invoked");
+    expect(advisorEvents).toHaveLength(2);
+    expect(advisorEvents.map((event) => event.data.status)).toEqual(["success", "limit_reached"]);
+    expect(eventText).not.toContain("Build the advisor feature.");
+    expect(eventText).not.toContain("Verdict: proceed with the narrow synchronous design.");
+  });
+
+  it("keeps advisor consultation out of independent reviewer and tester sessions", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "advisor-role-boundary" });
+    const { handlers, pi, tools } = fakePi({
+      "company-root": root,
+      "company-agent": "reviewer",
+      "company-role": "reviewer",
+    });
+    const { ctx } = fakeContext(root);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const prompt = await handlers.before_agent_start?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
+    await handlers.session_shutdown?.({}, ctx);
+
+    expect(tools.some((tool) => tool.name === "company_consult_advisor")).toBe(false);
+    expect(prompt.systemPrompt).toContain("reserved for lead and coder executors");
+    expect(prompt.systemPrompt).toContain("independent role context");
+  });
+
   it("stays inactive in ordinary Pi sessions outside a company project", async () => {
     const root = tempRoot();
     const { handlers, pi, tools, commands } = fakePi({});

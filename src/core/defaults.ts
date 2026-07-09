@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { AgentRecord, CompanyConfig, LifecyclePolicy, MessagePolicy, ProviderRequestPolicy, RateLimitPolicy } from "./types.js";
+import type { AdvisorPolicy, AgentRecord, CompanyConfig, LifecyclePolicy, MessagePolicy, ProviderRequestPolicy, RateLimitPolicy } from "./types.js";
 
 export const DEFAULT_MESSAGE_POLICY: MessagePolicy = {
   immediate_types: ["assignment", "review", "test", "human_steering", "system"],
@@ -21,6 +21,15 @@ export const DEFAULT_PROVIDER_REQUEST_POLICY: ProviderRequestPolicy = {
   min_start_interval_ms: 5_000,
   lease_timeout_ms: 2 * 60_000,
   poll_interval_ms: 1_000,
+};
+
+export const DEFAULT_ADVISOR_POLICY: AdvisorPolicy = {
+  enabled: true,
+  max_uses_per_turn: 2,
+  timeout_ms: 120_000,
+  max_output_tokens: 4_096,
+  max_transcript_chars: 240_000,
+  max_company_context_chars: 24_000,
 };
 
 export const DEFAULT_LIFECYCLE_POLICY: LifecyclePolicy = {
@@ -198,6 +207,7 @@ export function defaultConfig(root: string, id: string): CompanyConfig {
     message_policy: DEFAULT_MESSAGE_POLICY,
     rate_limit_policy: DEFAULT_RATE_LIMIT_POLICY,
     provider_request_policy: DEFAULT_PROVIDER_REQUEST_POLICY,
+    advisor_policy: DEFAULT_ADVISOR_POLICY,
     lifecycle_policy: DEFAULT_LIFECYCLE_POLICY,
   };
 }

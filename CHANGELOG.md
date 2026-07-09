@@ -3,6 +3,21 @@
 All notable changes to `pi-company` are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Advisor mode
+
+- Added parameterless `company_consult_advisor` for synchronous escalation from a
+  fast executor to `model_policy.roles.advisor` inside the same Pi agent loop.
+- Added bounded active-branch serialization with tool calls/results, first-goal
+  and newest-evidence retention, prompt-injection boundaries, timeout/output/context
+  budgets, and a two-use-per-turn default.
+- Advisor requests participate in the provider queue and respect provider backoff.
+- Added metadata-only `advisor.invoked` audit events; transcripts and advice text
+  are never persisted by pi-company.
+- Added an inline `advisor` model-policy target (not a spawnable role). Independent reviewer,
+  tester, acceptance, and merge gates remain authoritative.
+
 ## 0.3.0 — OKF v3 adversarial orchestration
 
 Adds the **negotiation + multi-round adversarial loop** pattern (from Anthropic's

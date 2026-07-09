@@ -104,6 +104,7 @@ human -> lead -> local issues -> coder worktrees -> local PR
 | 恢复快照 | worker 窗口消失时，lead 看到有界终端文本，不会一直干等。 |
 | Provider queue | 同 provider 请求限流错峰，减少过载错误和恢复风暴。 |
 | 角色模型策略 | 不同角色可以使用不同的 Pi 已配置模型。 |
+| Advisor 模式 | 快模型在高杠杆节点暂停，并在原 agent loop 内咨询一个显式配置的强模型。 |
 
 ## 它到底是什么？
 
@@ -262,6 +263,7 @@ Lead 会打开基于选择项的配置流程。用户不需要提前知道所有
 - future/unconfigured roles 的 default model
 - 全局最多两个 fallback model，用于 provider 故障时继续推进
 - 内置角色：lead、pm、designer、researcher、coder、reviewer、tester
+- inline advisor 模型目标（它不是可常驻启动的 agent role）
 
 目标会显示它是已显式配置、继承 default，还是回落到 Pi 当前启动模型。用户不用盲改。
 
@@ -272,8 +274,20 @@ model_policy:
   roles:
     coder:
       provider: openai-codex
-      model: gpt-5.4-mini
+      model: gpt-5.6-luna
       thinking: low
+    advisor:
+      provider: openai-codex
+      model: gpt-5.6-sol
+      thinking: high
+    reviewer:
+      provider: openai-codex
+      model: gpt-5.6-terra
+      thinking: high
+    tester:
+      provider: openai-codex
+      model: gpt-5.6-terra
+      thinking: medium
   fallbacks:
     - provider: xiaomi-token-plan-cn
       model: mimo-v2.5-pro
@@ -287,6 +301,48 @@ Fallback 是全局的，不按每个 role 单独配置。某个 provider 出现 
 这是组织级策略。某一个正在运行的具体 agent 如果临时想换模型，直接进入那个 Pi pane，用 Pi 自己的模型切换能力处理，不需要写进 pi-company 的全局配置。
 
 运行中的 Pi pane 会保持当前模型，直到重启或在 Pi 内手动切换。
+
+## Advisor 模式
+
+Advisor 模式给 pi-company 原有的横向团队协作增加了一条纵向升级通道。lead
+或 coder 仍由快模型担任 executor；在制定关键方案、反复卡住、高风险操作和
+宣称完成之前，它可以调用无参数的 `company_consult_advisor`。pi-company 只
+暂停当前 executor，把有界的 Pi active branch 和只读公司快照交给已配置的
+强模型，再把建议作为同一 agent loop 的 tool result 原位返回。
+
+在 lead pane 运行 `/company-configure-models`，按三档配置：
+
+1. `coder` 使用快速、便宜的模型，thinking 设为 low 或 medium。
+2. `advisor` 使用你信任的最强模型，通常设为 high thinking。
+3. `reviewer` 和 `tester` 使用可靠的独立验证模型；可以比 advisor 便宜，
+   但不要与写代码的 executor 混成同一个自证角色。
+
+`advisor` role 是同步能力，不需要另外启动常驻 advisor pane。没有显式配置
+`model_policy.roles.advisor` 时，工具不会发送 transcript，只会返回配置提示。
+只有 lead 和 coder executor 会拿到这个工具；reviewer/tester 会话保持独立。
+第一次试用可以直接对 lead 或 coder 说：
+
+```text
+先调用 company_consult_advisor 审查实现方案，执行完成后再调用一次做完成前复核。
+```
+
+可以在 `.pi-company/company.yaml` 调整预算：
+
+```yaml
+advisor_policy:
+  enabled: true
+  max_uses_per_turn: 2
+  timeout_ms: 120000
+  max_output_tokens: 4096
+  max_transcript_chars: 240000
+  max_company_context_chars: 24000
+```
+
+Advisor 调用进入现有 provider 并发队列。事件日志只记录模型、状态、耗时、
+可用时的 token usage 和截断统计，不保存 transcript 或顾问正文；如果元数据
+写入失败，tool result 会明确返回审计 warning，不会悄悄吞掉。Advisor
+只能提供战略建议；reviewer/tester evidence、产品验收、lead brief、git 状态和
+merge gates 仍然是权威事实。
 
 ## Pi 扩展
 
@@ -312,7 +368,7 @@ pi -e ./extensions/company.ts --company-root "$PWD" --company-agent lead --compa
 - input hook：把交互式 human steering 镜像到 lead
 - mailbox poller：读取本地消息
 - 命令：`/company-init`、`/company-start`（手动刷新 brief）、`/company-resume`、`/company-pause`、`/company-maintain`、`/company-status`、`/company-brief`、`/company-inbox`、`/company-ack`、`/company-send`、`/company-configure-models`
-- 工具：状态、lead/global brief、lifecycle maintenance、inbox、message、issues、task updates、spawn agent、本地 PR gates、review、test、acceptance、automated-test evidence、merge request、rate-limit report、model policy configuration
+- 工具：同步 advisor 咨询、状态、lead/global brief、lifecycle maintenance、inbox、message、issues、task updates、spawn agent、本地 PR gates、review、test、acceptance、automated-test evidence、merge request、rate-limit report、model policy configuration
 
 `company_lead_brief` 是 lead 的权威全局交付视图。Lead 在告诉人类“完成”“可以合并”之前必须使用它。worker 的 “done”“merged”“tested” 之类散文报告不是交付真相。
 
