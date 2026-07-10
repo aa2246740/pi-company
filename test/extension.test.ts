@@ -28,21 +28,25 @@ import {
 import { writeYaml } from "../src/core/io.js";
 import { readDeliveryOkfConcept } from "../src/core/okf.js";
 import { companyPaths } from "../src/core/paths.js";
-import { providerQueueSnapshot } from "../src/core/provider-queue.js";
+import {
+  acquireProviderRequestLease,
+  providerQueueSnapshot,
+  releaseProviderRequestLease,
+} from "../src/core/provider-queue.js";
 
 const piAiMocks = vi.hoisted(() => ({
-  complete: vi.fn(),
+  completeSimple: vi.fn(),
 }));
 
-vi.mock("@earendil-works/pi-ai", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@earendil-works/pi-ai")>()),
-  complete: piAiMocks.complete,
+vi.mock("@earendil-works/pi-ai/compat", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@earendil-works/pi-ai/compat")>()),
+  completeSimple: piAiMocks.completeSimple,
 }));
 
 const tempRoots = new Set<string>();
 
 afterEach(() => {
-  piAiMocks.complete.mockReset();
+  piAiMocks.completeSimple.mockReset();
   for (const root of tempRoots) {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -50,7 +54,24 @@ afterEach(() => {
 });
 
 describe("pi-company extension", () => {
-  it("does not inspect or send the branch when no advisor model is configured", async () => {
+  it("does not call Pi action methods before the 0.80 runtime is bound", () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-prebind" });
+    const { pi, tools } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+
+    companyExtension(pi);
+
+    expect(pi.getActiveTools).not.toHaveBeenCalled();
+    expect(pi.setActiveTools).not.toHaveBeenCalled();
+    expect(pi.appendEntry).not.toHaveBeenCalled();
+    expect(tools).toHaveLength(0);
+  });
+
+  it("does not inspect or send the transcript when no advisor model is configured", async () => {
     const root = tempRoot();
     initCompany({ root, id: "advisor-unconfigured" });
     const { handlers, pi, tools } = fakePi({
@@ -69,6 +90,7 @@ describe("pi-company extension", () => {
 
     companyExtension(pi);
     await handlers.session_start?.({}, ctx);
+    getBranch.mockClear();
     const tool = tools.find((item) => item.name === "company_consult_advisor");
     if (!tool) throw new Error("company_consult_advisor was not registered");
     const result = await tool.execute("advisor-1", {}, undefined, undefined, ctx) as ToolResult;
@@ -77,10 +99,10 @@ describe("pi-company extension", () => {
     expect(result.content[0].text).toContain("not configured");
     expect(result.content[0].text).toContain("no transcript was sent");
     expect(getBranch).not.toHaveBeenCalled();
-    expect(piAiMocks.complete).not.toHaveBeenCalled();
+    expect(piAiMocks.completeSimple).not.toHaveBeenCalled();
   });
 
-  it("audits a disabled advisor invocation without inspecting the branch", async () => {
+  it("audits a disabled advisor invocation without inspecting the transcript", async () => {
     const root = tempRoot();
     initCompany({ root, id: "advisor-disabled" });
     const config = loadConfig(root);
@@ -103,6 +125,7 @@ describe("pi-company extension", () => {
 
     companyExtension(pi);
     await handlers.session_start?.({}, ctx);
+    getBranch.mockClear();
     const tool = tools.find((item) => item.name === "company_consult_advisor");
     if (!tool) throw new Error("company_consult_advisor was not registered");
     const result = await tool.execute("advisor-disabled", {}, undefined, undefined, ctx) as ToolResult;
@@ -110,7 +133,7 @@ describe("pi-company extension", () => {
 
     expect(result.content[0].text).toContain("disabled");
     expect(getBranch).not.toHaveBeenCalled();
-    expect(piAiMocks.complete).not.toHaveBeenCalled();
+    expect(piAiMocks.completeSimple).not.toHaveBeenCalled();
     const audit = fs.readFileSync(companyPaths(root).events, "utf8")
       .trim()
       .split(/\r?\n/)
@@ -167,7 +190,7 @@ describe("pi-company extension", () => {
       ]),
       getSessionId: vi.fn(() => "session-inline"),
     };
-    piAiMocks.complete.mockResolvedValue({
+    piAiMocks.completeSimple.mockResolvedValue({
       content: [{ type: "text", text: "Verdict: proceed with the narrow synchronous design." }],
       stopReason: "stop",
       usage: { input: 500, output: 40 },
@@ -200,13 +223,13 @@ describe("pi-company extension", () => {
     expect((second.details.advisor as { audit_status: string }).audit_status).toBe("failed");
     expect(limited.content[0].text).toContain("use limit reached");
     expect((limited.details.advisor as { audit_status: string }).audit_status).toBe("recorded");
-    expect(piAiMocks.complete).toHaveBeenCalledTimes(2);
-    const [, request, options] = piAiMocks.complete.mock.calls[0];
+    expect(piAiMocks.completeSimple).toHaveBeenCalledTimes(2);
+    const [, request, options] = piAiMocks.completeSimple.mock.calls[0];
     expect(request.systemPrompt).toContain("untrusted evidence");
     expect(request.messages[0].content[0].text).toContain("Build the advisor feature.");
     expect(options).toMatchObject({
       apiKey: "advisor-key",
-      reasoningEffort: "high",
+      reasoning: "high",
       timeoutMs: 120_000,
     });
     expect(providerQueueSnapshot(root, "strong-provider").leases).toHaveLength(0);
@@ -226,21 +249,492 @@ describe("pi-company extension", () => {
   it("keeps advisor consultation out of independent reviewer and tester sessions", async () => {
     const root = tempRoot();
     initCompany({ root, id: "advisor-role-boundary" });
-    const { handlers, pi, tools } = fakePi({
+    const { handlers, pi, tools, commands } = fakePi({
       "company-root": root,
       "company-agent": "reviewer",
       "company-role": "reviewer",
     });
-    const { ctx } = fakeContext(root);
+    const { ctx, ui } = fakeContext(root);
 
     companyExtension(pi);
     await handlers.session_start?.({}, ctx);
+    const advisorCommand = commands.find((command) => command.name === "company-advisor");
+    if (!advisorCommand) throw new Error("company-advisor command was not registered");
+    await advisorCommand.handler("auto", ctx);
     const prompt = await handlers.before_agent_start?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
     await handlers.session_shutdown?.({}, ctx);
 
     expect(tools.some((tool) => tool.name === "company_consult_advisor")).toBe(false);
+    expect(ui.notify).toHaveBeenCalledWith(expect.stringContaining("not available for reviewer"), "info");
     expect(prompt.systemPrompt).toContain("reserved for lead and coder executors");
     expect(prompt.systemPrompt).toContain("independent role context");
+  });
+
+  it("toggles advisor availability without injecting a user prompt", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "advisor-session-toggle" });
+    const { handlers, pi, commands, activeToolNames, sessionEntries } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx, ui } = fakeContext(root);
+    let branch: unknown[] = [];
+    (ctx as unknown as { sessionManager: unknown }).sessionManager = {
+      getBranch: vi.fn(() => branch),
+      getSessionId: vi.fn(() => "session-toggle"),
+    };
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const advisorCommand = commands.find((command) => command.name === "company-advisor");
+    if (!advisorCommand) throw new Error("company-advisor command was not registered");
+
+    const prompt = await handlers.before_agent_start?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
+    expect(prompt.systemPrompt).toContain("may change during this agent run");
+    expect(prompt.systemPrompt).toContain("no user prompt is required");
+    expect(activeToolNames()).toContain("company_consult_advisor");
+    await advisorCommand.handler("off", ctx);
+    expect(activeToolNames()).not.toContain("company_consult_advisor");
+
+    await advisorCommand.handler("auto", ctx);
+    expect(activeToolNames()).toContain("company_consult_advisor");
+
+    await advisorCommand.handler("status", ctx);
+    expect(ui.notify).toHaveBeenCalledWith(expect.stringContaining("Advisor mode: auto"), "info");
+    branch = [{ type: "custom", customType: "pi-company.advisor-mode", data: { mode: "off" } }];
+    await handlers.session_tree?.({}, ctx);
+    expect(activeToolNames()).not.toContain("company_consult_advisor");
+    branch = [];
+    await handlers.session_tree?.({}, ctx);
+    expect(activeToolNames()).toContain("company_consult_advisor");
+    expect(sessionEntries).toEqual([
+      { customType: "pi-company.advisor-mode", data: { mode: "off" } },
+      { customType: "pi-company.advisor-mode", data: { mode: "auto" } },
+    ]);
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    await handlers.session_shutdown?.({}, ctx);
+  });
+
+  it("respects Pi's startup tool allowlist across commands and tree navigation", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "advisor-tool-allowlist" });
+    const { handlers, pi, commands, activeToolNames } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    }, { inactiveTools: ["company_consult_advisor"] });
+    const { ctx, ui } = fakeContext(root);
+    let branch: unknown[] = [];
+    (ctx as unknown as { sessionManager: unknown }).sessionManager = {
+      getBranch: vi.fn(() => branch),
+      getSessionId: vi.fn(() => "session-tool-allowlist"),
+    };
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const advisorCommand = commands.find((command) => command.name === "company-advisor");
+    if (!advisorCommand) throw new Error("company-advisor command was not registered");
+
+    expect(activeToolNames()).not.toContain("company_consult_advisor");
+    await advisorCommand.handler("status", ctx);
+    expect(ui.notify).toHaveBeenCalledWith(expect.stringContaining("mode: auto"), "info");
+    expect(ui.notify).toHaveBeenCalledWith(expect.stringContaining("tool hidden"), "info");
+
+    await handlers.session_tree?.({}, ctx);
+    expect(activeToolNames()).not.toContain("company_consult_advisor");
+    branch = [{ type: "custom", customType: "pi-company.advisor-mode", data: { mode: "auto" } }];
+    await handlers.session_tree?.({}, ctx);
+    expect(activeToolNames()).not.toContain("company_consult_advisor");
+    branch = [];
+    await handlers.session_tree?.({}, ctx);
+    expect(activeToolNames()).not.toContain("company_consult_advisor");
+
+    await advisorCommand.handler("auto", ctx);
+    expect(activeToolNames()).not.toContain("company_consult_advisor");
+    await advisorCommand.handler("default", ctx);
+    expect(activeToolNames()).not.toContain("company_consult_advisor");
+    await handlers.session_shutdown?.({}, ctx);
+  });
+
+  it("treats company.yaml enabled as a default that the current session can override", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "advisor-project-default" });
+    const config = loadConfig(root);
+    if (!config) throw new Error("company config missing");
+    writeYaml(companyPaths(root).config, {
+      ...config,
+      advisor_policy: { ...config.advisor_policy!, enabled: false },
+    });
+    const { handlers, pi, tools, commands, activeToolNames, sessionEntries } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx } = fakeContext(root);
+    (ctx as unknown as { sessionManager: unknown }).sessionManager = {
+      getBranch: vi.fn(() => []),
+      getSessionId: vi.fn(() => "session-project-default"),
+    };
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const advisorCommand = commands.find((command) => command.name === "company-advisor");
+    if (!advisorCommand) throw new Error("company-advisor command was not registered");
+
+    expect(activeToolNames()).not.toContain("company_consult_advisor");
+    await advisorCommand.handler("on", ctx);
+    expect(activeToolNames()).toContain("company_consult_advisor");
+    await advisorCommand.handler("once", ctx);
+    const tool = tools.find((item) => item.name === "company_consult_advisor");
+    if (!tool) throw new Error("company_consult_advisor was not registered");
+    const setupFailure = await tool.execute("advisor-missing-target", {}, undefined, undefined, ctx) as ToolResult;
+    expect(setupFailure.content[0].text).toContain("not configured");
+    expect(activeToolNames()).toContain("company_consult_advisor");
+    expect(sessionEntries.at(-1)).toEqual({ customType: "pi-company.advisor-mode", data: { mode: "once" } });
+    await advisorCommand.handler("default", ctx);
+    expect(activeToolNames()).not.toContain("company_consult_advisor");
+    await handlers.session_shutdown?.({}, ctx);
+  });
+
+  it("stops a preparing advisor call when the session is switched off", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "advisor-session-off-race" });
+    setModelPolicy(root, "lead", "role", "advisor", {
+      provider: "strong-provider",
+      model: "reasoner",
+      thinking: "high",
+    });
+    const { handlers, pi, tools, commands } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx } = fakeContext(root);
+    let resolveAuth!: (value: { ok: true; apiKey: string }) => void;
+    const auth = new Promise<{ ok: true; apiKey: string }>((resolve) => {
+      resolveAuth = resolve;
+    });
+    const getApiKeyAndHeaders = vi.fn(() => auth);
+    (ctx as unknown as { modelRegistry: unknown }).modelRegistry = {
+      refresh: vi.fn(),
+      find: vi.fn(() => fakeAdvisorModel()),
+      getApiKeyAndHeaders,
+    };
+    const getBranch = vi.fn(() => [
+      { type: "message", message: { role: "user", content: "Do not leak this after off." } },
+    ]);
+    (ctx as unknown as { sessionManager: unknown }).sessionManager = {
+      getBranch,
+      getSessionId: vi.fn(() => "session-off-race"),
+    };
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    getBranch.mockClear();
+    const advisorCommand = commands.find((command) => command.name === "company-advisor");
+    const tool = tools.find((item) => item.name === "company_consult_advisor");
+    if (!advisorCommand || !tool) throw new Error("advisor command/tool was not registered");
+
+    const pending = tool.execute("advisor-race", {}, undefined, undefined, ctx) as Promise<ToolResult>;
+    await vi.waitFor(() => expect(getApiKeyAndHeaders).toHaveBeenCalledTimes(1));
+    await advisorCommand.handler("off", ctx);
+    resolveAuth({ ok: true, apiKey: "advisor-key" });
+    const result = await pending;
+    await handlers.session_shutdown?.({}, ctx);
+
+    expect(result.content[0].text).toContain("turned off while preparing");
+    expect(getBranch).not.toHaveBeenCalled();
+    expect(piAiMocks.completeSimple).not.toHaveBeenCalled();
+  });
+
+  it("stops a queued advisor call when session-tree navigation restores off", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "advisor-tree-off-race" });
+    setModelPolicy(root, "lead", "role", "advisor", {
+      provider: "strong-provider",
+      model: "reasoner",
+      thinking: "high",
+    });
+    const config = loadConfig(root);
+    if (!config) throw new Error("company config missing");
+    const providerPolicy = {
+      max_concurrent_per_provider: 1,
+      min_start_interval_ms: 0,
+      lease_timeout_ms: 5_000,
+      poll_interval_ms: 5,
+    };
+    writeYaml(companyPaths(root).config, {
+      ...config,
+      provider_request_policy: providerPolicy,
+    });
+    const blocker = await acquireProviderRequestLease(root, "strong-provider", "blocker", providerPolicy);
+    const { handlers, pi, tools } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx } = fakeContext(root);
+    const getApiKeyAndHeaders = vi.fn(async () => ({ ok: true, apiKey: "advisor-key" }));
+    (ctx as unknown as { modelRegistry: unknown }).modelRegistry = {
+      refresh: vi.fn(),
+      find: vi.fn(() => fakeAdvisorModel()),
+      getApiKeyAndHeaders,
+    };
+    let branch: unknown[] = [
+      { type: "message", message: { role: "user", content: "Do not send the new tree branch." } },
+    ];
+    const getBranch = vi.fn(() => branch);
+    (ctx as unknown as { sessionManager: unknown }).sessionManager = {
+      getBranch,
+      getSessionId: vi.fn(() => "session-tree-off-race"),
+    };
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    getBranch.mockClear();
+    const tool = tools.find((item) => item.name === "company_consult_advisor");
+    if (!tool) throw new Error("company_consult_advisor was not registered");
+
+    const pending = tool.execute("advisor-tree-race", {}, undefined, undefined, ctx) as Promise<ToolResult>;
+    await vi.waitFor(() => expect(getApiKeyAndHeaders).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    branch = [{ type: "custom", customType: "pi-company.advisor-mode", data: { mode: "off" } }];
+    await handlers.session_tree?.({}, ctx);
+    getBranch.mockClear();
+    await releaseProviderRequestLease(root, blocker);
+    const result = await pending;
+    await handlers.session_shutdown?.({}, ctx);
+
+    expect(result.content[0].text).toContain("mode or active branch changed before the consultation request was sent");
+    expect(getBranch).not.toHaveBeenCalled();
+    expect(piAiMocks.completeSimple).not.toHaveBeenCalled();
+  });
+
+  it("consumes once mode on the next real advisor attempt and then closes the gate", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "advisor-session-once" });
+    setModelPolicy(root, "lead", "role", "advisor", {
+      provider: "strong-provider",
+      model: "reasoner",
+      thinking: "high",
+    });
+    const { handlers, pi, tools, commands, activeToolNames, sessionEntries } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx } = fakeContext(root);
+    const advisorModel = {
+      id: "reasoner",
+      name: "Reasoner",
+      provider: "strong-provider",
+      api: "faux",
+      baseUrl: "https://example.invalid",
+      reasoning: true,
+      input: ["text"],
+      cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: 8_192,
+    };
+    (ctx as unknown as { modelRegistry: unknown }).modelRegistry = {
+      refresh: vi.fn(),
+      find: vi.fn(() => advisorModel),
+      getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "advisor-key" })),
+    };
+    const getBranch = vi.fn(() => [
+      { type: "message", message: { role: "user", content: "Use one advisor consultation." } },
+    ]);
+    (ctx as unknown as { sessionManager: unknown }).sessionManager = {
+      getBranch,
+      getSessionId: vi.fn(() => "session-once"),
+    };
+    piAiMocks.completeSimple.mockResolvedValue({
+      content: [{ type: "text", text: "Verdict: one-shot advice." }],
+      stopReason: "stop",
+      usage: { input: 100, output: 20 },
+    });
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    await handlers.before_agent_start?.({ systemPrompt: "base" }, ctx);
+    getBranch.mockClear();
+    const advisorCommand = commands.find((command) => command.name === "company-advisor");
+    const tool = tools.find((item) => item.name === "company_consult_advisor");
+    if (!advisorCommand || !tool) throw new Error("advisor command/tool was not registered");
+
+    await advisorCommand.handler("once", ctx);
+    expect(activeToolNames()).toContain("company_consult_advisor");
+    const first = await tool.execute("advisor-once-1", {}, undefined, undefined, ctx) as ToolResult;
+    expect(first.content[0].text).toContain("one-shot advisor consultation consumed");
+    expect(activeToolNames()).not.toContain("company_consult_advisor");
+    const staleSecond = await tool.execute("advisor-once-2", {}, undefined, undefined, ctx) as ToolResult;
+    expect(staleSecond.content[0].text).toContain("off for this Pi session");
+    expect(piAiMocks.completeSimple).toHaveBeenCalledTimes(1);
+    expect(getBranch).toHaveBeenCalledTimes(1);
+    expect(sessionEntries.at(-1)).toEqual({ customType: "pi-company.advisor-mode", data: { mode: "off" } });
+    await handlers.session_shutdown?.({}, ctx);
+  });
+
+  it("atomically enforces the advisor use limit across parallel tool calls", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "advisor-parallel-limit" });
+    setModelPolicy(root, "lead", "role", "advisor", {
+      provider: "strong-provider",
+      model: "reasoner",
+      thinking: "high",
+    });
+    const config = loadConfig(root);
+    if (!config) throw new Error("company config missing");
+    writeYaml(companyPaths(root).config, {
+      ...config,
+      advisor_policy: { ...config.advisor_policy!, max_uses_per_turn: 1 },
+    });
+    const { handlers, pi, tools } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx } = fakeContext(root);
+    (ctx as unknown as { modelRegistry: unknown }).modelRegistry = {
+      refresh: vi.fn(),
+      find: vi.fn(() => fakeAdvisorModel()),
+      getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "advisor-key" })),
+    };
+    (ctx as unknown as { sessionManager: unknown }).sessionManager = {
+      getBranch: vi.fn(() => [
+        { type: "message", message: { role: "user", content: "Only one parallel consultation may dispatch." } },
+      ]),
+      getSessionId: vi.fn(() => "session-parallel-limit"),
+    };
+    let finishAdvisor!: (value: {
+      content: Array<{ type: "text"; text: string }>;
+      stopReason: string;
+      usage: { input: number; output: number };
+    }) => void;
+    const advisorResponse = new Promise<{
+      content: Array<{ type: "text"; text: string }>;
+      stopReason: string;
+      usage: { input: number; output: number };
+    }>((resolve) => {
+      finishAdvisor = resolve;
+    });
+    piAiMocks.completeSimple.mockImplementation(() => advisorResponse);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const tool = tools.find((item) => item.name === "company_consult_advisor");
+    if (!tool) throw new Error("company_consult_advisor was not registered");
+
+    const first = tool.execute("advisor-parallel-1", {}, undefined, undefined, ctx) as Promise<ToolResult>;
+    const second = tool.execute("advisor-parallel-2", {}, undefined, undefined, ctx) as Promise<ToolResult>;
+    await vi.waitFor(() => expect(piAiMocks.completeSimple).toHaveBeenCalledTimes(1));
+    finishAdvisor({
+      content: [{ type: "text", text: "Verdict: one request was enough." }],
+      stopReason: "stop",
+      usage: { input: 100, output: 20 },
+    });
+    const results = await Promise.all([first, second]);
+    await handlers.session_shutdown?.({}, ctx);
+
+    const statuses = results.map((result) => (result.details.advisor as { status: string }).status);
+    expect(statuses).toContain("success");
+    expect(statuses).toContain("limit_reached");
+    expect(piAiMocks.completeSimple).toHaveBeenCalledTimes(1);
+    const sent = results.map((result) => (result.details.advisor as { sent: boolean }).sent);
+    expect(sent.filter(Boolean)).toHaveLength(1);
+  });
+
+  it("keeps once armed and audits sent false when no transcript can be reviewed", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "advisor-once-empty-transcript" });
+    setModelPolicy(root, "lead", "role", "advisor", {
+      provider: "strong-provider",
+      model: "reasoner",
+      thinking: "high",
+    });
+    const { handlers, pi, tools, commands, activeToolNames, sessionEntries } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx } = fakeContext(root);
+    (ctx as unknown as { modelRegistry: unknown }).modelRegistry = {
+      refresh: vi.fn(),
+      find: vi.fn(() => fakeAdvisorModel()),
+      getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "advisor-key" })),
+    };
+    (ctx as unknown as { sessionManager: unknown }).sessionManager = {
+      getBranch: vi.fn(() => []),
+      getSessionId: vi.fn(() => "session-once-empty"),
+    };
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const advisorCommand = commands.find((command) => command.name === "company-advisor");
+    const tool = tools.find((item) => item.name === "company_consult_advisor");
+    if (!advisorCommand || !tool) throw new Error("advisor command/tool was not registered");
+
+    await advisorCommand.handler("once", ctx);
+    const result = await tool.execute("advisor-once-empty", {}, undefined, undefined, ctx) as ToolResult;
+    await handlers.session_shutdown?.({}, ctx);
+
+    expect(result.content[0].text).toContain("no active conversation transcript");
+    expect(activeToolNames()).toContain("company_consult_advisor");
+    expect(sessionEntries.at(-1)).toEqual({ customType: "pi-company.advisor-mode", data: { mode: "once" } });
+    expect(piAiMocks.completeSimple).not.toHaveBeenCalled();
+    const advisorEvents = fs.readFileSync(companyPaths(root).events, "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line) as { type: string; data: Record<string, unknown> })
+      .filter((event) => event.type === "advisor.invoked");
+    expect(advisorEvents.at(-1)?.data).toMatchObject({ status: "empty-transcript", sent: false });
+    expect(advisorEvents.at(-1)?.data).not.toHaveProperty("use");
+  });
+
+  it("keeps once armed when the provider adapter fails before preparing a payload", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "advisor-once-adapter-failure" });
+    setModelPolicy(root, "lead", "role", "advisor", {
+      provider: "strong-provider",
+      model: "reasoner",
+      thinking: "high",
+    });
+    const { handlers, pi, tools, commands, activeToolNames, sessionEntries } = fakePi({
+      "company-root": root,
+      "company-agent": "lead",
+      "company-role": "lead",
+    });
+    const { ctx } = fakeContext(root);
+    (ctx as unknown as { modelRegistry: unknown }).modelRegistry = {
+      refresh: vi.fn(),
+      find: vi.fn(() => fakeAdvisorModel()),
+      getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "advisor-key" })),
+    };
+    (ctx as unknown as { sessionManager: unknown }).sessionManager = {
+      getBranch: vi.fn(() => [
+        { type: "message", message: { role: "user", content: "Keep once armed if dispatch setup fails." } },
+      ]),
+      getSessionId: vi.fn(() => "session-once-adapter-failure"),
+    };
+    piAiMocks.completeSimple.mockRejectedValue(new Error("adapter failed before payload"));
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const advisorCommand = commands.find((command) => command.name === "company-advisor");
+    const tool = tools.find((item) => item.name === "company_consult_advisor");
+    if (!advisorCommand || !tool) throw new Error("advisor command/tool was not registered");
+
+    await advisorCommand.handler("once", ctx);
+    const result = await tool.execute("advisor-once-adapter-failure", {}, undefined, undefined, ctx) as ToolResult;
+    await handlers.session_shutdown?.({}, ctx);
+
+    expect(result.content[0].text).toContain("adapter failed before payload");
+    expect(activeToolNames()).toContain("company_consult_advisor");
+    expect(sessionEntries.at(-1)).toEqual({ customType: "pi-company.advisor-mode", data: { mode: "once" } });
+    const details = result.details.advisor as { sent: boolean; use?: number };
+    expect(details.sent).toBe(false);
+    expect(details).not.toHaveProperty("use");
   });
 
   it("stays inactive in ordinary Pi sessions outside a company project", async () => {
@@ -370,7 +864,7 @@ describe("pi-company extension", () => {
       ]),
       { placement: "belowEditor" },
     );
-    expect(ui.setStatus).toHaveBeenCalledWith("pi-company", "lead/lead inbox:0 · active");
+    expect(ui.setStatus).toHaveBeenCalledWith("pi-company", "lead/lead inbox:0 · active · advisor:auto");
     expect(ui.notify).toHaveBeenCalledWith(expect.stringContaining("Initialized pi-company"), "info");
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
   });
@@ -378,13 +872,14 @@ describe("pi-company extension", () => {
   it("exposes delivery OKF tools as descriptive context helpers", async () => {
     const root = tempRoot();
     initCompany({ root, id: "extension-okf-tools" });
-    const { tools, pi } = fakePi({
+    const { handlers, tools, pi } = fakePi({
       "company-root": root,
       "company-agent": "lead",
       "company-role": "lead",
     });
     const { ctx } = fakeContext(root);
     companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
     const contractTool = tools.find((tool) => tool.name === "company_create_sprint_contract");
     const readTool = tools.find((tool) => tool.name === "company_read_delivery_okf");
     const reportTool = tools.find((tool) => tool.name === "company_delivery_okf_report");
@@ -400,6 +895,7 @@ describe("pi-company extension", () => {
     const readBack = await readTool.execute("tool-2", { kind: "contract", id: "extension-contract" }, undefined, undefined, ctx) as ToolResult;
 
     const report = await reportTool.execute("tool-3", { contract_id: "extension-contract" }, undefined, undefined, ctx) as ToolResult;
+    await handlers.session_shutdown?.({}, ctx);
 
     expect(created.content[0].text).toContain("Wrote SprintContract extension-contract");
     expect(readBack.content[0].text).toContain("Runtime authority boundary");
@@ -517,7 +1013,7 @@ describe("pi-company extension", () => {
     await start.handler("", ctx);
     const postStartWidget = ui.setWidget.mock.calls.at(-1)?.[1] as string[];
     expect(postStartWidget).toContain("context: active | brief refreshed in chat");
-    expect(ui.setStatus).toHaveBeenCalledWith("pi-company", "lead/lead inbox:0 · brief refreshed");
+    expect(ui.setStatus).toHaveBeenCalledWith("pi-company", "lead/lead inbox:0 · brief refreshed · advisor:auto");
     await handlers.session_shutdown?.({}, ctx);
 
     const sendUserMessage = pi.sendUserMessage as unknown as ReturnType<typeof vi.fn>;
@@ -2136,15 +2632,23 @@ type ToolResult = {
   details: Record<string, unknown>;
 };
 
-function fakePi(flags: Record<string, string | boolean> = {}): {
+function fakePi(
+  flags: Record<string, string | boolean> = {},
+  options: { inactiveTools?: string[] } = {},
+): {
   handlers: Record<string, Handler>;
   pi: ExtensionAPI;
   tools: Array<{ name: string; execute: (...args: unknown[]) => unknown }>;
   commands: Array<{ name: string; handler: (args: string, ctx: ExtensionContext) => unknown }>;
+  activeToolNames: () => string[];
+  sessionEntries: Array<{ customType: string; data: unknown }>;
 } {
   const handlers: Record<string, Handler> = {};
   const tools: Array<{ name: string; execute: (...args: unknown[]) => unknown }> = [];
   const commands: Array<{ name: string; handler: (args: string, ctx: ExtensionContext) => unknown }> = [];
+  const sessionEntries: Array<{ customType: string; data: unknown }> = [];
+  const inactiveTools = new Set(options.inactiveTools ?? []);
+  let activeTools: string[] = [];
   const pi = {
     registerFlag: vi.fn(),
     getFlag: vi.fn((name: string) => flags[name]),
@@ -2156,10 +2660,20 @@ function fakePi(flags: Record<string, string | boolean> = {}): {
     }),
     registerTool: vi.fn((tool: { name: string; execute: (...args: unknown[]) => unknown }) => {
       tools.push(tool);
+      if (!inactiveTools.has(tool.name) && !activeTools.includes(tool.name)) {
+        activeTools.push(tool.name);
+      }
+    }),
+    getActiveTools: vi.fn(() => [...activeTools]),
+    setActiveTools: vi.fn((toolNames: string[]) => {
+      activeTools = toolNames.filter((name) => !inactiveTools.has(name));
+    }),
+    appendEntry: vi.fn((customType: string, data: unknown) => {
+      sessionEntries.push({ customType, data });
     }),
     sendUserMessage: vi.fn(),
   } as unknown as ExtensionAPI;
-  return { handlers, pi, tools, commands };
+  return { handlers, pi, tools, commands, activeToolNames: () => [...activeTools], sessionEntries };
 }
 
 function fakeContext(cwd: string): {
@@ -2196,6 +2710,21 @@ function fakeContext(cwd: string): {
     getSystemPrompt: vi.fn(() => ""),
   } as unknown as ExtensionContext;
   return { ctx, ui };
+}
+
+function fakeAdvisorModel() {
+  return {
+    id: "reasoner",
+    name: "Reasoner",
+    provider: "strong-provider",
+    api: "faux",
+    baseUrl: "https://example.invalid",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128_000,
+    maxTokens: 8_192,
+  };
 }
 
 function tempRoot(): string {

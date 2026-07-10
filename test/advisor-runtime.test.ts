@@ -30,6 +30,26 @@ describe("advisor runtime", () => {
       .rejects.toMatchObject({ code: "auth-unavailable" });
   });
 
+  it("accepts Pi 0.80 max thinking for an advisor target", async () => {
+    const target = await resolveAdvisorTarget(fakeRegistry(), {
+      provider: "strong",
+      model: "reasoner",
+      thinking: "max",
+    });
+
+    expect(target.thinking).toBe("max");
+  });
+
+  it("omits Pi's reasoning option when advisor thinking is off", async () => {
+    const target = await resolveAdvisorTarget(fakeRegistry(), {
+      provider: "strong",
+      model: "reasoner",
+      thinking: "off",
+    });
+
+    expect(target.thinking).toBeUndefined();
+  });
+
   it("sends bounded untrusted context through Pi complete and returns visible advice", async () => {
     const registry = fakeRegistry();
     const target = await resolveAdvisorTarget(registry, {
@@ -45,6 +65,7 @@ describe("advisor runtime", () => {
       stopReason: "stop",
       usage: { input: 123, output: 45 },
     }));
+    const onRequestStart = vi.fn();
 
     const result = await runAdvisorCompletion({
       target,
@@ -53,12 +74,14 @@ describe("advisor runtime", () => {
       branch: [{ type: "message", message: { role: "user", content: "Plan the change." } }],
       sessionId: "advisor-session",
       completeFn,
+      onRequestStart,
     });
 
     expect(result.text).toContain("Verdict: proceed");
     expect(result.companyContextChars).toBeLessThanOrEqual(1_000);
     expect(result.model).toEqual({ provider: "strong", id: "reasoner" });
     expect(result.transcript.stats.included).toBe(1);
+    expect(onRequestStart).toHaveBeenCalledOnce();
     const [, context, options] = completeFn.mock.calls[0];
     expect(context.systemPrompt).toContain("untrusted evidence");
     const content = context.messages[0].content;
@@ -69,11 +92,35 @@ describe("advisor runtime", () => {
     expect(requestText).toContain("truncated");
     expect(options).toMatchObject({
       apiKey: "secret",
-      reasoningEffort: "high",
+      env: { ADVISOR_ACCOUNT: "test" },
+      reasoning: "high",
       maxTokens: DEFAULT_ADVISOR_POLICY.max_output_tokens,
       timeoutMs: DEFAULT_ADVISOR_POLICY.timeout_ms,
       sessionId: "advisor-session",
     });
+    expect(options.onPayload).toEqual(expect.any(Function));
+  });
+
+  it("does not mark a request started when an adapter fails before payload construction", async () => {
+    const target = await resolveAdvisorTarget(fakeRegistry(), {
+      provider: "strong",
+      model: "reasoner",
+      thinking: "high",
+    });
+    const onRequestStart = vi.fn();
+
+    await expect(runAdvisorCompletion({
+      target,
+      policy: { ...DEFAULT_ADVISOR_POLICY },
+      companyContext: "Company state",
+      branch: [{ type: "message", message: { role: "user", content: "Plan the change." } }],
+      completeFn: vi.fn(async () => {
+        throw new Error("adapter failed before payload");
+      }),
+      onRequestStart,
+    })).rejects.toThrow("adapter failed before payload");
+
+    expect(onRequestStart).not.toHaveBeenCalled();
   });
 
   it("rejects empty branches and reasoning-only advisor responses", async () => {
@@ -106,7 +153,7 @@ describe("advisor runtime", () => {
 
 function fakeRegistry(options: {
   model?: Model<Api>;
-  auth?: { ok: true; apiKey?: string; headers?: Record<string, string> } | { ok: false; error: string };
+  auth?: { ok: true; apiKey?: string; headers?: Record<string, string>; env?: Record<string, string> } | { ok: false; error: string };
 } = {}): AdvisorModelRegistry & {
   find: ReturnType<typeof vi.fn>;
   getApiKeyAndHeaders: ReturnType<typeof vi.fn>;
@@ -116,7 +163,11 @@ function fakeRegistry(options: {
   return {
     refresh: vi.fn(),
     find: vi.fn(() => model),
-    getApiKeyAndHeaders: vi.fn(async () => options.auth ?? { ok: true as const, apiKey: "secret" }),
+    getApiKeyAndHeaders: vi.fn(async () => options.auth ?? {
+      ok: true as const,
+      apiKey: "secret",
+      env: { ADVISOR_ACCOUNT: "test" },
+    }),
   };
 }
 

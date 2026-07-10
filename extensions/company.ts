@@ -72,6 +72,7 @@ import {
 import {
   ADVISOR_AUTHORITY_GUIDANCE,
   ADVISOR_INVOCATION_GUIDANCE,
+  buildAdvisorTranscript,
   type PiSessionEntry,
 } from "../src/core/advisor.js";
 import {
@@ -98,6 +99,37 @@ import { companyPaths } from "../src/core/paths.js";
 import type { AgentRecord, CompanyState, GateEvidenceRecord, IssueRecord, IssueWorkType, MailboxMessage, PiModelConfig, PullRequestRecord } from "../src/core/types.js";
 
 const currentExtensionPath = fileURLToPath(import.meta.url);
+const ADVISOR_TOOL_NAME = "company_consult_advisor";
+const ADVISOR_SESSION_ENTRY_TYPE = "pi-company.advisor-mode";
+
+type AdvisorSessionOverride = "default" | "off" | "auto" | "once";
+type EffectiveAdvisorMode = Exclude<AdvisorSessionOverride, "default">;
+
+interface AdvisorModeState {
+  effective: EffectiveAdvisorMode;
+  override: AdvisorSessionOverride;
+  projectDefault: Exclude<EffectiveAdvisorMode, "once">;
+  eligible: boolean;
+}
+
+interface AdvisorUseState {
+  use: number;
+  oneShotConsumed: boolean;
+  persistenceError: string | null;
+}
+
+interface AdvisorUseReservation {
+  revision: number;
+}
+
+type AdvisorUseClaimErrorCode = "advisor_mode_changed" | "advisor_disabled" | "limit_reached";
+
+class AdvisorUseClaimError extends Error {
+  constructor(readonly code: AdvisorUseClaimErrorCode, message: string) {
+    super(message);
+    this.name = "AdvisorUseClaimError";
+  }
+}
 
 const messageTypeSchema = Type.Union([
   Type.Literal("assignment"),
@@ -298,6 +330,10 @@ export default function companyExtension(pi: ExtensionAPI): void {
   let companyPaused = false;
   let busyDeliveryBackoffUntil = 0;
   let advisorUsesThisTurn = 0;
+  let advisorSessionOverride: AdvisorSessionOverride = "default";
+  let advisorModeRevision = 0;
+  let advisorToolAllowedAtStartup: boolean | null = null;
+  const advisorUseReservations = new Set<AdvisorUseReservation>();
 
   function isCompanyActive(): boolean {
     return loadConfig(root) !== null;
@@ -311,6 +347,164 @@ export default function companyExtension(pi: ExtensionAPI): void {
     if (ctx.hasUI) ctx.ui.notify(noCompanyMessage(root), "info");
   }
 
+  function currentRole(): string {
+    return loadState(root).agents[agentName]?.role ?? role;
+  }
+
+  function advisorModeState(): AdvisorModeState {
+    const projectDefault = normalizeAdvisorPolicy(loadConfig(root)?.advisor_policy).enabled ? "auto" : "off";
+    const eligible = isAdvisorExecutor(agentName, currentRole(), lead);
+    return {
+      effective: !eligible
+        ? "off"
+        : advisorSessionOverride === "default"
+          ? projectDefault
+          : advisorSessionOverride,
+      override: advisorSessionOverride,
+      projectDefault,
+      eligible,
+    };
+  }
+
+  function syncAdvisorToolAvailability(options: {
+    forceEnable?: boolean;
+    respectStartupSelection?: boolean;
+  } = {}): void {
+    if (!toolsRegistered) return;
+    const state = advisorModeState();
+    const activeTools = pi.getActiveTools();
+    const isActive = activeTools.includes(ADVISOR_TOOL_NAME);
+    const startupExcluded = options.respectStartupSelection && advisorToolAllowedAtStartup === false;
+    const shouldBeActive = state.eligible && state.effective !== "off" && !startupExcluded;
+    if (!shouldBeActive && isActive) {
+      pi.setActiveTools(activeTools.filter((name) => name !== ADVISOR_TOOL_NAME));
+    } else if (shouldBeActive && options.forceEnable && !isActive) {
+      pi.setActiveTools([...activeTools, ADVISOR_TOOL_NAME]);
+    }
+  }
+
+  function syncAdvisorToolForOverride(): void {
+    if (advisorSessionOverride === "default") {
+      syncAdvisorToolAvailability({
+        forceEnable: advisorToolAllowedAtStartup === true,
+        respectStartupSelection: true,
+      });
+      return;
+    }
+    syncAdvisorToolAvailability({ forceEnable: true });
+  }
+
+  function restoreAdvisorSessionOverride(ctx: ExtensionContext): void {
+    advisorSessionOverride = "default";
+    try {
+      for (const entry of ctx.sessionManager.getBranch()) {
+        if (entry.type !== "custom" || entry.customType !== ADVISOR_SESSION_ENTRY_TYPE) continue;
+        const mode = advisorSessionOverrideFromUnknown(entry.data);
+        if (mode) {
+          advisorSessionOverride = mode;
+        }
+      }
+    } catch {
+      // Ephemeral/test sessions may not have a readable branch yet.
+    }
+  }
+
+  function persistAdvisorSessionOverride(mode: AdvisorSessionOverride): void {
+    pi.appendEntry(ADVISOR_SESSION_ENTRY_TYPE, { mode });
+  }
+
+  function setAdvisorSessionOverride(mode: AdvisorSessionOverride, persist = true): void {
+    advisorSessionOverride = mode;
+    advisorModeRevision += 1;
+    syncAdvisorToolForOverride();
+    if (persist) persistAdvisorSessionOverride(mode);
+  }
+
+  function reserveAdvisorUse(maxUsesPerTurn: number, expectedRevision: number): AdvisorUseReservation {
+    if (advisorModeRevision !== expectedRevision) {
+      throw new AdvisorUseClaimError(
+        "advisor_mode_changed",
+        "Advisor dispatch was canceled because the session mode or active branch changed before the provider request started.",
+      );
+    }
+    const mode = advisorModeState().effective;
+    if (mode === "off") {
+      throw new AdvisorUseClaimError(
+        "advisor_disabled",
+        "Advisor dispatch was canceled because advisor mode is off for this Pi session.",
+      );
+    }
+    const turnLimitReserved = advisorUsesThisTurn + advisorUseReservations.size >= maxUsesPerTurn;
+    const oneShotAlreadyReserved = mode === "once" && advisorUseReservations.size > 0;
+    if (turnLimitReserved || oneShotAlreadyReserved) {
+      throw new AdvisorUseClaimError(
+        "limit_reached",
+        `Advisor use limit reached for this executor turn (${maxUsesPerTurn}).`,
+      );
+    }
+    const reservation = { revision: expectedRevision };
+    advisorUseReservations.add(reservation);
+    return reservation;
+  }
+
+  function commitAdvisorUse(reservation: AdvisorUseReservation, maxUsesPerTurn: number): AdvisorUseState {
+    if (!advisorUseReservations.delete(reservation) || advisorModeRevision !== reservation.revision) {
+      throw new AdvisorUseClaimError(
+        "advisor_mode_changed",
+        "Advisor dispatch was canceled because the session mode or active branch changed before the provider payload was ready.",
+      );
+    }
+    const mode = advisorModeState().effective;
+    if (mode === "off") {
+      throw new AdvisorUseClaimError(
+        "advisor_disabled",
+        "Advisor dispatch was canceled because advisor mode is off for this Pi session.",
+      );
+    }
+    if (advisorUsesThisTurn >= maxUsesPerTurn) {
+      throw new AdvisorUseClaimError(
+        "limit_reached",
+        `Advisor use limit reached for this executor turn (${maxUsesPerTurn}).`,
+      );
+    }
+    advisorUsesThisTurn += 1;
+    const oneShotConsumed = mode === "once";
+    let persistenceError: string | null = null;
+    if (oneShotConsumed) {
+      advisorSessionOverride = "off";
+      advisorModeRevision += 1;
+      syncAdvisorToolForOverride();
+      try {
+        persistAdvisorSessionOverride("off");
+      } catch (error) {
+        persistenceError = errorMessage(error);
+      }
+    }
+    return { use: advisorUsesThisTurn, oneShotConsumed, persistenceError };
+  }
+
+  function releaseAdvisorUseReservation(reservation: AdvisorUseReservation): void {
+    advisorUseReservations.delete(reservation);
+  }
+
+  function advisorStatusText(): string {
+    const state = advisorModeState();
+    if (!state.eligible) {
+      return `Advisor mode is not available for ${currentRole()} sessions. Lead/coder executors may consult it; reviewer/tester roles stay independent.`;
+    }
+    const config = loadConfig(root);
+    const target = config?.model_policy?.roles?.advisor;
+    const model = target?.provider && target?.model
+      ? `${target.provider}/${target.model}${target.thinking ? ` (thinking:${target.thinking})` : ""}`
+      : "not configured";
+    const source = state.override === "default"
+      ? `project default (${state.projectDefault})`
+      : `session override (${state.override}); project default ${state.projectDefault}`;
+    const tool = pi.getActiveTools().includes(ADVISOR_TOOL_NAME) ? "active" : "hidden";
+    const limit = normalizeAdvisorPolicy(config?.advisor_policy).max_uses_per_turn;
+    return `Advisor mode: ${state.effective} · ${source} · tool ${tool} · model ${model} · turn use ${advisorUsesThisTurn}/${limit}.`;
+  }
+
   function ensureCompanyToolsRegistered(): void {
     if (!isCompanyActive() || toolsRegistered) return;
     registerTools(pi, {
@@ -319,16 +513,18 @@ export default function companyExtension(pi: ExtensionAPI): void {
       role,
       lead,
       isPaused: () => companyPaused,
+      advisorMode: () => advisorModeState().effective,
+      advisorModeRevision: () => advisorModeRevision,
       advisorUsesThisTurn: () => advisorUsesThisTurn,
-      consumeAdvisorUse: () => {
-        advisorUsesThisTurn += 1;
-        return advisorUsesThisTurn;
-      },
+      reserveAdvisorUse,
+      commitAdvisorUse,
+      releaseAdvisorUseReservation,
       waitForProviderBackoff,
       reportAutomaticRateLimit,
       refreshUi,
     });
     toolsRegistered = true;
+    advisorToolAllowedAtStartup = pi.getActiveTools().includes(ADVISOR_TOOL_NAME);
   }
 
   function registerCurrentAgent(ctx: ExtensionContext): void {
@@ -404,7 +600,10 @@ export default function companyExtension(pi: ExtensionAPI): void {
       return;
     }
     const contextHint = manuallyRefreshedThisSession ? "brief refreshed" : "active";
-    ctx.ui.setStatus("pi-company", `${agentName}/${displayRole} inbox:${inbox} · ${contextHint}`);
+    const advisorHint = isAdvisorExecutor(agentName, displayRole, lead)
+      ? ` · advisor:${advisorModeState().effective}`
+      : "";
+    ctx.ui.setStatus("pi-company", `${agentName}/${displayRole} inbox:${inbox} · ${contextHint}${advisorHint}`);
     ctx.ui.setWidget("pi-company", renderDeskPanel(state, agentName, manuallyRefreshedThisSession), { placement: "belowEditor" });
   }
 
@@ -499,6 +698,8 @@ export default function companyExtension(pi: ExtensionAPI): void {
       if (!isCompanyActive()) return;
       registerCurrentAgent(ctx);
       ensureCompanyToolsRegistered();
+      restoreAdvisorSessionOverride(ctx);
+      syncAdvisorToolAvailability({ respectStartupSelection: true });
       await refreshUi(ctx);
       startPolling(ctx);
       startWatchdog(ctx);
@@ -511,6 +712,16 @@ export default function companyExtension(pi: ExtensionAPI): void {
       }
       throw error;
     }
+  });
+
+  pi.on("session_tree", async (_event, ctx) => {
+    if (!isCompanyActive()) return;
+    advisorUsesThisTurn = 0;
+    advisorUseReservations.clear();
+    advisorModeRevision += 1;
+    restoreAdvisorSessionOverride(ctx);
+    syncAdvisorToolForOverride();
+    await refreshUi(ctx);
   });
 
   pi.on("session_shutdown", async () => {
@@ -623,6 +834,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
   pi.on("before_agent_start", async (event, ctx) => {
     if (!isCompanyActive()) return undefined;
     advisorUsesThisTurn = 0;
+    advisorUseReservations.clear();
     if (companyPaused) {
       await refreshUi(ctx);
       return {
@@ -666,6 +878,42 @@ ${renderCompanySystemPrompt(root, agentName, role, lead)}`,
     },
   });
 
+  pi.registerCommand("company-advisor", {
+    description: "Control advisor availability for this Pi session: off, auto, once, default, status",
+    getArgumentCompletions: (prefix) => {
+      const options = ["off", "auto", "on", "once", "default", "status"]
+        .filter((value) => value.startsWith(prefix.trim().toLowerCase()))
+        .map((value) => ({ value, label: value }));
+      return options.length > 0 ? options : null;
+    },
+    handler: async (args, ctx) => {
+      if (!isCompanyActive()) {
+        notifyNoCompany(ctx);
+        return;
+      }
+      const state = advisorModeState();
+      if (!state.eligible) {
+        if (ctx.hasUI) ctx.ui.notify(advisorStatusText(), "info");
+        return;
+      }
+      const requested = args.trim().toLowerCase();
+      const mode = requested === "on" ? "auto" : requested || "status";
+      if (mode === "status") {
+        if (ctx.hasUI) ctx.ui.notify(advisorStatusText(), "info");
+        return;
+      }
+      if (!isAdvisorSessionOverride(mode)) {
+        if (ctx.hasUI) {
+          ctx.ui.notify("Usage: /company-advisor off|auto|once|default|status", "error");
+        }
+        return;
+      }
+      setAdvisorSessionOverride(mode);
+      await refreshUi(ctx);
+      if (ctx.hasUI) ctx.ui.notify(advisorStatusText(), "info");
+    },
+  });
+
   pi.registerCommand("company-init", {
     description: "Initialize pi-company in the current project and attach this Pi session",
     handler: async (args, ctx) => {
@@ -678,6 +926,7 @@ ${renderCompanySystemPrompt(root, agentName, role, lead)}`,
       initCompany({ root, id: requestedId || path.basename(root) });
       registerCurrentAgent(ctx);
       ensureCompanyToolsRegistered();
+      syncAdvisorToolAvailability({ respectStartupSelection: true });
       startPolling(ctx);
       startWatchdog(ctx);
       await refreshUi(ctx);
@@ -698,7 +947,10 @@ ${renderCompanySystemPrompt(root, agentName, role, lead)}`,
     startPolling(ctx);
     startWatchdog(ctx);
     await refreshUi(ctx);
-    await pi.sendUserMessage(renderManualBriefRefreshPrompt(root, agentName, role, lead), { deliverAs: "followUp" });
+    await pi.sendUserMessage(
+      renderManualBriefRefreshPrompt(root, agentName, role, lead),
+      { deliverAs: "followUp" },
+    );
     if (ctx.hasUI) ctx.ui.notify(`pi-company brief refreshed for ${agentName}`, "info");
   }
 
@@ -824,7 +1076,6 @@ ${renderCompanySystemPrompt(root, agentName, role, lead)}`,
     },
   });
 
-  ensureCompanyToolsRegistered();
 }
 
 function findCompanyRoot(start: string): string | null {
@@ -1382,7 +1633,12 @@ function isAgentBusyError(error: unknown): boolean {
   return /already processing/i.test(errorMessage(error));
 }
 
-function renderCompanySystemPrompt(root: string, agentName: string, fallbackRole: string, lead: string): string {
+function renderCompanySystemPrompt(
+  root: string,
+  agentName: string,
+  fallbackRole: string,
+  lead: string,
+): string {
   const state = loadState(root);
   const agent = state.agents[agentName];
   const role = agent?.role ?? fallbackRole;
@@ -1390,12 +1646,9 @@ function renderCompanySystemPrompt(root: string, agentName: string, fallbackRole
   const brief = renderLeadBrief(buildLeadBrief(root));
   const currentTask = agent?.current_task ? `Current task: ${agent.current_task}` : "Current task: idle";
   const inboxCount = state.inbox_counts[agentName] ?? 0;
-  const advisorPolicy = normalizeAdvisorPolicy(state.config?.advisor_policy);
-  const advisorGuidance = !advisorPolicy.enabled
-    ? "Advisor mode is disabled in company.yaml. Do not call company_consult_advisor."
-    : isAdvisorExecutor(agentName, role, lead)
-      ? `Advisor mode is available through company_consult_advisor. ${ADVISOR_INVOCATION_GUIDANCE} ${ADVISOR_AUTHORITY_GUIDANCE} Maximum consultations this turn: ${advisorPolicy.max_uses_per_turn}.`
-      : `Advisor consultation is reserved for lead and coder executors. Preserve this ${role} session as an independent role context. ${ADVISOR_AUTHORITY_GUIDANCE}`;
+  const advisorGuidance = !isAdvisorExecutor(agentName, role, lead)
+    ? `Advisor consultation is reserved for lead and coder executors. Preserve this ${role} session as an independent role context. ${ADVISOR_AUTHORITY_GUIDANCE}`
+    : `Advisor availability follows the current active tool set and may change during this agent run. When company_consult_advisor is present, decide autonomously whether to use it; no user prompt is required. When it is absent, continue locally. ${ADVISOR_AUTHORITY_GUIDANCE}`;
   const roleSpecific =
     agentName === lead
       ? "You are the lead. Use the lead brief as authoritative project truth before declaring completion, routing gates, or merging."
@@ -1424,8 +1677,14 @@ Next step:
 Summarize the current state briefly, name blockers and owners, then continue through pi-company tools. Do not rely on stale chat memory or say the project is complete unless the authoritative brief allows it.`;
 }
 
-function renderManualBriefRefreshPrompt(root: string, agentName: string, fallbackRole: string, lead: string): string {
-  return renderCompanySystemPrompt(root, agentName, fallbackRole, lead).replace("[pi-company context]", "[pi-company brief refresh]");
+function renderManualBriefRefreshPrompt(
+  root: string,
+  agentName: string,
+  fallbackRole: string,
+  lead: string,
+): string {
+  return renderCompanySystemPrompt(root, agentName, fallbackRole, lead)
+    .replace("[pi-company context]", "[pi-company brief refresh]");
 }
 
 function renderCompanyPausedSystemPrompt(agentName: string, fallbackRole: string): string {
@@ -1509,14 +1768,27 @@ function isAdvisorExecutor(agentName: string, role: string, lead: string): boole
   return agentName === lead || role === "coder";
 }
 
+function isAdvisorSessionOverride(value: string): value is AdvisorSessionOverride {
+  return value === "default" || value === "off" || value === "auto" || value === "once";
+}
+
+function advisorSessionOverrideFromUnknown(value: unknown): AdvisorSessionOverride | null {
+  if (!isRecord(value) || typeof value.mode !== "string") return null;
+  return isAdvisorSessionOverride(value.mode) ? value.mode : null;
+}
+
 function registerTools(pi: ExtensionAPI, runtime: {
   root: string;
   agentName: string;
   role: string;
   lead: string;
   isPaused(): boolean;
+  advisorMode(): EffectiveAdvisorMode;
+  advisorModeRevision(): number;
   advisorUsesThisTurn(): number;
-  consumeAdvisorUse(): number;
+  reserveAdvisorUse(maxUsesPerTurn: number, expectedRevision: number): AdvisorUseReservation;
+  commitAdvisorUse(reservation: AdvisorUseReservation, maxUsesPerTurn: number): AdvisorUseState;
+  releaseAdvisorUseReservation(reservation: AdvisorUseReservation): void;
   waitForProviderBackoff(ctx: ExtensionContext, provider: string): Promise<void>;
   reportAutomaticRateLimit(kind: "provider_429" | "quota_exhausted", reason: string, provider?: string | null): CompanyState;
   refreshUi(ctx: ExtensionContext): Promise<void>;
@@ -1537,7 +1809,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
 
   if (isAdvisorExecutor(agentName, loadState(root).agents[agentName]?.role ?? role, lead)) {
     registerCompanyTool({
-    name: "company_consult_advisor",
+    name: ADVISOR_TOOL_NAME,
     label: "Consult Advisor",
     description:
       "Pause this executor and consult the explicitly configured stronger advisor model. " +
@@ -1546,26 +1818,35 @@ function registerTools(pi: ExtensionAPI, runtime: {
     promptSnippet: ADVISOR_INVOCATION_GUIDANCE,
     promptGuidelines: [
       ADVISOR_INVOCATION_GUIDANCE,
-      `The tool takes no parameters and automatically supplies the active branch and company snapshot. Respect the per-turn use limit. ${ADVISOR_AUTHORITY_GUIDANCE}`,
+      `When this tool is active, decide autonomously whether to consult it; no user prompt is required. The tool takes no parameters and automatically supplies the active branch and company snapshot. Respect the per-turn use limit. ${ADVISOR_AUTHORITY_GUIDANCE}`,
     ],
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, signal, onUpdate, ctx) {
       const policy = normalizeAdvisorPolicy(loadConfig(root)?.advisor_policy);
-      if (!policy.enabled) {
-        const auditError = recordAdvisorAudit(root, agentName, { status: "disabled", sent: false });
-        return toolResult(`Advisor mode is disabled in .pi-company/company.yaml; no transcript was sent.${advisorAuditWarning(auditError)}`, {
+      let sessionMode = runtime.advisorMode();
+      const disabledResult = (message: string, metadata: Record<string, unknown> = {}) => {
+        const auditError = recordAdvisorAudit(root, agentName, {
+          status: "disabled",
+          sent: false,
+          session_mode: runtime.advisorMode(),
+          ...metadata,
+        });
+        return toolResult(`${message}${advisorAuditWarning(auditError)}`, {
           advisor: {
             status: "disabled",
             sent: false,
+            session_mode: runtime.advisorMode(),
+            ...metadata,
             audit_status: auditError ? "failed" : "recorded",
             audit_error: auditError,
           },
         });
-      }
-      if (runtime.advisorUsesThisTurn() >= policy.max_uses_per_turn) {
+      };
+      const limitResult = () => {
         const auditError = recordAdvisorAudit(root, agentName, {
           status: "limit_reached",
           sent: false,
+          session_mode: runtime.advisorMode(),
           max_uses_per_turn: policy.max_uses_per_turn,
         });
         return toolResult(
@@ -1574,12 +1855,19 @@ function registerTools(pi: ExtensionAPI, runtime: {
             advisor: {
               status: "limit_reached",
               sent: false,
+              session_mode: runtime.advisorMode(),
               max_uses_per_turn: policy.max_uses_per_turn,
               audit_status: auditError ? "failed" : "recorded",
               audit_error: auditError,
             },
           },
         );
+      };
+      if (sessionMode === "off") {
+        return disabledResult("Advisor mode is off for this Pi session (disabled by the current session override or project default); no transcript was sent. Run /company-advisor auto or /company-advisor once to enable it.");
+      }
+      if (runtime.advisorUsesThisTurn() >= policy.max_uses_per_turn) {
+        return limitResult();
       }
 
       const modelConfig = loadConfig(root)?.model_policy?.roles?.advisor ?? null;
@@ -1591,21 +1879,46 @@ function registerTools(pi: ExtensionAPI, runtime: {
         const auditError = recordAdvisorAudit(root, agentName, {
           status,
           sent: false,
+          session_mode: sessionMode,
           error: errorMessage(error),
         });
         return toolResult(`${errorMessage(error)}${advisorAuditWarning(auditError)}`, {
-          advisor: { status, sent: false, audit_status: auditError ? "failed" : "recorded", audit_error: auditError },
+          advisor: {
+            status,
+            sent: false,
+            session_mode: sessionMode,
+            audit_status: auditError ? "failed" : "recorded",
+            audit_error: auditError,
+          },
         });
       }
 
-      const use = runtime.consumeAdvisorUse();
-      onUpdate?.({
-        content: [{ type: "text", text: `Consulting ${target.model.provider}/${target.model.id} (${use}/${policy.max_uses_per_turn})...` }],
-        details: {},
-      });
+      sessionMode = runtime.advisorMode();
+      if (sessionMode === "off") {
+        return disabledResult("Advisor mode was turned off while preparing the consultation; no transcript was read or sent.", {
+          phase: "setup",
+        });
+      }
+
+      const preparationRevision = runtime.advisorModeRevision();
+      const preparationInvalidated = () => runtime.advisorModeRevision() !== preparationRevision;
       let lease: ProviderRequestLease | null = null;
+      let use: number | null = null;
+      let oneShotConsumed = false;
+      let oneShotNotice = "";
+      let requestStarted = false;
+      let useReservation: AdvisorUseReservation | null = null;
       try {
         await runtime.waitForProviderBackoff(ctx, target.model.provider);
+        if (preparationInvalidated()) {
+          await refreshUi(ctx);
+          return disabledResult("Advisor mode or active branch changed before the consultation request was sent; no transcript was read or sent.", {
+            phase: "before_send",
+          });
+        }
+        if (runtime.advisorUsesThisTurn() >= policy.max_uses_per_turn) {
+          return limitResult();
+        }
         const state = loadState(root);
         lease = await acquireProviderRequestLease(
           root,
@@ -1613,20 +1926,70 @@ function registerTools(pi: ExtensionAPI, runtime: {
           `${agentName}:advisor`,
           state.config?.provider_request_policy,
         );
+        if (preparationInvalidated()) {
+          await refreshUi(ctx);
+          return disabledResult("Advisor mode or active branch changed before the consultation request was sent; no transcript was read or sent.", {
+            phase: "before_send",
+          });
+        }
+        if (runtime.advisorUsesThisTurn() >= policy.max_uses_per_turn) {
+          return limitResult();
+        }
+
+        const branch = ctx.sessionManager.getBranch() as PiSessionEntry[];
+        if (!buildAdvisorTranscript(branch, { maxChars: 1_000 }).text.trim()) {
+          throw new AdvisorRuntimeError("empty-transcript", "Advisor found no active conversation transcript to review.");
+        }
+
+        sessionMode = runtime.advisorMode();
+        if (sessionMode === "off") {
+          return disabledResult("Advisor mode was turned off before the consultation request was sent; no transcript was sent.", {
+            phase: "before_send",
+          });
+        }
+
+        const companyContext = renderAdvisorCompanyContext(root, agentName, role);
+        const advisorSessionId = `${ctx.sessionManager.getSessionId()}:advisor`;
+        useReservation = runtime.reserveAdvisorUse(policy.max_uses_per_turn, preparationRevision);
+        const pendingReservation = useReservation;
         const result = await runAdvisorCompletion({
           target,
           policy,
-          branch: ctx.sessionManager.getBranch() as PiSessionEntry[],
-          companyContext: renderAdvisorCompanyContext(root, agentName, role),
+          branch,
+          companyContext,
           signal,
-          sessionId: `${ctx.sessionManager.getSessionId()}:advisor`,
+          sessionId: advisorSessionId,
+          onRequestStart: () => {
+            const consumed = runtime.commitAdvisorUse(pendingReservation, policy.max_uses_per_turn);
+            useReservation = null;
+            use = consumed.use;
+            oneShotConsumed = consumed.oneShotConsumed;
+            oneShotNotice = oneShotConsumed
+              ? "\n\n[pi-company: one-shot advisor consultation consumed; advisor mode is now off for this Pi session.]"
+              : "";
+            if (consumed.persistenceError) {
+              oneShotNotice += `\n\n[pi-company warning: one-shot off state could not be persisted: ${consumed.persistenceError}]`;
+            }
+            try {
+              onUpdate?.({
+                content: [{ type: "text", text: `Consulting ${target.model.provider}/${target.model.id} (${use}/${policy.max_uses_per_turn})...` }],
+                details: {},
+              });
+            } catch {
+              // A transient progress-render error must not cancel a paid advisor attempt.
+            }
+            requestStarted = true;
+          },
         });
+        if (use === null) throw new Error("Advisor request completed without consuming a use.");
         const auditError = recordAdvisorAudit(root, agentName, {
           status: "success",
           sent: true,
           model: result.model,
           thinking: result.thinking ?? null,
           use,
+          session_mode: sessionMode,
+          one_shot_consumed: oneShotConsumed,
           max_uses_per_turn: policy.max_uses_per_turn,
           duration_ms: result.durationMs,
           request_chars: result.requestChars,
@@ -1636,7 +1999,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
         await refreshUi(ctx);
         const thinking = result.thinking ? ` · thinking:${result.thinking}` : "";
         return toolResult(
-          `[company advisor: ${result.model.provider}/${result.model.id}${thinking} · use ${use}/${policy.max_uses_per_turn}]\n\n${result.text}${advisorAuditWarning(auditError)}`,
+          `[company advisor: ${result.model.provider}/${result.model.id}${thinking} · use ${use}/${policy.max_uses_per_turn}]\n\n${result.text}${oneShotNotice}${advisorAuditWarning(auditError)}`,
           {
             advisor: {
               status: "success",
@@ -1644,6 +2007,8 @@ function registerTools(pi: ExtensionAPI, runtime: {
               ...result.model,
               thinking: result.thinking ?? null,
               use,
+              session_mode: sessionMode,
+              one_shot_consumed: oneShotConsumed,
               max_uses_per_turn: policy.max_uses_per_turn,
               duration_ms: result.durationMs,
               transcript: result.transcript.stats,
@@ -1662,32 +2027,43 @@ function registerTools(pi: ExtensionAPI, runtime: {
             // The advisor result still needs to reach the executor if backoff recording races another process.
           }
         }
-        const sent = !(error instanceof AdvisorRuntimeError && error.code === "empty-transcript");
+        const sent = requestStarted;
         const status = signal?.aborted
           ? "aborted"
           : classification
             ? classification.kind
-            : error instanceof AdvisorRuntimeError
+            : error instanceof AdvisorUseClaimError
               ? error.code
-              : /timeout/i.test(errorMessage(error))
-                ? "timeout"
-                : "error";
+              : error instanceof AdvisorRuntimeError
+                ? error.code
+                : /timeout/i.test(errorMessage(error))
+                  ? "timeout"
+                  : "error";
+        const useMetadata = use === null ? {} : {
+          use,
+          one_shot_consumed: oneShotConsumed,
+        };
         const auditError = recordAdvisorAudit(root, agentName, {
           status,
           sent,
           model: { provider: target.model.provider, id: target.model.id },
-          use,
+          session_mode: sessionMode,
+          ...useMetadata,
           max_uses_per_turn: policy.max_uses_per_turn,
           error: errorMessage(error),
         });
         await refreshUi(ctx);
+        const stage = use === null
+          ? "before the consultation request started"
+          : `after use ${use}/${policy.max_uses_per_turn}`;
         return toolResult(
-          `Advisor unavailable (${status}) after use ${use}/${policy.max_uses_per_turn}: ${errorMessage(error)} Continue with local evidence or try again next turn.${advisorAuditWarning(auditError)}`,
+          `Advisor unavailable (${status}) ${stage}: ${errorMessage(error)} Continue with local evidence or try again next turn.${oneShotNotice}${advisorAuditWarning(auditError)}`,
           {
             advisor: {
               status,
               sent,
-              use,
+              session_mode: sessionMode,
+              ...useMetadata,
               max_uses_per_turn: policy.max_uses_per_turn,
               audit_status: auditError ? "failed" : "recorded",
               audit_error: auditError,
@@ -1695,6 +2071,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
           },
         );
       } finally {
+        if (useReservation) runtime.releaseAdvisorUseReservation(useReservation);
         if (lease) await releaseProviderRequestLease(root, lease);
       }
     },
@@ -3026,7 +3403,7 @@ async function configureOneModelPolicy(
   if (!selectedModel) throw new Error("Unknown model choice.");
 
   const thinkingChoices = selectedModel.reasoning
-    ? ["inherit Pi default", "off", "minimal", "low", "medium", "high", "xhigh"]
+    ? ["inherit Pi default", "off", "minimal", "low", "medium", "high", "xhigh", "max"]
     : ["inherit Pi default", "off"];
   const thinkingChoice = await selectRequired(ctx, `Choose thinking for ${target.title} (current: ${target.currentSummary}):`, thinkingChoices);
   const modelConfig: PiModelConfig = {

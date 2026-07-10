@@ -320,13 +320,27 @@ Advisor 模式给 pi-company 原有的横向团队协作增加了一条纵向升
 `advisor` role 是同步能力，不需要另外启动常驻 advisor pane。没有显式配置
 `model_policy.roles.advisor` 时，工具不会发送 transcript，只会返回配置提示。
 只有 lead 和 coder executor 会拿到这个工具；reviewer/tester 会话保持独立。
-第一次试用可以直接对 lead 或 coder 说：
 
-```text
-先调用 company_consult_advisor 审查实现方案，执行完成后再调用一次做完成前复核。
-```
+正常使用**不需要**在 prompt 里点名工具。`auto` 模式会把工具规则暴露给
+executor，由快模型在高杠杆节点自主判断是否升级。你可以在 Pi 会话的任意
+阶段控制它：
 
-可以在 `.pi-company/company.yaml` 调整预算：
+| 命令 | 当前 Pi 会话中的效果 |
+| --- | --- |
+| `/company-advisor auto` | 暴露工具，由 executor 仅在必要时咨询；`on` 是别名。 |
+| `/company-advisor once` | 武装一次真实咨询；provider payload 准备好、即将 dispatch 时才自动切到 `off`，此前的配置、队列、空上下文或 adapter 预处理失败不会消耗机会。 |
+| `/company-advisor off` | 隐藏工具；即使旧上下文残留 tool call，也会在读取或发送 transcript 前拦截。 |
+| `/company-advisor default` | 清除会话覆盖，重新跟随 `advisor_policy.enabled`。 |
+| `/company-advisor status` | 查看模式、来源、工具状态、模型和本轮用量；不带参数时也显示状态。 |
+
+这些命令不会注入 user message。模式保存在 Pi custom session entry 中，恢复
+会话或切换 session tree 时会还原，而且不会进入模型上下文。状态栏会持续显示
+`advisor:auto`、`advisor:once` 或 `advisor:off`。要求 Pi `0.80.6+`；在
+agent run 中途切换 active tools，会从同一 run 的下一次 provider request 生效。
+Pi 启动时显式传入的 `--tools` / `--exclude-tools` 是硬过滤，session mode 不会
+绕过它；要使用 advisor，需去掉该过滤条件并重启 Pi。
+
+可以在 `.pi-company/company.yaml` 调整项目默认值和预算：
 
 ```yaml
 advisor_policy:
@@ -337,6 +351,9 @@ advisor_policy:
   max_transcript_chars: 240000
   max_company_context_chars: 24000
 ```
+
+`enabled: true` 表示项目默认 `auto`，`false` 表示默认 `off`；会话命令可以
+临时覆盖两者，不会改写 company 配置。
 
 Advisor 调用进入现有 provider 并发队列。事件日志只记录模型、状态、耗时、
 可用时的 token usage 和截断统计，不保存 transcript 或顾问正文；如果元数据
@@ -367,7 +384,7 @@ pi -e ./extensions/company.ts --company-root "$PWD" --company-agent lead --compa
 - UI：当前 agent 的状态行和 desk panel
 - input hook：把交互式 human steering 镜像到 lead
 - mailbox poller：读取本地消息
-- 命令：`/company-init`、`/company-start`（手动刷新 brief）、`/company-resume`、`/company-pause`、`/company-maintain`、`/company-status`、`/company-brief`、`/company-inbox`、`/company-ack`、`/company-send`、`/company-configure-models`
+- 命令：`/company-init`、`/company-start`（手动刷新 brief）、`/company-resume`、`/company-pause`、`/company-maintain`、`/company-status`、`/company-advisor`、`/company-brief`、`/company-inbox`、`/company-ack`、`/company-send`、`/company-configure-models`
 - 工具：同步 advisor 咨询、状态、lead/global brief、lifecycle maintenance、inbox、message、issues、task updates、spawn agent、本地 PR gates、review、test、acceptance、automated-test evidence、merge request、rate-limit report、model policy configuration
 
 `company_lead_brief` 是 lead 的权威全局交付视图。Lead 在告诉人类“完成”“可以合并”之前必须使用它。worker 的 “done”“merged”“tested” 之类散文报告不是交付真相。

@@ -17,6 +17,15 @@ This project follows [Semantic Versioning](https://semver.org/).
   are never persisted by pi-company.
 - Added an inline `advisor` model-policy target (not a spawnable role). Independent reviewer,
   tester, acceptance, and merge gates remain authoritative.
+- Added session-scoped `/company-advisor off|auto|once|default|status` controls.
+- Reserved concurrent advisor attempts atomically and consume `once` only when
+  Pi has prepared the provider payload for dispatch.
+- Modes dynamically hide or expose the tool without injecting a user prompt, persist
+  as context-excluded Pi session entries, and restore across session-tree navigation.
+- Updated the development and runtime compatibility baseline to Pi `0.80.6+`
+  so mid-run active-tool changes, request-scoped provider env, and `max` thinking are supported.
+- Deferred dynamic tool registration to `session_start`, after Pi 0.80 has bound
+  extension action methods.
 
 ## 0.3.0 — OKF v3 adversarial orchestration
 

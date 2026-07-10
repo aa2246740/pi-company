@@ -366,14 +366,29 @@ Configure it from the lead pane with `/company-configure-models`:
 The `advisor` role model is an inline capability; no persistent advisor pane needs
 to be launched. If `model_policy.roles.advisor` is absent, the tool sends nothing
 and returns setup guidance. Only lead and coder executor sessions receive the tool;
-reviewer and tester sessions stay independent. A useful first trial prompt is:
+reviewer and tester sessions stay independent.
 
-```text
-Consult company_consult_advisor before choosing the implementation plan, execute
-the plan locally, then consult it once more before claiming completion.
-```
+Normal use does **not** require a prompt that names the tool. In `auto` mode the
+active tool guidelines tell the executor when to escalate, and the fast model
+decides autonomously. Control availability at any point in the Pi session:
 
-Defaults can be tuned in `.pi-company/company.yaml`:
+| Command | Effect in the current Pi session |
+| --- | --- |
+| `/company-advisor auto` | Expose the tool and let the executor consult it only when useful. `/company-advisor on` is an alias. |
+| `/company-advisor once` | Arm one real consultation; it switches to `off` when the provider payload is ready to dispatch. Setup, queue, empty-context, and pre-payload adapter failures do not consume it. |
+| `/company-advisor off` | Hide the tool and reject a stale tool call without reading or sending the transcript. |
+| `/company-advisor default` | Clear the session override and follow `advisor_policy.enabled`. |
+| `/company-advisor status` | Show mode, source, active-tool state, model, and current turn usage. With no argument, the command also shows status. |
+
+These commands do not inject a user message. The mode is stored as a Pi custom
+session entry, restored across resume/tree navigation, and excluded from model
+context. The footer shows `advisor:auto`, `advisor:once`, or `advisor:off`.
+Pi `0.80.6+` is required; active-tool changes made mid-run are reflected in
+the next provider request in that same agent run. Pi's startup `--tools` and
+`--exclude-tools` selection is a hard filter and still wins over session mode;
+restart Pi without that filter to make the advisor tool available.
+
+The project default and budgets can be tuned in `.pi-company/company.yaml`:
 
 ```yaml
 advisor_policy:
@@ -384,6 +399,9 @@ advisor_policy:
   max_transcript_chars: 240000
   max_company_context_chars: 24000
 ```
+
+`enabled: true` means the project default is `auto`; `false` means `off`. A
+session command can override either value without rewriting company configuration.
 
 Advisor calls use the same provider concurrency queue as company agents. The event
 log records model, status, duration, token usage when available, and truncation
@@ -454,7 +472,7 @@ The extension registers:
 - UI: status line and desk panel for the current agent
 - input hook: mirrors interactive human steering to lead
 - mailbox poller: reads local messages; wake metadata tells future launchers whether a message should wake immediately or wait for digest
-- commands: `/company-init`, `/company-start` (manual brief refresh), `/company-resume`, `/company-pause`, `/company-maintain`, `/company-status`, `/company-brief`, `/company-inbox`, `/company-ack`, `/company-send`, `/company-configure-models`
+- commands: `/company-init`, `/company-start` (manual brief refresh), `/company-resume`, `/company-pause`, `/company-maintain`, `/company-status`, `/company-advisor`, `/company-brief`, `/company-inbox`, `/company-ack`, `/company-send`, `/company-configure-models`
 - tools: inline advisor consultation, status, lead/global brief, lifecycle maintenance, inbox, send message, issues, task updates, spawn agent, local PR gates, review, test, product acceptance, automated-test evidence, merge request, rate-limit report, model policy configuration
 
 `company_lead_brief` is the lead's authoritative global delivery view. Lead

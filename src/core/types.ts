@@ -72,7 +72,7 @@ export interface PiModelConfig {
    * Comma-separated Pi model cycling patterns passed to `pi --models`.
    */
   models?: string | null;
-  thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | string | null;
+  thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | string | null;
 }
 
 export interface ModelPolicy {
@@ -138,7 +138,7 @@ export interface ProviderRequestPolicy {
 }
 
 export interface AdvisorPolicy {
-  /** Exposes the advisor tool. A model must still be explicitly configured. */
+  /** Project default: auto when true, off when false. The current Pi session can override it. */
   enabled: boolean;
   /** Claude-style max_uses guard, reset for each executor turn. */
   max_uses_per_turn: number;

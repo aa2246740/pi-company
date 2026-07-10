@@ -1,9 +1,10 @@
 import {
-  complete,
+  completeSimple,
   type Api,
   type Context,
   type Model,
-} from "@earendil-works/pi-ai";
+  type ThinkingLevel,
+} from "@earendil-works/pi-ai/compat";
 import {
   ADVISOR_SYSTEM_PROMPT,
   buildAdvisorRequestText,
@@ -32,7 +33,7 @@ export interface AdvisorModelRegistry {
   refresh?(): void;
   find(provider: string, modelId: string): Model<Api> | undefined;
   getApiKeyAndHeaders(model: Model<Api>): Promise<
-    | { ok: true; apiKey?: string; headers?: Record<string, string> }
+    | { ok: true; apiKey?: string; headers?: Record<string, string>; env?: Record<string, string> }
     | { ok: false; error: string }
   >;
 }
@@ -41,7 +42,8 @@ export interface AdvisorTarget {
   model: Model<Api>;
   apiKey?: string;
   headers?: Record<string, string>;
-  thinking?: string;
+  env?: Record<string, string>;
+  thinking?: ThinkingLevel;
 }
 
 export interface AdvisorCompleteResponse {
@@ -64,6 +66,7 @@ export interface RunAdvisorInput {
   signal?: AbortSignal;
   sessionId?: string;
   completeFn?: AdvisorCompleteFn;
+  onRequestStart?: () => void;
 }
 
 export interface AdvisorCompletionResult {
@@ -118,6 +121,7 @@ export async function resolveAdvisorTarget(
     model,
     apiKey: auth.apiKey,
     headers: auth.headers,
+    env: auth.env,
     thinking: normalizeThinking(config?.thinking),
   };
 }
@@ -148,14 +152,26 @@ export async function runAdvisorCompletion(input: RunAdvisorInput): Promise<Advi
   const options: Record<string, unknown> = {
     apiKey: target.apiKey,
     headers: target.headers,
+    env: target.env,
     signal: input.signal,
     timeoutMs: policy.timeout_ms,
     maxTokens: maxOutputTokens,
     maxRetries: 1,
     maxRetryDelayMs: 30_000,
   };
-  if (target.thinking) options.reasoningEffort = target.thinking;
+  if (target.thinking) options.reasoning = target.thinking;
   if (input.sessionId) options.sessionId = input.sessionId;
+
+  let requestStarted = false;
+  const markRequestStarted = () => {
+    if (requestStarted) return;
+    input.onRequestStart?.();
+    requestStarted = true;
+  };
+  options.onPayload = (payload: unknown) => {
+    markRequestStarted();
+    return payload;
+  };
 
   const startedAt = Date.now();
   const invoke = input.completeFn ?? defaultComplete;
@@ -171,6 +187,9 @@ export async function runAdvisorCompletion(input: RunAdvisorInput): Promise<Advi
     },
     options,
   );
+  // Third-party providers should honor onPayload. A successful response is a
+  // definitive fallback signal when an older provider does not implement it.
+  markRequestStarted();
   const text = extractVisibleAdvisorText(response.content);
   if (!text) {
     throw new AdvisorRuntimeError(
@@ -205,10 +224,10 @@ function truncateWithNotice(text: string, maxChars: number): string {
   return `${text.slice(0, Math.max(0, maxChars - notice.length))}${notice}`;
 }
 
-function normalizeThinking(value: string | null | undefined): string | undefined {
-  return value && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(value)
-    ? value
+function normalizeThinking(value: string | null | undefined): ThinkingLevel | undefined {
+  return value && ["minimal", "low", "medium", "high", "xhigh", "max"].includes(value)
+    ? value as ThinkingLevel
     : undefined;
 }
 
-const defaultComplete: AdvisorCompleteFn = async (model, context, options) => complete(model, context, options);
+const defaultComplete: AdvisorCompleteFn = async (model, context, options) => completeSimple(model, context, options);
