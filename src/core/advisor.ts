@@ -45,10 +45,10 @@ export interface AdvisorRequestTextInput {
 }
 
 export const ADVISOR_INVOCATION_GUIDANCE =
-  "Consult the advisor before committing to a consequential plan, when repeated attempts are not converging, before risky or irreversible work, and before claiming substantive work complete.";
+  "When company_consult_advisor is active, call company_consult_advisor on non-trivial tasks after the necessary read-only orientation and before the first substantive plan, interpretation, edit, or state-changing action. Call company_consult_advisor again when repeated attempts are not converging, before risky or irreversible work, and after implementation plus verification before claiming substantive work complete.";
 
 export const ADVISOR_AUTHORITY_GUIDANCE =
-  "Keep routine execution local. Advisor output is guidance only and never replaces runtime checks, reviewer/tester evidence, product acceptance, or merge gates.";
+  "Do not call company_consult_advisor for simple factual lookups, syntax questions, or short routine work with an obvious path. Advisor output is guidance only and never replaces runtime checks, reviewer/tester evidence, product acceptance, or merge gates.";
 
 export const ADVISOR_SYSTEM_PROMPT = `You are a senior strategic advisor to an executor.
 

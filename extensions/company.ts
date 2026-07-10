@@ -1648,7 +1648,7 @@ function renderCompanySystemPrompt(
   const inboxCount = state.inbox_counts[agentName] ?? 0;
   const advisorGuidance = !isAdvisorExecutor(agentName, role, lead)
     ? `Advisor consultation is reserved for lead and coder executors. Preserve this ${role} session as an independent role context. ${ADVISOR_AUTHORITY_GUIDANCE}`
-    : `Advisor availability follows the current active tool set and may change during this agent run. When company_consult_advisor is present, decide autonomously whether to use it; no user prompt is required. When it is absent, continue locally. ${ADVISOR_AUTHORITY_GUIDANCE}`;
+    : `Advisor availability follows the current active tool set and may change during this agent run. When company_consult_advisor is present, follow the active company_consult_advisor timing guidelines autonomously; no user prompt is required. When it is absent, continue locally. ${ADVISOR_AUTHORITY_GUIDANCE}`;
   const roleSpecific =
     agentName === lead
       ? "You are the lead. Use the lead brief as authoritative project truth before declaring completion, routing gates, or merging."
@@ -1818,7 +1818,7 @@ function registerTools(pi: ExtensionAPI, runtime: {
     promptSnippet: ADVISOR_INVOCATION_GUIDANCE,
     promptGuidelines: [
       ADVISOR_INVOCATION_GUIDANCE,
-      `When this tool is active, decide autonomously whether to consult it; no user prompt is required. The tool takes no parameters and automatically supplies the active branch and company snapshot. Respect the per-turn use limit. ${ADVISOR_AUTHORITY_GUIDANCE}`,
+      `company_consult_advisor requires no user prompt and takes no parameters; it automatically supplies the active branch and company snapshot. Decide autonomously at the named timing checkpoints and respect the per-turn use limit. ${ADVISOR_AUTHORITY_GUIDANCE}`,
     ],
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, signal, onUpdate, ctx) {

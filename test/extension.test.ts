@@ -273,7 +273,7 @@ describe("pi-company extension", () => {
   it("toggles advisor availability without injecting a user prompt", async () => {
     const root = tempRoot();
     initCompany({ root, id: "advisor-session-toggle" });
-    const { handlers, pi, commands, activeToolNames, sessionEntries } = fakePi({
+    const { handlers, pi, tools, commands, activeToolNames, sessionEntries } = fakePi({
       "company-root": root,
       "company-agent": "lead",
       "company-role": "lead",
@@ -289,6 +289,13 @@ describe("pi-company extension", () => {
     await handlers.session_start?.({}, ctx);
     const advisorCommand = commands.find((command) => command.name === "company-advisor");
     if (!advisorCommand) throw new Error("company-advisor command was not registered");
+    const advisorTool = tools.find((tool) => tool.name === "company_consult_advisor") as
+      | { promptGuidelines?: string[] }
+      | undefined;
+    expect(advisorTool?.promptGuidelines).toHaveLength(2);
+    expect(advisorTool?.promptGuidelines?.every((guideline) => guideline.includes("company_consult_advisor"))).toBe(true);
+    expect(advisorTool?.promptGuidelines?.join("\n")).toContain("read-only orientation");
+    expect(advisorTool?.promptGuidelines?.join("\n")).toContain("implementation plus verification");
 
     const prompt = await handlers.before_agent_start?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
     expect(prompt.systemPrompt).toContain("may change during this agent run");

@@ -350,9 +350,11 @@ their current model until they are restarted or changed inside Pi.
 ## Advisor Mode
 
 Advisor mode adds vertical escalation to pi-company's existing horizontal team.
-A fast lead or coder remains the executor. At planning, stuck, high-risk, and
-pre-completion moments it can call the parameterless `company_consult_advisor`
-tool. Pi-company pauses only that executor, sends a bounded copy of its active Pi
+A fast lead or coder remains the executor. On non-trivial work it can orient with
+read-only tools, then call the parameterless `company_consult_advisor` before its
+first substantive plan or change, when stuck or high-risk, and after implementation
+plus verification before claiming completion. Pi-company pauses only that executor,
+sends a bounded copy of its active Pi
 branch plus a read-only company snapshot to the configured advisor model, and
 returns the advice as the tool result in the same agent loop.
 

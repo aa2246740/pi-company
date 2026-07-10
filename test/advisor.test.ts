@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  ADVISOR_AUTHORITY_GUIDANCE,
+  ADVISOR_INVOCATION_GUIDANCE,
   ADVISOR_SYSTEM_PROMPT,
   buildAdvisorRequestText,
   buildAdvisorTranscript,
@@ -9,6 +11,15 @@ import {
 } from "../src/core/advisor.js";
 
 describe("advisor context kernel", () => {
+  it("gives the executor explicit coding-task timing without forcing routine consultations", () => {
+    expect(ADVISOR_INVOCATION_GUIDANCE).toContain("company_consult_advisor");
+    expect(ADVISOR_INVOCATION_GUIDANCE).toContain("read-only orientation");
+    expect(ADVISOR_INVOCATION_GUIDANCE).toContain("before the first substantive");
+    expect(ADVISOR_INVOCATION_GUIDANCE).toContain("implementation plus verification");
+    expect(ADVISOR_AUTHORITY_GUIDANCE).toContain("company_consult_advisor");
+    expect(ADVISOR_AUTHORITY_GUIDANCE).toContain("short routine work");
+  });
+
   it("returns an empty transcript and zeroed stats for an empty branch", () => {
     const result: AdvisorTranscriptResult = buildAdvisorTranscript([]);
 

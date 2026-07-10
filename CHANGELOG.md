@@ -26,6 +26,8 @@ This project follows [Semantic Versioning](https://semver.org/).
   so mid-run active-tool changes, request-scoped provider env, and `max` thinking are supported.
 - Deferred dynamic tool registration to `session_start`, after Pi 0.80 has bound
   extension action methods.
+- Strengthened active-tool guidance for coding tasks: read-only orientation first,
+  then advisor checkpoints before substantive work and after implementation plus verification.
 
 ## 0.3.0 — OKF v3 adversarial orchestration
 
