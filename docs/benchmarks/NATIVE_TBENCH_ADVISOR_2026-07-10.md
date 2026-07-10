@@ -2,6 +2,12 @@
 
 Date: 2026-07-10
 
+Hard-task follow-up: see
+[`NATIVE_TBENCH_XSS_ADVISOR_2026-07-10.md`](NATIVE_TBENCH_XSS_ADVISOR_2026-07-10.md).
+On the empirical 0/25 `filter-js-from-html` task, company scored 41/42 while
+company + Advisor scored 37/42. That follow-up rejects any claim of a proven
+quality lift from the current auto policy.
+
 This is a small, local A/B experiment, not a Terminal-Bench leaderboard result.
 It uses one Terminal-Bench 2.1 task (`cancel-async-tasks`) and reimplements that
 task's assertions with the system Python 3.13 runtime. It deliberately avoids
