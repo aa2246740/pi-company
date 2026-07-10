@@ -610,6 +610,10 @@ export default function companyExtension(pi: ExtensionAPI): void {
   async function deliverInbox(ctx: ExtensionContext, mode: "auto" | "manual" = "auto"): Promise<void> {
     if (companyPaused) return;
     if (!isCompanyActive()) return;
+    // Print/JSON modes already own their initial turn. Starting another user
+    // turn from session_start races the CLI prompt; headless agents can read
+    // the queued mailbox through company_inbox instead.
+    if (mode === "auto" && !ctx.hasUI) return;
     if (delivering) return;
     if (mode === "auto" && Date.now() < busyDeliveryBackoffUntil) {
       await refreshUi(ctx);
@@ -665,6 +669,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
   function startPolling(ctx: ExtensionContext): void {
     if (companyPaused) return;
     if (!isCompanyActive()) return;
+    if (!ctx.hasUI) return;
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = setInterval(() => {
       void deliverInbox(ctx, "auto").catch((error) => {
@@ -676,6 +681,7 @@ export default function companyExtension(pi: ExtensionAPI): void {
   function startWatchdog(ctx: ExtensionContext): void {
     if (companyPaused) return;
     if (!isCompanyActive()) return;
+    if (!ctx.hasUI) return;
     if (agentName !== lead) return;
     if (watchdogTimer) clearInterval(watchdogTimer);
     const interval = normalizeLifecyclePolicy(loadState(root).config?.lifecycle_policy).watchdog_interval_ms || WATCHDOG_FALLBACK_MS;

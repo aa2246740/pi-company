@@ -1893,6 +1893,36 @@ describe("pi-company extension", () => {
     expect(listInbox(root, "tester")).toHaveLength(1);
   });
 
+  it("leaves inbox delivery to tools when print or JSON mode owns the initial turn", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "extension-headless-delivery" });
+    sendCompanyMessage(root, {
+      from: "lead",
+      to: "tester",
+      type: "assignment",
+      priority: "high",
+      text: "Please validate the headless task.",
+    });
+    const { handlers, pi, tools } = fakePi({
+      "company-root": root,
+      "company-agent": "tester",
+      "company-role": "tester",
+    });
+    const sendUserMessage = pi.sendUserMessage as unknown as ReturnType<typeof vi.fn>;
+    const { ctx } = fakeContext(root);
+    (ctx as unknown as { hasUI: boolean }).hasUI = false;
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const prompt = await handlers.before_agent_start?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
+    await handlers.session_shutdown?.({}, ctx);
+
+    expect(sendUserMessage).not.toHaveBeenCalled();
+    expect(listInbox(root, "tester")).toHaveLength(1);
+    expect(prompt.systemPrompt).toContain("Unread inbox messages: 1");
+    expect(tools.some((tool) => tool.name === "company_inbox")).toBe(true);
+  });
+
   it("keeps inbox messages queued when Pi rejects a follow-up because the agent became busy", async () => {
     const root = tempRoot();
     initCompany({ root, id: "extension-busy-race-delivery" });
