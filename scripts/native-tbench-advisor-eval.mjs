@@ -6,6 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import {
   assignIssue,
@@ -21,8 +22,15 @@ import {
 } from "../dist/src/core/company.js";
 import { writeYaml } from "../dist/src/core/io.js";
 import { companyPaths } from "../dist/src/core/paths.js";
+import { gradeExpandedCandidate } from "./native-tbench-expanded-grade.mjs";
 import { gradeExtraCandidate } from "./native-tbench-extra-grade.mjs";
-import { compileDeterministicDecompressor, copyPinnedFixture } from "./native-tbench-fixtures.mjs";
+import {
+  compileDeterministicDecompressor,
+  compilePinnedElfFixture,
+  compilePinnedPathMystery,
+  copyPinnedFixture,
+  materializePinnedGcode,
+} from "./native-tbench-fixtures.mjs";
 import { gradeXssCandidate } from "./native-tbench-xss-grade.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -32,8 +40,11 @@ const codexCompatExtensionPath = path.join(repoRoot, "scripts", "codex-client-co
 const taskId = readArg("--task") || "cancel-async-tasks";
 const executorModelId = readArg("--executor-model") || "gpt-5.6-sol";
 const strongModelId = readArg("--strong-model") || executorModelId;
+const validatorModelId = readArg("--validator-model") || strongModelId;
+const advisorModelId = readArg("--advisor-model") || strongModelId;
 const executorModel = `openai-codex/${executorModelId}`;
-const strongModel = `openai-codex/${strongModelId}`;
+const validatorModel = `openai-codex/${validatorModelId}`;
+const advisorModel = `openai-codex/${advisorModelId}`;
 const useCodexClientCompat = process.argv.includes("--codex-client-compat");
 const finalizeExisting = process.argv.includes("--finalize-existing");
 const prepareOnly = process.argv.includes("--prepare-only");
@@ -43,9 +54,21 @@ const proxyUrl = readArg("--proxy")
   || process.env.ALL_PROXY
   || null;
 const thinking = "high";
-const minFreeBytes = 10 * 1024 ** 3;
-const maxRunBytes = 250 * 1024 ** 2;
+const minFreeGiB = positiveNumberArg("--min-free-gib", 10);
+const maxRunMiB = positiveNumberArg("--max-run-mib", 250);
+const minFreeBytes = minFreeGiB * 1024 ** 3;
+const maxRunBytes = maxRunMiB * 1024 ** 2;
 const failureLogTailBytes = 512 * 1024;
+const expandedTaskIds = new Set([
+  "video-processing",
+  "dna-insert",
+  "gcode-to-text",
+  "dna-assembly",
+  "extract-elf",
+  "path-tracing-reverse",
+  "regex-chess",
+  "polyglot-rust-c",
+]);
 
 const taskSpecs = {
   "cancel-async-tasks": {
@@ -167,6 +190,206 @@ The current repository root is the native local mapping of /app. System clang an
     testerFallback: "Verify decoder symmetry, integer/range coding, references, stream finalization, exact output bytes, and the 2500-byte cap.",
     reviewerFallback: "Compile a fresh decoder and correct any encoder, finalization, exact-output, reproducibility, or size defect before finishing.",
   },
+  "video-processing": {
+    timeoutMs: 25 * 60_000,
+    stageTimeoutCaps: {
+      plain: 25 * 60_000,
+      tester: 3 * 60_000,
+      coderImplement: 15 * 60_000,
+      reviewer: 3 * 60_000,
+      coderRevise: 4 * 60_000,
+    },
+    candidateFile: "jump_analyzer.py",
+    issueTitle: "Detect hurdle-jump takeoff and landing frames",
+    fixtures: [
+      ["video-processing/example_video.mp4", "example_video.mp4"],
+    ],
+    text: `Write a script named jump_analyzer.py at /app/jump_analyzer.py. It must analyze an MP4 video containing one athlete jumping a hurdle and write /app/output.toml with exactly these integer fields:
+
+jump_takeoff_frame_number = <integer>
+jump_land_frame_number = <integer>
+
+The input MP4 path is argv[1]. An example is available at /app/example_video.mp4. Test videos have the same dimensions, scale, stationary camera, hurdle position, and background as the example; the first frame has no runner. You may use only Python's standard library plus toml, cv2, and numpy.
+
+The current repository root is the native local mapping of /app. Work autonomously and do not ask the user questions.`,
+    plainPrompt: "Inspect the example video quantitatively, implement a general frame-analysis method, and validate the emitted TOML before finishing.",
+    testerPrompt: "Develop an independent checklist for frame indexing, takeoff and landing definitions, foreground extraction, noise, hidden-runner variation, exact TOML fields, allowed imports, and reproducibility.",
+    coderPrompt: "Analyze example_video.mp4 with cv2/numpy, create jump_analyzer.py at the repository root, and test it end to end without hard-coding the input filename.",
+    reviewerPrompt: "Review it read-only for hidden-video generalization, frame off-by-one errors, brittle fixed answers, invalid dependencies, output path/schema, and failure to release video resources.",
+    testerFallback: "Check frame indexing, event definitions, foreground robustness, hidden-video generalization, dependencies, and exact TOML output.",
+    reviewerFallback: "Correct any hard-coded-answer, frame-index, robustness, dependency, or output-schema defect before finishing.",
+  },
+  "dna-insert": {
+    timeoutMs: 25 * 60_000,
+    stageTimeoutCaps: {
+      plain: 25 * 60_000,
+      tester: 3 * 60_000,
+      coderImplement: 15 * 60_000,
+      reviewer: 3 * 60_000,
+      coderRevise: 4 * 60_000,
+    },
+    candidateFile: "primers.fasta",
+    issueTitle: "Design Q5 mutagenesis primers",
+    fixtures: [
+      ["dna-insert/sequences.fasta", "sequences.fasta"],
+    ],
+    text: `The file /app/sequences.fasta contains a circular input plasmid and the desired output plasmid. Design the minimum number of forward/reverse primer pairs needed to convert the input to the output with NEB's Q5 site-directed mutagenesis kit, and write /app/primers.fasta.
+
+For each primer, the input-annealing region must be 15-45 nucleotides long with melting temperature 58-72 C. Paired annealing regions must be within 5 C. Compute Tm only on the input-annealing part, using primer3 oligotm as ground truth with flags -tp 1 -sc 1 -mv 50 -dv 2 -n 0.8 -d 500. Group each pair together with the forward primer first. Use only DNA bases in sequence lines.
+
+The current repository root is the native local mapping of /app. primer3 and oligotm are available. Work autonomously and do not ask the user questions.`,
+    plainPrompt: "Align the circular input and desired output, derive the minimal edit and primer pair, verify annealing Tm independently, and write primers.fasta.",
+    testerPrompt: "Develop an independent checklist for circular alignment, exact desired insert/replacement, primer orientation, annealing versus overhang boundaries, oligotm flags, paired Tm, minimum pair count, and FASTA ordering.",
+    coderPrompt: "Analyze sequences.fasta, design and verify the minimum valid Q5 primer set, and create primers.fasta at the repository root with no blank records.",
+    reviewerPrompt: "Review it read-only by independently aligning input/output and checking orientation, full resulting sequence, annealing lengths, oligotm values, pair delta, minimality, and FASTA structure.",
+    testerFallback: "Check circular alignment, exact edit, orientation, annealing lengths, oligotm constraints, minimality, and FASTA ordering.",
+    reviewerFallback: "Correct any alignment, orientation, overhang, Tm, minimality, or FASTA defect before finishing.",
+  },
+  "dna-assembly": {
+    timeoutMs: 30 * 60_000,
+    stageTimeoutCaps: {
+      plain: 30 * 60_000,
+      tester: 3 * 60_000,
+      coderImplement: 19 * 60_000,
+      reviewer: 3 * 60_000,
+      coderRevise: 5 * 60_000,
+    },
+    candidateFile: "primers.fasta",
+    issueTitle: "Design Golden Gate assembly primers",
+    fixtures: [
+      ["dna-assembly/sequences.fasta", "sequences.fasta"],
+    ],
+    text: `The file /app/sequences.fasta contains a circular input plasmid, linear egfp, flag, and snap sequences, and the desired circular output plasmid. Design the minimum primer pairs needed to PCR-amplify the four available templates for one-pot Golden Gate assembly with NEBridge Golden Gate and BsaI-HF v2, then write /app/primers.fasta.
+
+Each template-annealing region must be 15-45 nucleotides long with melting temperature 58-72 C. The forward/reverse annealing regions for each template must be within 5 C. Compute Tm only on template-annealing sequence, with primer3 oligotm flags -tp 1 -sc 1 -mv 50 -dv 2 -n 0.8 -d 500. Design valid BsaI sites and overhangs so the assembled circular product equals output. Headers must be >TEMPLATENAME_DIR where template is input, egfp, flag, or snap and direction is fwd or rev. primers.fasta must have no blank lines.
+
+The current repository root is the native local mapping of /app. primer3 and oligotm are available. Work autonomously and do not ask the user questions.`,
+    plainPrompt: "Map all four fragments into the desired circular product, design valid directional BsaI overhangs and annealing regions, verify Tm and full assembly, and write primers.fasta.",
+    testerPrompt: "Develop an independent checklist for circular fragment mapping, orientation, junction overhang uniqueness and compatibility, BsaI cut geometry, retained coding sequence, annealing Tm, minimum pairs, exact headers, and blank-line prohibition.",
+    coderPrompt: "Analyze every sequence, design and verify the complete minimum Golden Gate primer set, and create primers.fasta at the repository root.",
+    reviewerPrompt: "Review it read-only by reconstructing the digested amplicons and circular assembly; check exact output sequence, orientation, BsaI geometry, overhangs, Tm constraints, headers, and minimality.",
+    testerFallback: "Check fragment mapping, orientation, BsaI geometry, overhang junctions, exact assembled sequence, Tm constraints, headers, and minimality.",
+    reviewerFallback: "Correct any assembly, orientation, junction, restriction-site, Tm, header, or minimality defect before finishing.",
+  },
+  "gcode-to-text": {
+    timeoutMs: 25 * 60_000,
+    stageTimeoutCaps: {
+      plain: 25 * 60_000,
+      tester: 3 * 60_000,
+      coderImplement: 15 * 60_000,
+      reviewer: 3 * 60_000,
+      coderRevise: 4 * 60_000,
+    },
+    candidateFile: "out.txt",
+    issueTitle: "Recover printed text from G-code",
+    text: `The file /app/text.gcode is G-code for a Prusa MK4S that prints text onto an existing object. Determine exactly what text the print will show and write only that text to /app/out.txt.
+
+The current repository root is the native local mapping of /app. Work autonomously, use programmatic analysis or visualization as needed, and do not ask the user questions.`,
+    plainPrompt: "Parse and isolate the text-producing toolpaths, reconstruct their geometry at a useful scale, independently verify every character, and write out.txt.",
+    testerPrompt: "Develop an independent checklist for relevant layers and extrusion moves, coordinate transforms, mirrored axes, stroke grouping, character order, ambiguous glyphs, and exact output text.",
+    coderPrompt: "Analyze text.gcode programmatically, render or inspect the text toolpaths, create out.txt at the repository root, and verify every character by a second method.",
+    reviewerPrompt: "Review it read-only by independently extracting or rendering the relevant extrusion geometry; look for mirroring, wrong layers, reversed order, ambiguous symbols, and whitespace errors.",
+    testerFallback: "Check layer selection, extrusion-only geometry, transforms, mirroring, character order, ambiguous glyphs, and exact text output.",
+    reviewerFallback: "Independently reconstruct the toolpath text and correct any glyph, order, orientation, or whitespace error before finishing.",
+  },
+  "extract-elf": {
+    timeoutMs: 25 * 60_000,
+    stageTimeoutCaps: {
+      plain: 25 * 60_000,
+      tester: 3 * 60_000,
+      coderImplement: 15 * 60_000,
+      reviewer: 3 * 60_000,
+      coderRevise: 4 * 60_000,
+    },
+    candidateFile: "extract.js",
+    issueTitle: "Extract integer memory values from ELF binaries",
+    text: `The file /app/a.out is a compiled C ELF binary. Write /app/extract.js so that node extract.js /app/a.out outputs a JSON object to stdout whose keys are memory addresses and whose values are integers.
+
+Every included value must be correct, and the output must include at least 75% of the memory values in the reference extraction. The program must parse the input path rather than hard-code this one binary. Example shape: {"4194304": 1784774249, "4194308": 1718378344}.
+
+The current repository root is the native local mapping of /app. Work autonomously and do not ask the user questions.`,
+    plainPrompt: "Inspect the ELF layout, implement a general dependency-free Node parser for loadable data, and validate addresses, endianness, integer width, JSON purity, and coverage.",
+    testerPrompt: "Develop an independent checklist for ELF class and endianness, section-table offsets, relevant text/data/rodata regions, virtual versus file addresses, 4-byte tails, unsigned integer semantics, stdout purity, and generalization.",
+    coderPrompt: "Create extract.js at the repository root, parse ELF structures directly, test it against a.out, and verify sampled words against independent binary tools.",
+    reviewerPrompt: "Review it read-only for hard-coded offsets, wrong ELF32/ELF64 fields, endianness, address mapping, section selection, partial-word handling, signed values, malformed JSON, and hidden-binary generalization.",
+    testerFallback: "Check ELF class, endianness, section offsets, virtual addresses, relevant sections, word semantics, JSON purity, coverage, and generalization.",
+    reviewerFallback: "Correct any ELF-layout, endianness, address, section, integer, output, or generalization defect before finishing.",
+  },
+  "path-tracing-reverse": {
+    timeoutMs: 35 * 60_000,
+    stageTimeoutCaps: {
+      plain: 35 * 60_000,
+      tester: 3 * 60_000,
+      coderImplement: 24 * 60_000,
+      reviewer: 3 * 60_000,
+      coderRevise: 5 * 60_000,
+    },
+    candidateFile: "mystery.c",
+    issueTitle: "Reverse engineer compact path tracer",
+    text: `A compiled program is available at /app/mystery. Write an independent C program /app/mystery.c that performs the identical operation and produces the identical image when compiled and run in isolation. It must not invoke or depend on /app/mystery.
+
+The compressed source must remain under 2,100 bytes in this native evaluation. The program may use libm and must write its output in the same way as the supplied executable.
+
+The current repository root is the native local mapping of /app. System C compiler and binary-inspection tools are available. Work autonomously and do not ask the user questions.`,
+    plainPrompt: "Observe and reverse engineer the executable, reproduce its deterministic rendering algorithm compactly, compare generated pixels quantitatively, and keep the compressed source below the limit.",
+    testerPrompt: "Develop an independent checklist for output filename and PPM format, dimensions, deterministic sampling, camera and scene geometry, materials and recursion, pixel similarity, isolation, compilation, and compressed size.",
+    coderPrompt: "Analyze and run mystery, create a self-contained mystery.c, iteratively compare its image with the reference, and verify compilation plus compressed size.",
+    reviewerPrompt: "Review it read-only and independently compile/run it in an isolated directory; compare dimensions and pixels, check determinism and forbidden dependencies, then verify compressed size.",
+    testerFallback: "Check PPM output, dimensions, deterministic rendering, scene/camera behavior, isolated compilation, image similarity, independence, and compressed size.",
+    reviewerFallback: "Correct any rendering, image-format, determinism, isolation, dependency, compilation, similarity, or compressed-size defect before finishing.",
+  },
+  "regex-chess": {
+    timeoutMs: 40 * 60_000,
+    stageTimeoutCaps: {
+      plain: 40 * 60_000,
+      tester: 3 * 60_000,
+      coderImplement: 29 * 60_000,
+      reviewer: 3 * 60_000,
+      coderRevise: 5 * 60_000,
+    },
+    candidateFile: "re.json",
+    issueTitle: "Implement legal chess moves as regex replacements",
+    fixtures: [
+      ["regex-chess/check.py", "check.py"],
+    ],
+    text: `Write /app/re.json as an ordered list of [regex, replacement] string pairs. Applying every pair with Python re.sub to an input FEN and then splitting on newlines must return all and only legal next FEN positions.
+
+Inputs always have White to move. Promotions may only be to queen, and move counters need not be tracked correctly. Otherwise implement fully legal chess moves, including check legality, castling with rights, promotion, and en passant. The file must contain fewer than 100,000 pairs and be under 10 MB. /app/check.py is available for development.
+
+The current repository root is the native local mapping of /app. Python 3.13 and python-chess are available for local verification, but the delivered artifact must be re.json. Work autonomously and do not ask the user questions.`,
+    plainPrompt: "Design or generate a complete ordered regex transducer, use check.py and independent python-chess comparisons, cover special moves and king safety, and leave the final re.json within both limits.",
+    testerPrompt: "Develop an independent checklist for piece movement, blockers, captures, pins, discovered checks, king adjacency, castling paths/rights, en passant legality, promotion, duplicate positions, newline formatting, and size limits.",
+    coderPrompt: "Create re.json at the repository root, generate it reproducibly if useful, run check.py plus focused random/special-position comparisons, and verify pair/byte limits.",
+    reviewerPrompt: "Review it read-only using check.py and targeted independent positions for checks, pins, castling, en passant, promotion, duplicates, formatting, and limits; do not replace the artifact with runtime code.",
+    testerFallback: "Check all pieces, blockers, checks and pins, king safety, castling, en passant, promotion, duplicates, formatting, and file limits.",
+    reviewerFallback: "Correct any move-legality, special-move, check-evasion, formatting, completeness, or size-limit defect before finishing.",
+  },
+  "polyglot-rust-c": {
+    timeoutMs: 25 * 60_000,
+    stageTimeoutCaps: {
+      plain: 25 * 60_000,
+      tester: 3 * 60_000,
+      coderImplement: 15 * 60_000,
+      reviewer: 3 * 60_000,
+      coderRevise: 4 * 60_000,
+    },
+    candidateFile: "polyglot/main.rs",
+    issueTitle: "Create a Rust and C++ polyglot Fibonacci program",
+    text: `Write one source file at /app/polyglot/main.rs that is simultaneously valid Rust and C++. These commands must both compile and run successfully:
+
+rustc /app/polyglot/main.rs && /app/polyglot/main N
+g++ -x c++ /app/polyglot/main.rs -o /app/polyglot/cmain && /app/polyglot/cmain N
+
+Both programs must print exactly the kth Fibonacci number with f(0)=1, f(1)=1, f(2)=2, and so on. The target environment uses Rust 1.75 and g++ 13.2 semantics.
+
+The current repository root is the native local mapping of /app. Work autonomously and do not ask the user questions.`,
+    plainPrompt: "Develop a genuine single-file lexical polyglot, compile it independently as Rust and C++, and test boundary plus larger Fibonacci inputs before finishing.",
+    testerPrompt: "Develop an independent checklist for dual-language lexical validity, exact argv parsing and stdout, Fibonacci indexing, integer behavior, compiler differences, warnings/errors, and absence of generated side files as dependencies.",
+    coderPrompt: "Create polyglot/main.rs, repeatedly compile it with rustc and g++, run diverse inputs in both binaries, and leave only a self-contained source artifact.",
+    reviewerPrompt: "Review it read-only and independently compile the same bytes with both compilers; test indexing, exact output, larger values, malformed assumptions, and hidden dependency on generated files.",
+    testerFallback: "Check identical source bytes under both parsers, compilation, argv handling, Fibonacci indexing, exact output, integer range, and self-containment.",
+    reviewerFallback: "Correct any Rust/C++ lexical, compilation, indexing, output, range, or self-containment defect before finishing.",
+  },
 };
 const taskSpec = taskSpecs[taskId];
 if (!taskSpec) fail(`Unknown task ${taskId}. Supported tasks: ${Object.keys(taskSpecs).join(", ")}`);
@@ -187,7 +410,7 @@ if (gradeOnly) {
 
 const variant = readArg("--variant");
 if (!new Set(["plain", "company", "company-advisor"]).has(variant)) {
-  fail(`Usage: node scripts/native-tbench-advisor-eval.mjs --variant plain|company|company-advisor [--task ${Object.keys(taskSpecs).join("|")}] [--run-root PATH] [--executor-model MODEL] [--strong-model MODEL] [--codex-client-compat] [--proxy URL] [--prepare-only] [--finalize-existing]`);
+  fail(`Usage: node scripts/native-tbench-advisor-eval.mjs --variant plain|company|company-advisor [--task ${Object.keys(taskSpecs).join("|")}] [--run-root PATH] [--executor-model MODEL] [--strong-model MODEL] [--validator-model MODEL] [--advisor-model MODEL] [--codex-client-compat] [--proxy URL] [--min-free-gib N] [--max-run-mib N] [--prepare-only] [--finalize-existing]`);
 }
 
 const requestedRoot = readArg("--run-root");
@@ -202,6 +425,7 @@ const agentConfigRoot = path.join(trialRoot, "agent-config");
 const resultPath = path.join(trialRoot, "result.json");
 const sharedRoot = path.join(runRoot, "shared");
 let taskPythonPath = process.env.PYTHONPATH || "";
+let taskBinaryPath = "";
 
 await main();
 
@@ -265,7 +489,7 @@ async function main() {
     const tester = await runPiStage({
       name: "tester-plan",
       cwd: workspace,
-      stageModel: strongModel,
+      stageModel: validatorModel,
       timeoutMs: stageTimeout(deadline, stageTimeoutCaps.tester),
       company: { root: workspace, agent: "tester", role: "tester" },
       prompt: `Read TASK.md. Act as an independent pre-implementation tester. ${taskSpec.testerPrompt} Do not edit source files and do not search outside this repository. Return a concise checklist of concrete failure modes the coder must handle.`,
@@ -295,7 +519,7 @@ async function main() {
     const reviewer = await runPiStage({
       name: "reviewer",
       cwd: workspace,
-      stageModel: strongModel,
+      stageModel: validatorModel,
       timeoutMs: stageTimeout(deadline, stageTimeoutCaps.reviewer),
       company: { root: workspace, agent: "reviewer", role: "reviewer" },
       prompt: `Read TASK.md and inspect the candidate implementation at ${path.join(candidateRoot, taskSpec.candidateFile)}. ${taskSpec.reviewerPrompt} Do not edit files or search outside the task repositories. Return only concrete findings and a clear approval or request-changes verdict.`,
@@ -324,6 +548,12 @@ async function main() {
   }
 
   checkRunSize();
+  const advisorAudit = readAdvisorAudit(workspace);
+  const blockingAdvisorFailure = advisorAudit.failures.find((failure) =>
+    new Set(["provider_429", "quota_exhausted", "timeout", "error", "aborted"]).has(failure.status));
+  if (blockingAdvisorFailure) {
+    fail(`Infrastructure failure in Advisor: ${blockingAdvisorFailure.status}: ${blockingAdvisorFailure.error || "unknown error"}`);
+  }
   const grade = await gradeCandidate(candidateRoot, {
     pythonPath: taskPythonPath,
     cacheRoot: path.join(sharedRoot, "grader-cache"),
@@ -331,7 +561,6 @@ async function main() {
   });
   const endedAt = new Date().toISOString();
   const aggregate = aggregateStages(stages);
-  const advisorAudit = readAdvisorAudit(workspace);
   const coderPatch = [
     git(candidateRoot, ["diff", "--no-ext-diff", `${baselineCommit}..HEAD`, "--", ".", `:(exclude).pi-company`], { allowFailure: true }).stdout,
     git(candidateRoot, ["diff", "--no-ext-diff", "HEAD", "--", ".", `:(exclude).pi-company`], { allowFailure: true }).stdout,
@@ -344,9 +573,9 @@ async function main() {
     variant,
     model_matrix: {
       executor: executorModel,
-      tester: strongModel,
-      reviewer: strongModel,
-      advisor: strongModel,
+      tester: validatorModel,
+      reviewer: validatorModel,
+      advisor: advisorModel,
     },
     thinking,
     codex_client_compat_version: useCodexClientCompat ? "0.144.1" : null,
@@ -367,6 +596,7 @@ async function main() {
     advisor_calls: aggregate.advisorCalls,
     advisor_successful_calls: advisorAudit.successfulCalls,
     advisor_audit_statuses: advisorAudit.statuses,
+    advisor_failures: advisorAudit.failures,
     stage_summaries: stages.map((stage) => ({
       name: stage.name,
       model: stage.model,
@@ -427,6 +657,30 @@ function prepareWorkspaceFixtures(workspace) {
     );
     generated.push("decomp");
   }
+  if (taskId === "gcode-to-text") {
+    materializePinnedGcode(
+      path.join(workspace, "text.gcode"),
+      path.join(sharedRoot, "fixture-cache"),
+      proxyUrl,
+    );
+    generated.push("text.gcode");
+  }
+  if (taskId === "extract-elf") {
+    compilePinnedElfFixture(
+      path.join(workspace, "a.out"),
+      path.join(sharedRoot, "fixture-cache"),
+      proxyUrl,
+    );
+    generated.push("a.out");
+  }
+  if (taskId === "path-tracing-reverse") {
+    compilePinnedPathMystery(
+      path.join(workspace, "mystery"),
+      path.join(sharedRoot, "fixture-cache"),
+      proxyUrl,
+    );
+    generated.push("mystery");
+  }
   return [...fixtures.map(([, relativeDestination]) => relativeDestination), ...generated];
 }
 
@@ -447,19 +701,47 @@ function createAgentConfig(configRoot) {
 function prepareTaskEnvironment() {
   const environments = {
     "filter-js-from-html": {
+      group: "html",
       packages: ["beautifulsoup4==4.13.4"],
       modules: ["bs4"],
       verify: "import bs4; assert bs4.__version__ == '4.13.4'",
     },
     "raman-fitting": {
+      group: "raman",
       packages: ["numpy==2.3.1", "scipy==1.16.0"],
       modules: ["numpy", "scipy"],
       verify: "import numpy, scipy; assert numpy.__version__ == '2.3.1'; assert scipy.__version__ == '1.16.0'",
     },
+    "video-processing": {
+      group: "video",
+      packages: ["numpy==2.2.6", "opencv-python-headless==4.12.0.88", "toml==0.10.2"],
+      modules: ["numpy", "cv2", "toml"],
+      verify: "import cv2, numpy, toml; assert cv2.__version__ == '4.12.0'; assert numpy.__version__ == '2.2.6'; assert toml.__version__ == '0.10.2'",
+    },
+    "dna-insert": {
+      group: "dna",
+      packages: ["primer3-py==2.2.0"],
+      modules: ["primer3"],
+      binDirs: ["primer3/src/libprimer3"],
+      verify: "import primer3; assert primer3.__version__ == '2.2.0'",
+    },
+    "dna-assembly": {
+      group: "dna",
+      packages: ["primer3-py==2.2.0"],
+      modules: ["primer3"],
+      binDirs: ["primer3/src/libprimer3"],
+      verify: "import primer3; assert primer3.__version__ == '2.2.0'",
+    },
+    "regex-chess": {
+      group: "chess",
+      packages: ["python-chess==1.999"],
+      modules: ["chess"],
+      verify: "import chess; assert chess.__version__ == '1.11.2'",
+    },
   };
   const environment = environments[taskId];
   if (!environment) return taskPythonPath;
-  const dependencyRoot = path.join(sharedRoot, "python-deps");
+  const dependencyRoot = path.join(sharedRoot, "python-deps", environment.group);
   if (!environment.modules.every((module) => fs.existsSync(path.join(dependencyRoot, module)))) {
     fs.mkdirSync(dependencyRoot, { recursive: true });
     const install = spawnSync("uv", [
@@ -476,6 +758,11 @@ function prepareTaskEnvironment() {
       fail(`Failed to prepare ${taskId} dependencies: ${install.stderr || install.stdout}`);
     }
   }
+  const binaryDirectories = (environment.binDirs || []).map((relative) => path.join(dependencyRoot, relative));
+  for (const directory of binaryDirectories) {
+    if (!fs.existsSync(directory)) fail(`${taskId} dependency binary directory is missing: ${directory}`);
+  }
+  taskBinaryPath = binaryDirectories.join(path.delimiter);
   const combined = [dependencyRoot, taskPythonPath].filter(Boolean).join(path.delimiter);
   const verify = spawnSync("python3.13", ["-c", environment.verify], {
     cwd: repoRoot,
@@ -489,12 +776,13 @@ function prepareTaskEnvironment() {
 function setupCompany(root, advisorEnabled) {
   initCompany({ root, id: `native-tbench-${taskId}-${advisorEnabled ? "advisor" : "company"}` });
   const executorModelConfig = { provider: "openai-codex", model: executorModelId, thinking };
-  const strongModelConfig = { provider: "openai-codex", model: strongModelId, thinking };
+  const validatorModelConfig = { provider: "openai-codex", model: validatorModelId, thinking };
+  const advisorModelConfig = { provider: "openai-codex", model: advisorModelId, thinking };
   setModelPolicy(root, "lead", "defaults", null, executorModelConfig);
   setModelPolicy(root, "lead", "role", "coder", executorModelConfig);
-  setModelPolicy(root, "lead", "role", "tester", strongModelConfig);
-  setModelPolicy(root, "lead", "role", "reviewer", strongModelConfig);
-  setModelPolicy(root, "lead", "role", "advisor", strongModelConfig);
+  setModelPolicy(root, "lead", "role", "tester", validatorModelConfig);
+  setModelPolicy(root, "lead", "role", "reviewer", validatorModelConfig);
+  setModelPolicy(root, "lead", "role", "advisor", advisorModelConfig);
 
   const config = loadConfig(root);
   if (!config) fail(`Company config was not created at ${root}`);
@@ -568,9 +856,13 @@ async function runPiStage({ name, cwd, prompt, stageModel, timeoutMs, company = 
   args.push(prompt);
 
   const started = Date.now();
+  const eventParser = createPiEventParser();
   const outcome = await spawnCaptured("pi", args, {
     cwd,
     timeoutMs,
+    maxStdoutCaptureBytes: failureLogTailBytes,
+    maxStderrCaptureBytes: 64 * 1024,
+    onStdoutLine: (line) => eventParser.accept(line),
     env: {
       ...process.env,
       ...(proxyUrl ? {
@@ -583,10 +875,11 @@ async function runPiStage({ name, cwd, prompt, stageModel, timeoutMs, company = 
       PI_CODING_AGENT_SESSION_DIR: sessionRoot,
       PI_OFFLINE: "1",
       ...(taskPythonPath ? { PYTHONPATH: taskPythonPath } : {}),
+      ...(taskBinaryPath ? { PATH: `${taskBinaryPath}${path.delimiter}${process.env.PATH || ""}` } : {}),
     },
   });
 
-  const parsed = parsePiEvents(outcome.stdout);
+  const parsed = eventParser.result();
   const observedDurationMs = Date.now() - started;
   const durationMs = outcome.timedOut ? Math.min(observedDurationMs, timeoutMs) : observedDurationMs;
   const result = {
@@ -643,7 +936,7 @@ function readStageCheckpoints() {
   }
   const expectedModels = variant === "plain"
     ? [executorModel]
-    : [strongModel, executorModel, strongModel, executorModel];
+    : [validatorModel, executorModel, validatorModel, executorModel];
   for (let index = 0; index < stages.length; index += 1) {
     if (stages[index].model !== expectedModels[index]) {
       fail(`Checkpoint model mismatch for ${stages[index].name}: expected ${expectedModels[index]}, found ${stages[index].model}`);
@@ -655,7 +948,7 @@ function readStageCheckpoints() {
   return stages;
 }
 
-function parsePiEvents(rawEvents) {
+function createPiEventParser() {
   const usage = { input: 0, output: 0, cache_read: 0, cache_write: 0, total_tokens: 0, cost_usd: 0 };
   let finalText = "";
   let toolCalls = 0;
@@ -663,27 +956,40 @@ function parsePiEvents(rawEvents) {
   const errors = [];
   const seenMessages = new Set();
 
-  for (const line of rawEvents.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    let event;
-    try { event = JSON.parse(line); } catch { continue; }
-    if (event.type === "tool_execution_end") {
-      toolCalls += 1;
-      if (event.toolName === "company_consult_advisor") advisorCalls += 1;
-    }
-    if (event.type === "extension_error") errors.push(event.errorMessage || event.message || JSON.stringify(event));
-    if (event.type !== "message_end" || event.message?.role !== "assistant") continue;
-    const message = event.message;
-    if (message.stopReason === "error") errors.push(message.errorMessage || "assistant message stopped with an error");
-    const key = message.id || crypto.createHash("sha1").update(JSON.stringify(message)).digest("hex");
-    if (seenMessages.has(key)) continue;
-    seenMessages.add(key);
-    const text = messageText(message);
-    if (text) finalText = text;
-    addUsage(usage, message.usage);
-  }
-  usage.total_tokens = usage.input + usage.output + usage.cache_read + usage.cache_write;
-  return { usage, finalText, toolCalls, advisorCalls, errors: [...new Set(errors)] };
+  return {
+    accept(line) {
+      if (!line.trim()) return;
+      let event;
+      try { event = JSON.parse(line); } catch { return; }
+      if (event.type === "tool_execution_end") {
+        toolCalls += 1;
+        if (event.toolName === "company_consult_advisor") advisorCalls += 1;
+      }
+      if (event.type === "extension_error") {
+        errors.push(event.errorMessage || event.message || "extension error");
+      }
+      if (event.type !== "message_end" || event.message?.role !== "assistant") return;
+      const message = event.message;
+      if (message.stopReason === "error") errors.push(message.errorMessage || "assistant message stopped with an error");
+      const text = messageText(message);
+      const key = message.id
+        || message.responseId
+        || crypto.createHash("sha1").update(JSON.stringify({
+          timestamp: message.timestamp ?? null,
+          stopReason: message.stopReason ?? null,
+          usage: message.usage ?? null,
+          text,
+        })).digest("hex");
+      if (seenMessages.has(key)) return;
+      seenMessages.add(key);
+      if (text) finalText = text;
+      addUsage(usage, message.usage);
+    },
+    result() {
+      usage.total_tokens = usage.input + usage.output + usage.cache_read + usage.cache_write;
+      return { usage, finalText, toolCalls, advisorCalls, errors: [...new Set(errors)] };
+    },
+  };
 }
 
 function requireValidStage(stage) {
@@ -732,9 +1038,10 @@ function aggregateStages(stages) {
 function readAdvisorAudit(root) {
   const usage = { input: 0, output: 0, cache_read: 0, cache_write: 0, total_tokens: 0, cost_usd: 0 };
   const statuses = [];
+  const failures = [];
   let successfulCalls = 0;
   const eventsPath = companyPaths(root).events;
-  if (!fs.existsSync(eventsPath)) return { usage, statuses, successfulCalls };
+  if (!fs.existsSync(eventsPath)) return { usage, statuses, failures, successfulCalls };
 
   for (const line of fs.readFileSync(eventsPath, "utf8").split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -743,12 +1050,18 @@ function readAdvisorAudit(root) {
     if (event?.type !== "advisor.invoked") continue;
     const status = typeof event.data?.status === "string" ? event.data.status : "unknown";
     statuses.push(status);
-    if (status !== "success") continue;
+    if (status !== "success") {
+      failures.push({
+        status,
+        error: typeof event.data?.error === "string" ? event.data.error : null,
+      });
+      continue;
+    }
     successfulCalls += 1;
     addUsage(usage, event.data?.usage);
   }
   usage.total_tokens = usage.input + usage.output + usage.cache_read + usage.cache_write;
-  return { usage, statuses, successfulCalls };
+  return { usage, statuses, failures, successfulCalls };
 }
 
 function combineUsage(...values) {
@@ -765,6 +1078,7 @@ async function gradeCandidate(candidateRoot, options = {}) {
   if (new Set(["raman-fitting", "write-compressor"]).has(taskId)) {
     return gradeExtraCandidate(taskId, candidateRoot, options);
   }
+  if (expandedTaskIds.has(taskId)) return gradeExpandedCandidate(taskId, candidateRoot, options);
   const grade = await gradeCancelCandidate(candidateRoot);
   return {
     ...grade,
@@ -834,6 +1148,10 @@ function spawnCaptured(command, args, options) {
   return new Promise((resolve, reject) => {
     const stdoutChunks = [];
     const stderrChunks = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    const stdoutDecoder = options.onStdoutLine ? new StringDecoder("utf8") : null;
+    let stdoutLineBuffer = "";
     const stdoutStream = options.stdoutPath ? fs.createWriteStream(options.stdoutPath) : null;
     const stderrStream = options.stderrPath ? fs.createWriteStream(options.stderrPath) : null;
     const child = spawn(command, args, {
@@ -854,6 +1172,10 @@ function spawnCaptured(command, args, options) {
       if (signalTimer) clearTimeout(signalTimer);
       if (killTimer) clearTimeout(killTimer);
       if (forceSettleTimer) clearTimeout(forceSettleTimer);
+      if (stdoutDecoder) {
+        stdoutLineBuffer += stdoutDecoder.end();
+        if (stdoutLineBuffer) options.onStdoutLine(stdoutLineBuffer.replace(/\r$/, ""));
+      }
       stdoutStream?.end();
       stderrStream?.end();
       resolve({
@@ -878,11 +1200,30 @@ function spawnCaptured(command, args, options) {
       signalTimer = setTimeout(() => killProcessGroup(child.pid, "SIGINT"), options.signalAfterMs);
     }
     child.stdout.on("data", (chunk) => {
-      stdoutChunks.push(chunk);
+      stdoutBytes = appendBoundedChunk(
+        stdoutChunks,
+        chunk,
+        stdoutBytes,
+        options.maxStdoutCaptureBytes ?? Number.POSITIVE_INFINITY,
+      );
+      if (stdoutDecoder) {
+        stdoutLineBuffer += stdoutDecoder.write(chunk);
+        let newline;
+        while ((newline = stdoutLineBuffer.indexOf("\n")) >= 0) {
+          const line = stdoutLineBuffer.slice(0, newline).replace(/\r$/, "");
+          stdoutLineBuffer = stdoutLineBuffer.slice(newline + 1);
+          options.onStdoutLine(line);
+        }
+      }
       stdoutStream?.write(chunk);
     });
     child.stderr.on("data", (chunk) => {
-      stderrChunks.push(chunk);
+      stderrBytes = appendBoundedChunk(
+        stderrChunks,
+        chunk,
+        stderrBytes,
+        options.maxStderrCaptureBytes ?? Number.POSITIVE_INFINITY,
+      );
       stderrStream?.write(chunk);
     });
     child.on("error", (error) => {
@@ -904,6 +1245,23 @@ function spawnCaptured(command, args, options) {
       finish(code, signal);
     });
   });
+}
+
+function appendBoundedChunk(chunks, chunk, currentBytes, maxBytes) {
+  chunks.push(chunk);
+  let bytes = currentBytes + chunk.length;
+  while (bytes > maxBytes && chunks.length > 0) {
+    const excess = bytes - maxBytes;
+    const first = chunks[0];
+    if (first.length <= excess) {
+      chunks.shift();
+      bytes -= first.length;
+    } else {
+      chunks[0] = first.subarray(excess);
+      bytes -= excess;
+    }
+  }
+  return bytes;
 }
 
 function tailBytes(value, limit) {
@@ -930,13 +1288,13 @@ function spawnSyncCompat(command, args, cwd) {
 function checkFreeSpace() {
   const stat = fs.statfsSync(trialRoot && fs.existsSync(trialRoot) ? trialRoot : os.tmpdir());
   const free = stat.bavail * stat.bsize;
-  if (free < minFreeBytes) fail(`Disk guard: only ${(free / 1024 ** 3).toFixed(2)} GiB free; minimum is 10 GiB.`);
+  if (free < minFreeBytes) fail(`Disk guard: only ${(free / 1024 ** 3).toFixed(2)} GiB free; minimum is ${minFreeGiB} GiB.`);
 }
 
 function checkRunSize() {
   if (!fs.existsSync(runRoot)) return;
   const bytes = directoryBytes(runRoot);
-  if (bytes > maxRunBytes) fail(`Disk guard: benchmark reached ${(bytes / 1024 ** 2).toFixed(1)} MiB; cap is ${(maxRunBytes / 1024 ** 2).toFixed(0)} MiB.`);
+  if (bytes > maxRunBytes) fail(`Disk guard: benchmark reached ${(bytes / 1024 ** 2).toFixed(1)} MiB; cap is ${maxRunMiB} MiB.`);
   checkFreeSpace();
 }
 
@@ -974,6 +1332,14 @@ function number(value) {
 function readArg(name) {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : null;
+}
+
+function positiveNumberArg(name, fallback) {
+  const raw = readArg(name);
+  if (raw === null) return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) fail(`${name} must be a positive number`);
+  return value;
 }
 
 function fail(message) {

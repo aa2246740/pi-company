@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "date": "2026-07-12",
+  "benchmark": "terminal-bench-2.1-native-nonsecurity-expanded",
+  "terminal_bench_commit": "a0c400b1138e8c2272c2fc7daa4fa35199b43bef",
+  "protocol": {
+    "paired_tasks": 6,
+    "executor": "openai-codex/gpt-5.6-luna",
+    "tester": "openai-codex/gpt-5.6-luna",
+    "reviewer": "openai-codex/gpt-5.6-luna",
+    "advisor": "openai-codex/gpt-5.6-sol",
+    "thinking": "high",
+    "advisor_trigger": "autonomous",
+    "manual_advisor_prompt": false,
+    "max_uses_per_turn": 2
+  },
+  "data_provenance": {
+    "baseline": "Reward and granular check totals recovered from recorded matrix completion lines after the original /tmp JSONL checkpoint was cleared overnight.",
+    "advisor": "Complete persisted JSONL checkpoint.",
+    "baseline_efficiency_available": false,
+    "advisor_efficiency_available": true
+  },
+  "public_job_sample": {
+    "job": "10e2e56b-ed31-5f65-a489-69f78b902adf",
+    "rates_are_not_global": true,
+    "successes": {
+      "video-processing": "4/25",
+      "dna-insert": "5/25",
+      "gcode-to-text": "7/25",
+      "dna-assembly": "8/25",
+      "extract-elf": "9/25",
+      "path-tracing-reverse": "12/25"
+    }
+  },
+  "quality": {
+    "company": {
+      "rewards": 4,
+      "tasks": 6,
+      "checks_passed": 24,
+      "checks_total": 26,
+      "mean_task_score": 0.861111111111111,
+      "reward_wilson_95": [0.299993315138392, 0.9032285888942195]
+    },
+    "company_advisor": {
+      "rewards": 3,
+      "tasks": 6,
+      "checks_passed": 23,
+      "checks_total": 26,
+      "mean_task_score": 0.8333333333333334,
+      "reward_wilson_95": [0.18761630648265054, 0.8123836935173494]
+    },
+    "paired_reward": {
+      "advisor_wins": 0,
+      "advisor_losses": 1,
+      "ties": 5,
+      "mean_delta": -0.16666666666666666,
+      "exact_mcnemar_p_two_sided": 1.0
+    },
+    "paired_task_score": {
+      "mean_delta": -0.027777777777777773,
+      "median_delta": 0.0,
+      "bootstrap_mean_delta_95": [-0.08333333333333333, 0.0],
+      "exact_sign_p_two_sided": 1.0,
+      "exact_sign_flip_mean_p_two_sided": 1.0,
+      "cohen_dz": -0.408248290463863
+    }
+  },
+  "advisor_treatment_efficiency": {
+    "duration_ms": 8342106,
+    "total_tokens": 21918018,
+    "catalog_cost_usd": 6.725520800000002,
+    "tool_calls": 712,
+    "advisor_calls": 21,
+    "advisor_successful_calls": 21,
+    "advisor_tokens": 243316,
+    "advisor_catalog_cost_usd": 1.478855,
+    "advisor_failed_audits": 0
+  },
+  "tasks": [
+    {
+      "task": "video-processing",
+      "company": { "reward": 1, "checks_passed": 6, "checks_total": 6 },
+      "company_advisor": { "reward": 0, "checks_passed": 5, "checks_total": 6, "advisor_calls": 4, "total_tokens": 3958450, "catalog_cost_usd": 1.2564782 },
+      "effect": "regressed"
+    },
+    {
+      "task": "dna-insert",
+      "company": { "reward": 0, "checks_passed": 2, "checks_total": 3 },
+      "company_advisor": { "reward": 0, "checks_passed": 2, "checks_total": 3, "advisor_calls": 4, "total_tokens": 1367607, "catalog_cost_usd": 0.7276221999999999 },
+      "effect": "tie"
+    },
+    {
+      "task": "gcode-to-text",
+      "company": { "reward": 0, "checks_passed": 1, "checks_total": 2 },
+      "company_advisor": { "reward": 0, "checks_passed": 1, "checks_total": 2, "advisor_calls": 2, "total_tokens": 5407827, "catalog_cost_usd": 1.340201 },
+      "effect": "tie"
+    },
+    {
+      "task": "dna-assembly",
+      "company": { "reward": 1, "checks_passed": 3, "checks_total": 3 },
+      "company_advisor": { "reward": 1, "checks_passed": 3, "checks_total": 3, "advisor_calls": 3, "total_tokens": 3760241, "catalog_cost_usd": 1.2040454000000003 },
+      "effect": "tie"
+    },
+    {
+      "task": "extract-elf",
+      "company": { "reward": 1, "checks_passed": 6, "checks_total": 6 },
+      "company_advisor": { "reward": 1, "checks_passed": 6, "checks_total": 6, "advisor_calls": 4, "total_tokens": 1065294, "catalog_cost_usd": 0.6015272 },
+      "effect": "tie"
+    },
+    {
+      "task": "path-tracing-reverse",
+      "company": { "reward": 1, "checks_passed": 6, "checks_total": 6 },
+      "company_advisor": { "reward": 1, "checks_passed": 6, "checks_total": 6, "advisor_calls": 4, "total_tokens": 6358599, "catalog_cost_usd": 1.5956468000000006 },
+      "effect": "tie"
+    }
+  ],
+  "prior_two_task_stratum": {
+    "protocol_differs": true,
+    "company": { "rewards": 1, "tasks": 2, "checks_passed": 16, "checks_total": 17 },
+    "company_advisor": { "rewards": 1, "tasks": 2, "checks_passed": 13, "checks_total": 17 },
+    "advisor_wins": 1,
+    "advisor_losses": 1
+  },
+  "all_eight_tasks_descriptive_only": {
+    "do_not_use_for_pooled_inference": true,
+    "company": { "rewards": 5, "tasks": 8, "checks_passed": 40, "checks_total": 43 },
+    "company_advisor": { "rewards": 4, "tasks": 8, "checks_passed": 36, "checks_total": 43 },
+    "advisor_wins": 1,
+    "advisor_losses": 2,
+    "ties": 5
+  }
+}

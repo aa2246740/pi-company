@@ -2,6 +2,9 @@
 
 Date: 2026-07-11
 
+Follow-up: the six-task expanded evaluation is in
+[`NATIVE_TBENCH_EXPANDED_ADVISOR_2026-07-12.md`](NATIVE_TBENCH_EXPANDED_ADVISOR_2026-07-12.md).
+
 This is a paired, low-disk local experiment, not a Terminal-Bench leaderboard
 result. It evaluates pi-company's autonomous Advisor mode only on non-security
 tasks.
