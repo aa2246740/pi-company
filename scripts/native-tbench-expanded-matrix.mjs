@@ -24,6 +24,7 @@ const defaultTasks = [
   "protein-assembly",
   "db-wal-recovery",
 ];
+const supportedTasks = [...defaultTasks, "raman-fitting", "write-compressor"];
 
 const runRoot = path.resolve(readArg("--run-root") || path.join(os.tmpdir(), "pi-company-expanded-matrix"));
 const checkpointPath = path.resolve(readArg("--checkpoint") || path.join(repoRoot, ".benchmark-work", "native-tbench-expanded-results.jsonl"));
@@ -216,7 +217,7 @@ function checkpointMatchesProtocol(value) {
 function parseTasks(raw) {
   if (!raw) return defaultTasks;
   const tasks = raw.split(",").map((value) => value.trim()).filter(Boolean);
-  const unknown = tasks.filter((task) => !defaultTasks.includes(task));
+  const unknown = tasks.filter((task) => !supportedTasks.includes(task));
   if (unknown.length > 0) throw new Error(`Unknown expanded tasks: ${unknown.join(", ")}`);
   return tasks;
 }
