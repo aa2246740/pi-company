@@ -73,6 +73,12 @@ const expandedTaskIds = new Set([
   "circuit-fibsqrt",
   "llm-inference-batching-scheduler",
 ]);
+const extraTaskIds = new Set([
+  "raman-fitting",
+  "write-compressor",
+  "protein-assembly",
+  "db-wal-recovery",
+]);
 
 const taskSpecs = {
   "cancel-async-tasks": {
@@ -193,6 +199,61 @@ The current repository root is the native local mapping of /app. System clang an
     reviewerPrompt: "Review the complete worktree read-only, independently compile decomp.c, run data.comp through it, compare exact bytes with data.txt, check size, and inspect encoder logic for finalization or model-symmetry mistakes.",
     testerFallback: "Verify decoder symmetry, integer/range coding, references, stream finalization, exact output bytes, and the 2500-byte cap.",
     reviewerFallback: "Compile a fresh decoder and correct any encoder, finalization, exact-output, reproducibility, or size defect before finishing.",
+  },
+  "protein-assembly": {
+    timeoutMs: 30 * 60_000,
+    stageTimeoutCaps: {
+      plain: 30 * 60_000,
+      tester: 3 * 60_000,
+      coderImplement: 20 * 60_000,
+      reviewer: 3 * 60_000,
+      coderRevise: 4 * 60_000,
+    },
+    candidateFile: "gblock.txt",
+    issueTitle: "Design a FRET fusion-protein gBlock",
+    fixtures: [
+      ["protein-assembly/antibody.fasta", "antibody.fasta"],
+      ["protein-assembly/pdb_ids.txt", "pdb_ids.txt"],
+      ["protein-assembly/plasmid.gb", "plasmid.gb"],
+    ],
+    text: `Design a gBlock for a DHFR FRET experiment. The excitation and emission filters pass 505 nm and 610 nm. The fusion protein must also bind the antibody represented by /app/antibody.fasta and bind the molecule with SMILES Nc3nc(OCc1ccccc1)c2nc[nH]c2n3. Allowed molecule-binder, donor, and acceptor proteins are listed in /app/pdb_ids.txt; use their PDB FASTA sequences and FPbase spectral data. Reuse the DHFR protein sequence from /app/plasmid.gb.
+
+Write only the DNA sequence to /app/gblock.txt as one non-empty line. Do not include start/stop codons or an N-terminal methionine for any component. From N to C terminus the order must be antibody binder, donor, DHFR, acceptor, molecule binder. The donor and acceptor may be separated only by DHFR and GS linkers. Put a 5-20 amino-acid GS-only linker between each component, with no terminal linker. Every 50-nucleotide window must have 30-70% GC content, and the complete gBlock must be at most 3000 nucleotides.
+
+The current repository root is the native local mapping of /app. Python 3.13, curl, and network access are available. Work autonomously and do not ask the user questions.`,
+    plainPrompt: "Identify every component from the supplied biological evidence and public APIs, codon-optimize the exact fusion, and verify translation, linkers, termini, size, and every sliding GC window.",
+    testerPrompt: "Develop an independent checklist for antibody target identification, PDB and FPbase evidence, spectral matching, GenBank DHFR extraction, N-terminal methionine removal, component order, exact translation, GS linker boundaries, codon optimization, and sliding-window GC constraints.",
+    coderPrompt: "Create gblock.txt at the repository root, retain any useful analysis script, and independently translate and validate the complete sequence plus all 50-nucleotide GC windows.",
+    reviewerPrompt: "Review it read-only for unsupported component selection, wrong FASTA chain or spectral peak, GenBank translation errors, extra methionines or stop codons, component ordering, linker composition/length, terminal residues, codon-frame errors, size, and sliding-window GC violations.",
+    testerFallback: "Check component evidence, exact protein translation and order, methionine removal, GS linkers, reading frame, size, and every GC window.",
+    reviewerFallback: "Correct any component identity, translation, order, linker, frame, terminus, length, or GC-window defect before finishing.",
+  },
+  "db-wal-recovery": {
+    timeoutMs: 25 * 60_000,
+    stageTimeoutCaps: {
+      plain: 25 * 60_000,
+      tester: 3 * 60_000,
+      coderImplement: 15 * 60_000,
+      reviewer: 3 * 60_000,
+      coderRevise: 4 * 60_000,
+    },
+    candidateFile: "recovered.json",
+    issueTitle: "Recover all records from an unreadable SQLite WAL",
+    fixtures: [
+      ["db-wal-recovery/main.db", "main.db"],
+      ["db-wal-recovery/main.db-wal.encrypted", "main.db-wal"],
+    ],
+    text: `The SQLite database /app/main.db is in WAL mode, but /app/main.db-wal appears corrupted or encrypted. SQLite currently exposes only five base records even though the complete database should contain eleven records.
+
+Diagnose and fix the WAL so SQLite can apply its changes, then extract every record to /app/recovered.json. The output must be a JSON list sorted by id. Every object must contain integer id, string name, and integer value fields, for example [{"id":1,"name":"item1","value":123}]. Recover the actual data, including WAL inserts and updates; do not fabricate missing rows.
+
+The current repository root is the native local mapping of /app. Python 3.13, sqlite3, xxd, and standard binary-inspection tools are available. Work autonomously and do not ask the user questions.`,
+    plainPrompt: "Inspect the database and WAL bytes, identify and reverse the corruption, validate the repaired WAL header and page layout, query all applied rows, and write sorted recovered.json.",
+    testerPrompt: "Develop an independent checklist for preserving source files, WAL magic/header diagnosis, reversible transformation, SQLite sidecar naming, checkpoint behavior, exact row count and updates, JSON types, sorting, duplicates, and evidence that WAL records were actually applied.",
+    coderPrompt: "Recover the real WAL contents, create recovered.json at the repository root, and verify all eleven rows through an independent SQLite query or parser before finishing.",
+    reviewerPrompt: "Review it read-only by independently inspecting the original database and WAL transformation; verify exact base rows, WAL updates and inserts, JSON schema/types, ordering, uniqueness, and absence of fabricated values.",
+    testerFallback: "Check WAL diagnosis and repair, exact eleven-row recovery, updated and inserted records, JSON schema, sorting, and duplicate IDs.",
+    reviewerFallback: "Correct any WAL transformation, missing or fabricated record, stale base value, JSON type, sorting, or duplicate-ID defect before finishing.",
   },
   "video-processing": {
     timeoutMs: 25 * 60_000,
@@ -1207,7 +1268,7 @@ function combineUsage(...values) {
 
 async function gradeCandidate(candidateRoot, options = {}) {
   if (taskId === "filter-js-from-html") return gradeXssCandidate(candidateRoot, options);
-  if (new Set(["raman-fitting", "write-compressor"]).has(taskId)) {
+  if (extraTaskIds.has(taskId)) {
     return gradeExtraCandidate(taskId, candidateRoot, options);
   }
   if (expandedTaskIds.has(taskId)) return gradeExpandedCandidate(taskId, candidateRoot, options);

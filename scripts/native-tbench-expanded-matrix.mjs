@@ -21,6 +21,8 @@ const defaultTasks = [
   "polyglot-rust-c",
   "circuit-fibsqrt",
   "llm-inference-batching-scheduler",
+  "protein-assembly",
+  "db-wal-recovery",
 ];
 
 const runRoot = path.resolve(readArg("--run-root") || path.join(os.tmpdir(), "pi-company-expanded-matrix"));

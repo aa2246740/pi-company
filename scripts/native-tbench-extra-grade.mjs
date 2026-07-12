@@ -24,12 +24,55 @@ const RAMAN_EXPECTED = {
 };
 const RAMAN_CHECK_COUNT = 11;
 const COMPRESSOR_CHECK_COUNT = 6;
+const PROTEIN_CHECK_COUNT = 9;
+const DB_WAL_CHECK_COUNT = 9;
 const MAX_COMPRESSED_BYTES = 2_500;
 const MAX_DECOMPRESSED_BYTES = 1024 * 1024;
+
+const PROTEIN_COMPONENTS = {
+  flag: "DYKDDDDK",
+  donor: "GSSHHHHHHSSGENLYFQGHMVSKGEELFTGVVPILVELDGDVNGHKFSVRGEGEGDATNGKLTLKFICTTGKLPVPWPTLVTTFGYGVACFSRYPDHMKQHDFFKSAMPEGYVQERTISFKDDGTYKTRAEVKFEGDTLVNRIELKGIDFKEDGNILGHKLEYNFNSHNVYITADKQKNGIKANFKIRHNVEDGSVQLADHYQQNTPIGDGPVLLPDNHYLSHQSALSKDPNEKRDHMVLLEFVTAAGITHGMDELYK",
+  dhfr: "ISLIAALAVDRVIGMENAMPWNLPADLAWFKRNTLNKPVIMGRHTWESIGRPLPGRKNIILSSQPGTDDRVTWVKSVDEAIAACGDVPEIMVIGGGRVYEQFLPKAQKLYLTHIDAEVEGDTHFPDYEPDDWESVFSEFHDADAQNSHSYCFEILERR",
+  acceptor: "VSKGEEDNMAIIKEFMRFKVHMEGSVNGHEFEIEGEGEGRPYEGTQTAKLKVTKGGPLPFAWDILSPQFMYGSKAYVKHPADIPDYLKLSFPEGFKWERVMNFEDGGVVTVTQDSSLQDGEFIYKVKLRGTNFPSDGPVMQKKTMGWEASSERMYPEDGALKGEIKQRLKLKDGGHYDAEVKTTYKAKKPVQLPGAYNVNIKLDITSHNEDYTIVEQYERAEGRHSTGGMDELYK",
+  snap: "GPGSDKDCEMKRTTLDSPLGKLELSGCEQGLHEIIFLGKGTSAADAVEVPAPAAVLGGPEPLMQATAWLNAYFHQPEAIEEFPVPALHHPVFQQESFTRQVLWKLLKVVKFGEVISYSHLAALAGNPAATAAVKTALSGNPVPILIPCHRVVQGDLDVGGYEGGLAVKEWLLAHEGHRLGKR",
+};
+
+const PROTEIN_ORACLE_CODONS = {
+  A: "GCT", C: "TGT", D: "GAT", E: "GAA", F: "TTC", G: "GGT", H: "CAT",
+  I: "ATC", K: "AAG", L: "CTG", M: "ATG", N: "AAC", P: "CCT", Q: "CAG",
+  R: "CGT", S: "TCT", T: "ACT", V: "GTT", W: "TGG", Y: "TAC",
+};
+
+const GENETIC_CODE = {
+  TTT: "F", TTC: "F", TTA: "L", TTG: "L", TCT: "S", TCC: "S", TCA: "S", TCG: "S",
+  TAT: "Y", TAC: "Y", TAA: "*", TAG: "*", TGT: "C", TGC: "C", TGA: "*", TGG: "W",
+  CTT: "L", CTC: "L", CTA: "L", CTG: "L", CCT: "P", CCC: "P", CCA: "P", CCG: "P",
+  CAT: "H", CAC: "H", CAA: "Q", CAG: "Q", CGT: "R", CGC: "R", CGA: "R", CGG: "R",
+  ATT: "I", ATC: "I", ATA: "I", ATG: "M", ACT: "T", ACC: "T", ACA: "T", ACG: "T",
+  AAT: "N", AAC: "N", AAA: "K", AAG: "K", AGT: "S", AGC: "S", AGA: "R", AGG: "R",
+  GTT: "V", GTC: "V", GTA: "V", GTG: "V", GCT: "A", GCC: "A", GCA: "A", GCG: "A",
+  GAT: "D", GAC: "D", GAA: "E", GAG: "E", GGT: "G", GGC: "G", GGA: "G", GGG: "G",
+};
+
+const DB_WAL_EXPECTED = [
+  { id: 1, name: "apple", value: 150 },
+  { id: 2, name: "banana", value: 250 },
+  { id: 3, name: "cherry", value: 300 },
+  { id: 4, name: "date", value: 400 },
+  { id: 5, name: "elderberry", value: 500 },
+  { id: 6, name: "fig", value: 600 },
+  { id: 7, name: "grape", value: 700 },
+  { id: 8, name: "honeydew", value: 800 },
+  { id: 9, name: "kiwi", value: 900 },
+  { id: 10, name: "lemon", value: 1_000 },
+  { id: 11, name: "mango", value: 1_100 },
+];
 
 export async function gradeExtraCandidate(taskId, candidateRoot, options = {}) {
   if (taskId === "raman-fitting") return gradeRaman(candidateRoot);
   if (taskId === "write-compressor") return gradeCompressor(candidateRoot, options);
+  if (taskId === "protein-assembly") return gradeProteinAssembly(candidateRoot);
+  if (taskId === "db-wal-recovery") return gradeDbWalRecovery(candidateRoot);
   throw new Error(`Unsupported extra native task: ${taskId}`);
 }
 
@@ -84,6 +127,228 @@ function gradeRaman(candidateRoot) {
     parameters_passed: checks.slice(3).filter((check) => check.passed).length,
     parameters_total: 8,
   });
+}
+
+function gradeProteinAssembly(candidateRoot) {
+  const resultPath = path.join(path.resolve(candidateRoot), "gblock.txt");
+  const exists = fs.existsSync(resultPath);
+  const checks = [{
+    name: "gblock_exists",
+    passed: exists,
+    detail: exists ? "present" : "missing",
+  }];
+  if (!exists) return missingResult(checks, PROTEIN_CHECK_COUNT, "gblock.txt");
+
+  const lines = fs.readFileSync(resultPath, "utf8").split(/\r?\n/);
+  if (lines.at(-1) === "") lines.pop();
+  const oneLine = lines.length === 1 && lines[0].length > 0;
+  checks.push({
+    name: "single_nonempty_line",
+    passed: oneLine,
+    detail: `lines=${lines.length}`,
+  });
+
+  const dna = oneLine ? lines[0].toUpperCase() : "";
+  const dnaAlphabet = /^[ATCG]+$/.test(dna);
+  checks.push({
+    name: "dna_alphabet",
+    passed: dnaAlphabet,
+    detail: dnaAlphabet ? "ATCG only" : "empty or non-DNA characters",
+  });
+
+  const validLength = dna.length > 0 && dna.length <= 3_000 && dna.length % 3 === 0;
+  checks.push({
+    name: "length_and_reading_frame",
+    passed: validLength,
+    detail: `nucleotides=${dna.length} limit=3000 frame=${dna.length % 3}`,
+  });
+
+  const translated = dnaAlphabet && validLength ? translateDna(dna) : "";
+  const names = ["flag", "donor", "dhfr", "acceptor", "snap"];
+  const indices = names.map((name) => translated.indexOf(PROTEIN_COMPONENTS[name]));
+  const ordered = indices.every((index) => index >= 0)
+    && indices.every((index, position) => position === 0 || index > indices[position - 1]);
+  checks.push({
+    name: "component_identity_and_order",
+    passed: ordered,
+    detail: ordered ? "flag-donor-dhfr-acceptor-snap" : `component_indices=${indices.join(",")}`,
+  });
+
+  const exactTermini = ordered
+    && indices[0] === 0
+    && indices[4] + PROTEIN_COMPONENTS.snap.length === translated.length;
+  checks.push({
+    name: "exact_protein_termini",
+    passed: exactTermini,
+    detail: exactTermini ? "no terminal extras" : `amino_acids=${translated.length}`,
+  });
+
+  const linkers = ordered ? names.slice(0, -1).map((name, position) => {
+    const start = indices[position] + PROTEIN_COMPONENTS[name].length;
+    return translated.slice(start, indices[position + 1]);
+  }) : [];
+  const linkerAlphabet = linkers.length === 4 && linkers.every((linker) => /^[GS]+$/.test(linker));
+  checks.push({
+    name: "gs_only_linkers",
+    passed: linkerAlphabet,
+    detail: linkers.length === 4 ? `lengths=${linkers.map((linker) => linker.length).join(",")}` : "components unavailable",
+  });
+
+  const linkerLengths = linkerAlphabet && linkers.every((linker) => linker.length >= 5 && linker.length <= 20);
+  checks.push({
+    name: "linker_lengths",
+    passed: linkerLengths,
+    detail: linkers.length === 4 ? `lengths=${linkers.map((linker) => linker.length).join(",")} allowed=5-20` : "components unavailable",
+  });
+
+  const gc = slidingGcCheck(dna);
+  checks.push({
+    name: "sliding_gc_windows",
+    passed: gc.passed,
+    detail: `windows=${gc.windows} min_gc=${gc.minGc} max_gc=${gc.maxGc} allowed=15-35/50`,
+  });
+
+  return completeResult(checks, {
+    task: "protein-assembly",
+    terminal_bench_commit: TB21_COMMIT,
+    nucleotides: dna.length,
+    amino_acids: translated.length,
+    component_indices: indices,
+    linker_lengths: linkers.map((linker) => linker.length),
+    gc_windows: gc.windows,
+    min_gc_per_50: gc.minGc,
+    max_gc_per_50: gc.maxGc,
+  });
+}
+
+function gradeDbWalRecovery(candidateRoot) {
+  const resultPath = path.join(path.resolve(candidateRoot), "recovered.json");
+  const exists = fs.existsSync(resultPath);
+  const checks = [{
+    name: "recovered_json_exists",
+    passed: exists,
+    detail: exists ? "present" : "missing",
+  }];
+  if (!exists) return missingResult(checks, DB_WAL_CHECK_COUNT, "recovered.json");
+
+  let data = null;
+  let parseError = null;
+  try {
+    data = JSON.parse(fs.readFileSync(resultPath, "utf8"));
+  } catch (error) {
+    parseError = error instanceof Error ? error.message : String(error);
+  }
+  const validList = Array.isArray(data) && data.length > 0;
+  checks.push({
+    name: "valid_nonempty_json_list",
+    passed: validList,
+    detail: validList ? `records=${data.length}` : parseError || "not a non-empty list",
+  });
+
+  const schemaPassed = validList && data.every((record) => isRecord(record)
+    && Number.isInteger(record.id)
+    && typeof record.name === "string"
+    && Number.isInteger(record.value));
+  checks.push({
+    name: "record_schema",
+    passed: schemaPassed,
+    detail: schemaPassed ? "integer id/value and string name" : "invalid record fields or types",
+  });
+
+  const records = schemaPassed ? data : [];
+  const ids = records.map((record) => record.id);
+  const sorted = records.length > 0 && ids.every((id, index) => index === 0 || id >= ids[index - 1]);
+  checks.push({
+    name: "sorted_by_id",
+    passed: sorted,
+    detail: `ids=${ids.join(",")}`,
+  });
+
+  const completeIds = records.length === DB_WAL_EXPECTED.length
+    && ids.every((id, index) => id === DB_WAL_EXPECTED[index].id);
+  checks.push({
+    name: "all_eleven_ids",
+    passed: completeIds,
+    detail: `records=${records.length} expected=11`,
+  });
+
+  const recordsById = new Map(records.map((record) => [record.id, record]));
+  const updatesExact = [1, 2].every((id) => sameRecord(recordsById.get(id), DB_WAL_EXPECTED[id - 1]));
+  checks.push({
+    name: "wal_updates_exact",
+    passed: updatesExact,
+    detail: updatesExact ? "ids 1-2 contain applied WAL values" : "stale or incorrect updated records",
+  });
+
+  const baseExact = [3, 4, 5].every((id) => sameRecord(recordsById.get(id), DB_WAL_EXPECTED[id - 1]));
+  checks.push({
+    name: "base_records_exact",
+    passed: baseExact,
+    detail: baseExact ? "ids 3-5 exact" : "base records differ",
+  });
+
+  const insertsExact = DB_WAL_EXPECTED.slice(5).every((expected) => sameRecord(recordsById.get(expected.id), expected));
+  checks.push({
+    name: "wal_inserts_exact",
+    passed: insertsExact,
+    detail: insertsExact ? "ids 6-11 exact" : "missing or incorrect WAL inserts",
+  });
+
+  const uniqueIds = records.length > 0 && new Set(ids).size === ids.length;
+  checks.push({
+    name: "no_duplicate_ids",
+    passed: uniqueIds,
+    detail: `unique=${new Set(ids).size} records=${records.length}`,
+  });
+
+  return completeResult(checks, {
+    task: "db-wal-recovery",
+    terminal_bench_commit: TB21_COMMIT,
+    records: records.length,
+    exact_records: DB_WAL_EXPECTED.filter((expected) => sameRecord(recordsById.get(expected.id), expected)).length,
+  });
+}
+
+function translateDna(dna) {
+  let protein = "";
+  for (let index = 0; index < dna.length; index += 3) {
+    protein += GENETIC_CODE[dna.slice(index, index + 3)] || "?";
+  }
+  return protein;
+}
+
+function slidingGcCheck(dna) {
+  if (dna.length < 50 || !/^[ATCG]+$/.test(dna)) {
+    return { passed: false, windows: 0, minGc: null, maxGc: null };
+  }
+  let current = [...dna.slice(0, 50)].filter((base) => base === "G" || base === "C").length;
+  let minimum = current;
+  let maximum = current;
+  let passed = current >= 15 && current <= 35;
+  for (let index = 50; index < dna.length; index += 1) {
+    current += Number(dna[index] === "G" || dna[index] === "C");
+    current -= Number(dna[index - 50] === "G" || dna[index - 50] === "C");
+    minimum = Math.min(minimum, current);
+    maximum = Math.max(maximum, current);
+    if (current < 15 || current > 35) passed = false;
+  }
+  return { passed, windows: dna.length - 49, minGc: minimum, maxGc: maximum };
+}
+
+function sameRecord(actual, expected) {
+  return isRecord(actual)
+    && actual.id === expected.id
+    && actual.name === expected.name
+    && actual.value === expected.value;
+}
+
+function proteinOracleDna() {
+  const aminoAcids = Object.values(PROTEIN_COMPONENTS).join("GSGSG");
+  return [...aminoAcids].map((aminoAcid) => {
+    const codon = PROTEIN_ORACLE_CODONS[aminoAcid];
+    if (!codon) throw new Error(`Missing oracle codon for amino acid ${aminoAcid}`);
+    return codon;
+  }).join("");
 }
 
 async function gradeCompressor(candidateRoot, options) {
@@ -272,21 +537,22 @@ function readArg(name) {
 }
 
 async function runSelfTest(name, options) {
-  const selected = name === "all" ? ["raman-fitting", "write-compressor"] : [name];
+  const supported = ["raman-fitting", "write-compressor", "protein-assembly", "db-wal-recovery"];
+  const selected = name === "all" ? supported : [name];
   for (const taskId of selected) {
-    if (!new Set(["raman-fitting", "write-compressor"]).has(taskId)) {
+    if (!supported.includes(taskId)) {
       throw new Error(`Unknown self-test task: ${taskId}`);
     }
     const root = fs.mkdtempSync(path.join(os.tmpdir(), `pi-company-${taskId}-self-test-`));
     try {
+      const cacheRoot = path.resolve(options.cacheRoot || path.join(os.tmpdir(), "pi-company-extra-grade-cache"));
       if (taskId === "raman-fitting") {
         const output = {};
         for (const [peak, fields] of Object.entries(RAMAN_EXPECTED)) {
           output[peak] = Object.fromEntries(Object.entries(fields).map(([field, expected]) => [field, expected.value]));
         }
         fs.writeFileSync(path.join(root, "results.json"), `${JSON.stringify(output, null, 2)}\n`, "utf8");
-      } else {
-        const cacheRoot = path.resolve(options.cacheRoot || path.join(os.tmpdir(), "pi-company-extra-grade-cache"));
+      } else if (taskId === "write-compressor") {
         const source = ensurePinnedFixture("write-compressor/main.rs", cacheRoot, options.proxyUrl);
         const data = ensurePinnedFixture("write-compressor/data.txt", cacheRoot, options.proxyUrl);
         const executable = path.join(root, "compressor");
@@ -306,12 +572,45 @@ async function runSelfTest(name, options) {
           throw new Error(`Reference compressor failed: ${encode.stderr.toString("utf8").slice(-2_000)}`);
         }
         fs.writeFileSync(path.join(root, "data.comp"), encode.stdout);
+      } else if (taskId === "protein-assembly") {
+        for (const name of ["antibody.fasta", "pdb_ids.txt", "plasmid.gb"]) {
+          const source = ensurePinnedFixture(`protein-assembly/${name}`, cacheRoot, options.proxyUrl);
+          fs.copyFileSync(source, path.join(root, name));
+        }
+        fs.writeFileSync(path.join(root, "gblock.txt"), `${proteinOracleDna()}\n`, "utf8");
+      } else {
+        const database = ensurePinnedFixture("db-wal-recovery/main.db", cacheRoot, options.proxyUrl);
+        const encryptedWal = ensurePinnedFixture("db-wal-recovery/main.db-wal.encrypted", cacheRoot, options.proxyUrl);
+        const databasePath = path.join(root, "main.db");
+        fs.copyFileSync(database, databasePath);
+        const wal = Buffer.from(fs.readFileSync(encryptedWal));
+        for (let index = 0; index < wal.length; index += 1) wal[index] ^= 0x42;
+        fs.writeFileSync(path.join(root, "main.db-wal"), wal);
+        const query = await spawnCaptured("sqlite3", [
+          "-json",
+          databasePath,
+          "SELECT id, name, value FROM items ORDER BY id;",
+        ], {
+          timeoutMs: 30_000,
+          maxOutputBytes: 1024 * 1024,
+        });
+        if (query.exitCode !== 0 || query.timedOut || query.outputOverflow) {
+          throw new Error(`Reference WAL query failed: ${query.stderr.toString("utf8").slice(-2_000)}`);
+        }
+        fs.writeFileSync(path.join(root, "recovered.json"), query.stdout);
       }
       const oracle = await gradeExtraCandidate(taskId, root, options);
       if (oracle.reward !== 1) throw new Error(`${taskId} oracle self-test failed: ${JSON.stringify(oracle)}`);
 
-      if (taskId === "raman-fitting") fs.writeFileSync(path.join(root, "results.json"), "{}\n", "utf8");
-      else fs.writeFileSync(path.join(root, "data.comp"), Buffer.alloc(0));
+      if (taskId === "raman-fitting") {
+        fs.writeFileSync(path.join(root, "results.json"), "{}\n", "utf8");
+      } else if (taskId === "write-compressor") {
+        fs.writeFileSync(path.join(root, "data.comp"), Buffer.alloc(0));
+      } else if (taskId === "protein-assembly") {
+        fs.writeFileSync(path.join(root, "gblock.txt"), `${"ATG".repeat(100)}\n`, "utf8");
+      } else {
+        fs.writeFileSync(path.join(root, "recovered.json"), `${JSON.stringify(DB_WAL_EXPECTED.slice(0, 5))}\n`, "utf8");
+      }
       const negative = await gradeExtraCandidate(taskId, root, options);
       if (negative.reward !== 0) throw new Error(`${taskId} negative self-test unexpectedly passed`);
       process.stdout.write(`${JSON.stringify({ task: taskId, oracle, negative }, null, 2)}\n`);
@@ -334,7 +633,7 @@ async function main() {
   const taskId = readArg("--task");
   const candidate = readArg("--candidate");
   if (!taskId || !candidate) {
-    throw new Error("Usage: node scripts/native-tbench-extra-grade.mjs --task raman-fitting|write-compressor --candidate PATH [--cache-root PATH] [--proxy URL] | --self-test all");
+    throw new Error("Usage: node scripts/native-tbench-extra-grade.mjs --task raman-fitting|write-compressor|protein-assembly|db-wal-recovery --candidate PATH [--cache-root PATH] [--proxy URL] | --self-test all");
   }
   const result = await gradeExtraCandidate(taskId, candidate, options);
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

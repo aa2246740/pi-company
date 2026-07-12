@@ -157,6 +157,31 @@ const FIXTURES = {
     bytes: 15_430,
     sha256: "cb9efb586d76a893c3027e62029e286eb6c7583dc92dbf1840a3adc236a926d7",
   },
+  "protein-assembly/antibody.fasta": {
+    repositoryPath: "tasks/protein-assembly/environment/antibody.fasta",
+    bytes: 475,
+    sha256: "e0e13645b299470cb007f1daf13050010bf15cb7c22ff6042189ea1ca7a1c333",
+  },
+  "protein-assembly/pdb_ids.txt": {
+    repositoryPath: "tasks/protein-assembly/environment/pdb_ids.txt",
+    bytes: 100,
+    sha256: "ea338c4e1a776a338d7d302e80ceaee6379c1c85a031448851c07b0f764358c2",
+  },
+  "protein-assembly/plasmid.gb": {
+    repositoryPath: "tasks/protein-assembly/environment/plasmid.gb",
+    bytes: 6_053,
+    sha256: "c9e31ad0ebb4d14b3820e46678c336d1f77af6ab1da36c53b5e9a9f10676cd74",
+  },
+  "db-wal-recovery/main.db": {
+    repositoryPath: "tasks/db-wal-recovery/environment/main.db",
+    bytes: 8_192,
+    sha256: "68cb288eb29e76d814b4e7ee6887b37c415675e644f88173bc191348e290d119",
+  },
+  "db-wal-recovery/main.db-wal.encrypted": {
+    repositoryPath: "tasks/db-wal-recovery/environment/main.db-wal.encrypted",
+    bytes: 16_512,
+    sha256: "68753bdce26196a53194260d001544cc6bb8f9f38e2f2f6826d09798e31e6e26",
+  },
 };
 
 export function ensurePinnedFixture(name, cacheRoot, proxyUrl = null) {
