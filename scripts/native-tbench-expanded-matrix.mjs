@@ -87,9 +87,10 @@ process.stdout.write(`${JSON.stringify({
 async function runCellWithRetries(task, variant) {
   let quotaAttempts = 0;
   let transientAttempts = 0;
+  let resumeExisting = false;
   for (;;) {
     try {
-      await runCell(task, variant);
+      await runCell(task, variant, resumeExisting);
       return;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -97,16 +98,18 @@ async function runCellWithRetries(task, variant) {
       if (quota && quotaAttempts < retryUsageLimits) {
         quotaAttempts += 1;
         const waitMinutes = Number(quota[1]) + 5;
-        fs.rmSync(path.join(runRoot, task, variant), { recursive: true, force: true });
-        process.stderr.write(`[matrix] quota exhausted for ${task}:${variant}; retry ${quotaAttempts}/${retryUsageLimits} in ${waitMinutes} min\n`);
+        resumeExisting = !/Infrastructure failure in Advisor/i.test(message) && canResumeCell(task, variant);
+        if (!resumeExisting) fs.rmSync(path.join(runRoot, task, variant), { recursive: true, force: true });
+        process.stderr.write(`[matrix] quota exhausted for ${task}:${variant}; ${resumeExisting ? "resume stages" : "restart cell"} after ${waitMinutes} min (${quotaAttempts}/${retryUsageLimits})\n`);
         await waitWithProgress(waitMinutes * 60_000, task, variant);
         continue;
       }
       const transient = /fetch failed|WebSocket error|ECONNRESET|ETIMEDOUT|socket hang up|\bterminated\b/i.test(message);
       if (transient && transientAttempts < retryTransientErrors) {
         transientAttempts += 1;
-        fs.rmSync(path.join(runRoot, task, variant), { recursive: true, force: true });
-        process.stderr.write(`[matrix] transient provider failure for ${task}:${variant}; retry ${transientAttempts}/${retryTransientErrors} in 60s\n`);
+        resumeExisting = !/Infrastructure failure in Advisor/i.test(message) && canResumeCell(task, variant);
+        if (!resumeExisting) fs.rmSync(path.join(runRoot, task, variant), { recursive: true, force: true });
+        process.stderr.write(`[matrix] transient provider failure for ${task}:${variant}; ${resumeExisting ? "resume stages" : "restart cell"} after 60s (${transientAttempts}/${retryTransientErrors})\n`);
         await waitWithProgress(60_000, task, variant);
         continue;
       }
@@ -115,7 +118,7 @@ async function runCellWithRetries(task, variant) {
   }
 }
 
-function runCell(task, variant) {
+function runCell(task, variant, resumeExisting = false) {
   const args = [
     runner,
     "--task", task,
@@ -130,6 +133,7 @@ function runCell(task, variant) {
     "--max-run-mib", maxRunMiB,
     "--time-multiplier", timeMultiplier,
   ];
+  if (resumeExisting) args.push("--resume-existing");
   if (proxyUrl) args.push("--proxy", proxyUrl);
   return new Promise((resolve, reject) => {
     const stderr = [];
@@ -155,6 +159,13 @@ function runCell(task, variant) {
       reject(new Error(`Cell ${task}:${variant} failed with code=${code} signal=${signal || "none"}\n${detail}`));
     });
   });
+}
+
+function canResumeCell(task, variant) {
+  const workspace = path.join(runRoot, task, variant, "workspace");
+  if (!fs.existsSync(path.join(workspace, "TASK.md"))) return false;
+  if (variant === "plain") return fs.existsSync(path.join(workspace, ".git"));
+  return fs.existsSync(path.join(workspace, ".pi-company", "events.jsonl"));
 }
 
 function waitWithProgress(milliseconds, task, variant) {

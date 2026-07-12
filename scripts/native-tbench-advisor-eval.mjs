@@ -14,6 +14,7 @@ import {
   ensureCoderWorktree,
   initCompany,
   loadConfig,
+  loadState,
   planAgentSpawn,
   registerAgent,
   requestAgentSpawn,
@@ -48,7 +49,9 @@ const validatorModel = `openai-codex/${validatorModelId}`;
 const advisorModel = `openai-codex/${advisorModelId}`;
 const useCodexClientCompat = process.argv.includes("--codex-client-compat");
 const finalizeExisting = process.argv.includes("--finalize-existing");
+const resumeExisting = process.argv.includes("--resume-existing");
 const prepareOnly = process.argv.includes("--prepare-only");
+if (finalizeExisting && resumeExisting) fail("--finalize-existing and --resume-existing are mutually exclusive");
 const proxyUrl = readArg("--proxy")
   || process.env.HTTPS_PROXY
   || process.env.HTTP_PROXY
@@ -548,7 +551,7 @@ if (gradeOnly) {
 
 const variant = readArg("--variant");
 if (!new Set(["plain", "company", "company-advisor"]).has(variant)) {
-  fail(`Usage: node scripts/native-tbench-advisor-eval.mjs --variant plain|company|company-advisor [--task ${Object.keys(taskSpecs).join("|")}] [--run-root PATH] [--executor-model MODEL] [--strong-model MODEL] [--validator-model MODEL] [--advisor-model MODEL] [--time-multiplier N] [--codex-client-compat] [--proxy URL] [--min-free-gib N] [--max-run-mib N] [--prepare-only] [--finalize-existing]`);
+  fail(`Usage: node scripts/native-tbench-advisor-eval.mjs --variant plain|company|company-advisor [--task ${Object.keys(taskSpecs).join("|")}] [--run-root PATH] [--executor-model MODEL] [--strong-model MODEL] [--validator-model MODEL] [--advisor-model MODEL] [--time-multiplier N] [--codex-client-compat] [--proxy URL] [--min-free-gib N] [--max-run-mib N] [--prepare-only] [--finalize-existing|--resume-existing]`);
 }
 
 const requestedRoot = readArg("--run-root");
@@ -570,19 +573,22 @@ await main();
 async function main() {
   checkFreeSpace();
   if (!fs.existsSync(extensionPath)) fail(`Missing built extension: ${extensionPath}. Run npm run build first.`);
-  if (!finalizeExisting) {
+  if (!finalizeExisting && !resumeExisting) {
     fs.rmSync(trialRoot, { recursive: true, force: true });
     fs.mkdirSync(trialRoot, { recursive: true });
     fs.mkdirSync(sessionRoot, { recursive: true });
   } else if (!fs.existsSync(trialRoot)) {
-    fail(`Cannot finalize missing trial directory: ${trialRoot}`);
+    fail(`Cannot ${finalizeExisting ? "finalize" : "resume"} missing trial directory: ${trialRoot}`);
   }
   fs.mkdirSync(sharedRoot, { recursive: true });
   taskPythonPath = prepareTaskEnvironment();
-  if (!finalizeExisting) createAgentConfig(agentConfigRoot);
+  if (!finalizeExisting && !fs.existsSync(path.join(agentConfigRoot, "settings.json"))) {
+    fs.mkdirSync(sessionRoot, { recursive: true });
+    createAgentConfig(agentConfigRoot);
+  }
 
   const workspace = path.join(trialRoot, "workspace");
-  const baselineCommit = finalizeExisting
+  const baselineCommit = finalizeExisting || resumeExisting
     ? git(workspace, ["rev-list", "--max-parents=0", "HEAD"]).stdout.trim()
     : createWorkspace(workspace);
 
@@ -601,16 +607,27 @@ async function main() {
     return;
   }
 
-  const startedAt = finalizeExisting
+  const startedAt = finalizeExisting || resumeExisting
     ? fs.statSync(path.join(workspace, "TASK.md")).birthtime.toISOString()
     : new Date().toISOString();
-  const deadline = Date.now() + variantTimeoutMs;
-  const stages = finalizeExisting ? readStageCheckpoints() : [];
+  const stages = finalizeExisting
+    ? readStageCheckpoints()
+    : resumeExisting
+      ? readStageCheckpoints({ allowIncomplete: true, trimInvalidTail: true })
+      : [];
+  const consumedStageMs = stages.reduce((sum, stage) => sum + stage.durationMs, 0);
+  const deadline = Date.now() + Math.max(1_000, variantTimeoutMs - consumedStageMs);
   let candidateRoot = variant === "plain"
     ? workspace
     : path.join(workspace, ".pi-company", "worktrees", "coder");
+  const company = variant === "plain"
+    ? null
+    : resumeExisting || finalizeExisting
+      ? loadExistingCompany(workspace)
+      : setupCompany(workspace, variant === "company-advisor");
+  if (company) candidateRoot = company.coderWorktree;
 
-  if (!finalizeExisting && variant === "plain") {
+  if (!finalizeExisting && variant === "plain" && !hasStage(stages, "executor")) {
     const executor = await runPiStage({
       name: "executor",
       cwd: workspace,
@@ -620,69 +637,74 @@ async function main() {
     });
     stages.push(executor);
     requireValidStage(executor);
-  } else if (!finalizeExisting) {
-    const company = setupCompany(workspace, variant === "company-advisor");
-    candidateRoot = company.coderWorktree;
+  } else if (!finalizeExisting && company) {
+    if (!hasStage(stages, "tester-plan")) {
+      const tester = await runPiStage({
+        name: "tester-plan",
+        cwd: workspace,
+        stageModel: validatorModel,
+        timeoutMs: stageTimeout(deadline, stageTimeoutCaps.tester),
+        company: { root: workspace, agent: "tester", role: "tester" },
+        prompt: `Read TASK.md. Act as an independent pre-implementation tester. ${taskSpec.testerPrompt} Do not edit source files and do not search outside this repository. Return a concise checklist of concrete failure modes the coder must handle.`,
+      });
+      stages.push(tester);
+      requireValidStage(tester);
+      sendCompanyMessage(workspace, {
+        from: "tester",
+        to: "coder",
+        type: "test",
+        priority: "high",
+        task: company.issueId,
+        text: tester.finalText || taskSpec.testerFallback,
+      });
+    }
 
-    const tester = await runPiStage({
-      name: "tester-plan",
-      cwd: workspace,
-      stageModel: validatorModel,
-      timeoutMs: stageTimeout(deadline, stageTimeoutCaps.tester),
-      company: { root: workspace, agent: "tester", role: "tester" },
-      prompt: `Read TASK.md. Act as an independent pre-implementation tester. ${taskSpec.testerPrompt} Do not edit source files and do not search outside this repository. Return a concise checklist of concrete failure modes the coder must handle.`,
-    });
-    stages.push(tester);
-    requireValidStage(tester);
-    sendCompanyMessage(workspace, {
-      from: "tester",
-      to: "coder",
-      type: "test",
-      priority: "high",
-      task: company.issueId,
-      text: tester.finalText || taskSpec.testerFallback,
-    });
+    if (!hasStage(stages, "coder-implement")) {
+      const coderImplement = await runPiStage({
+        name: "coder-implement",
+        cwd: candidateRoot,
+        stageModel: executorModel,
+        timeoutMs: stageTimeout(deadline, stageTimeoutCaps.coderImplement),
+        company: { root: workspace, agent: "coder", role: "coder" },
+        prompt: `Read TASK.md and your pi-company inbox. Implement the assigned task completely in this coder worktree. ${taskSpec.coderPrompt} Do not look for evaluator files outside the repository and do not wait for human input.`,
+      });
+      stages.push(coderImplement);
+      requireValidStage(coderImplement);
+    }
 
-    const coderImplement = await runPiStage({
-      name: "coder-implement",
-      cwd: candidateRoot,
-      stageModel: executorModel,
-      timeoutMs: stageTimeout(deadline, stageTimeoutCaps.coderImplement),
-      company: { root: workspace, agent: "coder", role: "coder" },
-      prompt: `Read TASK.md and your pi-company inbox. Implement the assigned task completely in this coder worktree. ${taskSpec.coderPrompt} Do not look for evaluator files outside the repository and do not wait for human input.`,
-    });
-    stages.push(coderImplement);
-    requireValidStage(coderImplement);
+    if (!hasStage(stages, "reviewer")) {
+      const reviewer = await runPiStage({
+        name: "reviewer",
+        cwd: workspace,
+        stageModel: validatorModel,
+        timeoutMs: stageTimeout(deadline, stageTimeoutCaps.reviewer),
+        company: { root: workspace, agent: "reviewer", role: "reviewer" },
+        prompt: `Read TASK.md and inspect the candidate implementation at ${path.join(candidateRoot, taskSpec.candidateFile)}. ${taskSpec.reviewerPrompt} Do not edit files or search outside the task repositories. Return only concrete findings and a clear approval or request-changes verdict.`,
+      });
+      stages.push(reviewer);
+      requireValidStage(reviewer);
+      sendCompanyMessage(workspace, {
+        from: "reviewer",
+        to: "coder",
+        type: "review",
+        priority: "high",
+        task: company.issueId,
+        text: reviewer.finalText || taskSpec.reviewerFallback,
+      });
+    }
 
-    const reviewer = await runPiStage({
-      name: "reviewer",
-      cwd: workspace,
-      stageModel: validatorModel,
-      timeoutMs: stageTimeout(deadline, stageTimeoutCaps.reviewer),
-      company: { root: workspace, agent: "reviewer", role: "reviewer" },
-      prompt: `Read TASK.md and inspect the candidate implementation at ${path.join(candidateRoot, taskSpec.candidateFile)}. ${taskSpec.reviewerPrompt} Do not edit files or search outside the task repositories. Return only concrete findings and a clear approval or request-changes verdict.`,
-    });
-    stages.push(reviewer);
-    requireValidStage(reviewer);
-    sendCompanyMessage(workspace, {
-      from: "reviewer",
-      to: "coder",
-      type: "review",
-      priority: "high",
-      task: company.issueId,
-      text: reviewer.finalText || taskSpec.reviewerFallback,
-    });
-
-    const coderRevise = await runPiStage({
-      name: "coder-revise",
-      cwd: candidateRoot,
-      stageModel: executorModel,
-      timeoutMs: stageTimeout(deadline, stageTimeoutCaps.coderRevise),
-      company: { root: workspace, agent: "coder", role: "coder" },
-      prompt: `Read TASK.md, the current ${taskSpec.candidateFile}, and the latest reviewer message in your pi-company inbox. Apply every valid correction, run focused self-checks, and leave the final implementation in ${taskSpec.candidateFile}. Work autonomously and finish the task now.`,
-    });
-    stages.push(coderRevise);
-    requireValidStage(coderRevise);
+    if (!hasStage(stages, "coder-revise")) {
+      const coderRevise = await runPiStage({
+        name: "coder-revise",
+        cwd: candidateRoot,
+        stageModel: executorModel,
+        timeoutMs: stageTimeout(deadline, stageTimeoutCaps.coderRevise),
+        company: { root: workspace, agent: "coder", role: "coder" },
+        prompt: `Read TASK.md, the current ${taskSpec.candidateFile}, and the latest reviewer message in your pi-company inbox. Apply every valid correction, run focused self-checks, and leave the final implementation in ${taskSpec.candidateFile}. Work autonomously and finish the task now.`,
+      });
+      stages.push(coderRevise);
+      requireValidStage(coderRevise);
+    }
   }
 
   checkRunSize();
@@ -986,6 +1008,21 @@ function setupCompany(root, advisorEnabled) {
   return { coderWorktree: plan.worktree, issueId: issue.id };
 }
 
+function loadExistingCompany(root) {
+  const state = loadState(root);
+  const coder = state.agents.coder;
+  const issue = Object.values(state.issues)[0];
+  if (!coder?.worktree || !fs.existsSync(coder.worktree)) {
+    fail(`Cannot resume without the coder worktree in ${root}`);
+  }
+  if (!issue) fail(`Cannot resume without a company issue in ${root}`);
+  return { coderWorktree: coder.worktree, issueId: issue.id };
+}
+
+function hasStage(stages, name) {
+  return stages.some((stage) => stage.name === name);
+}
+
 async function runPiStage({ name, cwd, prompt, stageModel, timeoutMs, company = null }) {
   checkRunSize();
   const args = [
@@ -1074,9 +1111,13 @@ function stageTimeout(deadline, cap) {
   return Math.max(1_000, Math.min(cap, deadline - Date.now()));
 }
 
-function readStageCheckpoints() {
+function readStageCheckpoints(options = {}) {
+  const { allowIncomplete = false, trimInvalidTail = false } = options;
   const checkpointPath = path.join(trialRoot, "stage-checkpoints.jsonl");
-  if (!fs.existsSync(checkpointPath)) fail(`Cannot finalize without stage checkpoints: ${checkpointPath}`);
+  if (!fs.existsSync(checkpointPath)) {
+    if (allowIncomplete) return [];
+    fail(`Cannot finalize without stage checkpoints: ${checkpointPath}`);
+  }
   const latest = new Map();
   for (const line of fs.readFileSync(checkpointPath, "utf8").split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -1086,9 +1127,17 @@ function readStageCheckpoints() {
   const expectedNames = variant === "plain"
     ? ["executor"]
     : ["tester-plan", "coder-implement", "reviewer", "coder-revise"];
-  const stages = expectedNames.map((name) => latest.get(name));
-  if (stages.some((stage) => !stage)) {
+  let stages = expectedNames.map((name) => latest.get(name));
+  if (!allowIncomplete && stages.some((stage) => !stage)) {
     fail(`Cannot finalize incomplete stages: expected ${expectedNames.join(", ")}`);
+  }
+  if (allowIncomplete) {
+    const validPrefix = [];
+    for (const stage of stages) {
+      if (!stage || !stageIsResumable(stage)) break;
+      validPrefix.push(stage);
+    }
+    stages = validPrefix;
   }
   const expectedModels = variant === "plain"
     ? [executorModel]
@@ -1101,7 +1150,15 @@ function readStageCheckpoints() {
   if (fs.readFileSync(path.join(trialRoot, "workspace", "TASK.md"), "utf8").trim() !== taskText.trim()) {
     fail(`Checkpoint task does not match --task ${taskId}`);
   }
+  if (trimInvalidTail) {
+    const serialized = stages.map((stage) => JSON.stringify({ ...stage, finalText: undefined })).join("\n");
+    fs.writeFileSync(checkpointPath, serialized ? `${serialized}\n` : "", "utf8");
+  }
   return stages;
+}
+
+function stageIsResumable(stage) {
+  return stage.timedOut || (stage.exitCode === 0 && (stage.errors || []).length === 0);
 }
 
 function createPiEventParser() {
