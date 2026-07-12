@@ -39,11 +39,12 @@ const advisorLosses = rewardDeltas.filter((value) => value < 0).length;
 const rewardTies = rewardDeltas.filter((value) => value === 0).length;
 const companyAggregate = aggregate(pairs.map((pair) => pair.company));
 const advisorAggregate = aggregate(pairs.map((pair) => pair.advisor));
+const advisorTriggerAggregate = aggregateAdvisorTriggers(pairs.map((pair) => pair.advisor));
 const scoreBootstrap = bootstrapMean(scoreDeltas, 100_000, 0x5a17c0de);
 
 const result = {
   schema_version: 1,
-  source_checkpoint: checkpointPath,
+  source_checkpoint: displayPath(checkpointPath),
   generated_at: new Date().toISOString(),
   protocol: {
     paired_tasks: pairs.length,
@@ -102,6 +103,11 @@ const result = {
     tasks_with_successful_advice: pairs.filter((pair) => number(pair.advisor.advisor_successful_calls) > 0).length,
     advisor_tokens: advisorAggregate.advisor_tokens,
     advisor_cost_usd: advisorAggregate.advisor_cost_usd,
+    trigger_events: advisorTriggerAggregate.triggers,
+    cleared_trigger_events: advisorTriggerAggregate.cleared_triggers,
+    triggered_consultations: advisorTriggerAggregate.triggered_consultations,
+    voluntary_consultations: advisorTriggerAggregate.voluntary_consultations,
+    trigger_reasons: advisorTriggerAggregate.reasons,
     failed_audits: pairs.flatMap((pair) => pair.advisor.advisor_failures || []),
   },
   tasks: pairs.map((pair) => ({
@@ -161,8 +167,30 @@ function compactCell(cell) {
     advisor_calls: number(cell.advisor_calls),
     advisor_successful_calls: number(cell.advisor_successful_calls),
     advisor_audit_statuses: cell.advisor_audit_statuses || [],
+    advisor_trigger_metrics: cell.advisor_trigger_metrics || null,
     grade_metrics: cell.grade_metrics || null,
   };
+}
+
+function aggregateAdvisorTriggers(values) {
+  const result = {
+    triggers: 0,
+    cleared_triggers: 0,
+    triggered_consultations: 0,
+    voluntary_consultations: 0,
+    reasons: {},
+  };
+  for (const value of values) {
+    const metrics = value.advisor_trigger_metrics || {};
+    result.triggers += number(metrics.triggers);
+    result.cleared_triggers += number(metrics.cleared_triggers);
+    result.triggered_consultations += number(metrics.triggered_consultations);
+    result.voluntary_consultations += number(metrics.voluntary_consultations);
+    for (const [reason, count] of Object.entries(metrics.reasons || {})) {
+      result.reasons[reason] = number(result.reasons[reason]) + number(count);
+    }
+  }
+  return result;
 }
 
 function aggregate(values) {
@@ -306,4 +334,11 @@ function number(value) {
 function readArg(name) {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : null;
+}
+
+function displayPath(file) {
+  const relative = path.relative(process.cwd(), file);
+  return relative && !relative.startsWith(`..${path.sep}`) && relative !== ".."
+    ? relative
+    : file;
 }

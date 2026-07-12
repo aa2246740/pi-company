@@ -100,7 +100,7 @@ async function runCellWithRetries(task, variant) {
         await waitWithProgress(waitMinutes * 60_000, task, variant);
         continue;
       }
-      const transient = /fetch failed|WebSocket error|ECONNRESET|ETIMEDOUT|socket hang up/i.test(message);
+      const transient = /fetch failed|WebSocket error|ECONNRESET|ETIMEDOUT|socket hang up|\bterminated\b/i.test(message);
       if (transient && transientAttempts < retryTransientErrors) {
         transientAttempts += 1;
         fs.rmSync(path.join(runRoot, task, variant), { recursive: true, force: true });
