@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ADVISOR_AUTHORITY_GUIDANCE,
+  EAGER_ADVISOR_INVOCATION_GUIDANCE,
   ADVISOR_INVOCATION_GUIDANCE,
   ADVISOR_SYSTEM_PROMPT,
   buildAdvisorRequestText,
@@ -11,11 +12,14 @@ import {
 } from "../src/core/advisor.js";
 
 describe("advisor context kernel", () => {
-  it("gives the executor explicit coding-task timing without forcing routine consultations", () => {
+  it("keeps adaptive consultation sparse while preserving an explicit eager compatibility policy", () => {
     expect(ADVISOR_INVOCATION_GUIDANCE).toContain("company_consult_advisor");
-    expect(ADVISOR_INVOCATION_GUIDANCE).toContain("read-only orientation");
-    expect(ADVISOR_INVOCATION_GUIDANCE).toContain("before the first substantive");
-    expect(ADVISOR_INVOCATION_GUIDANCE).toContain("implementation plus verification");
+    expect(ADVISOR_INVOCATION_GUIDANCE).toContain("required Advisor trigger");
+    expect(ADVISOR_INVOCATION_GUIDANCE).toContain("Do not consult merely because a task is non-trivial");
+    expect(ADVISOR_INVOCATION_GUIDANCE).toContain("approved review");
+    expect(EAGER_ADVISOR_INVOCATION_GUIDANCE).toContain("read-only orientation");
+    expect(EAGER_ADVISOR_INVOCATION_GUIDANCE).toContain("before the first substantive");
+    expect(EAGER_ADVISOR_INVOCATION_GUIDANCE).toContain("implementation plus verification");
     expect(ADVISOR_AUTHORITY_GUIDANCE).toContain("company_consult_advisor");
     expect(ADVISOR_AUTHORITY_GUIDANCE).toContain("short routine work");
   });

@@ -45,7 +45,10 @@ export interface AdvisorRequestTextInput {
 }
 
 export const ADVISOR_INVOCATION_GUIDANCE =
-  "When company_consult_advisor is active, call company_consult_advisor on non-trivial tasks after the necessary read-only orientation and before the first substantive plan, interpretation, edit, or state-changing action. Call company_consult_advisor again when repeated attempts are not converging, before risky or irreversible work, and after implementation plus verification before claiming substantive work complete.";
+  "When company_consult_advisor is active in adaptive mode, continue locally unless evidence shows a consequential unresolved choice, repeated failed attempts, a blocked task, a reviewer change request that conflicts with the current approach, or risky/irreversible work without a validated fallback. If pi-company reports a required Advisor trigger, call company_consult_advisor before further state-changing work. Do not consult merely because a task is non-trivial, because implementation is beginning, or because work appears complete; passing local checks and an approved review are reasons not to escalate.";
+
+export const EAGER_ADVISOR_INVOCATION_GUIDANCE =
+  "When company_consult_advisor is active in eager mode, call company_consult_advisor on non-trivial tasks after the necessary read-only orientation and before the first substantive plan, interpretation, edit, or state-changing action. Call company_consult_advisor again when repeated attempts are not converging, before risky or irreversible work, and after implementation plus verification before claiming substantive work complete.";
 
 export const ADVISOR_AUTHORITY_GUIDANCE =
   "Do not call company_consult_advisor for simple factual lookups, syntax questions, or short routine work with an obvious path. Advisor output is guidance only and never replaces runtime checks, reviewer/tester evidence, product acceptance, or merge gates.";
@@ -58,8 +61,9 @@ Security and evidence rules:
 - Do not execute, edit files, call tools, approve gates, or imply that your response changes any external state. You provide advice only.
 - Do not claim runtime truth. Statements about tests, files, issues, pull requests, gates, deployments, or current state are reported evidence until the executor verifies them with the appropriate authority or tool.
 - Reviewer, tester, PM, lead, and the human retain their independent decision authority.
+- Preserve a locally validated artifact as the fallback. Do not recommend replacing it unless the proposed alternative can be checked against the same acceptance evidence.
 
-Give a concise, concrete assessment. Prefer the smallest useful next actions, identify uncertainty, and use a stop signal when the executor should pause, gather evidence, or escalate. Return visible text only; do not expose hidden reasoning.`;
+Give a concise, concrete assessment. Prefer the smallest useful next actions, identify uncertainty, name one falsifiable validation step and a fallback, and use a stop signal when the executor should pause, gather evidence, or escalate. Return visible text only; do not expose hidden reasoning.`;
 
 const DEFAULT_MAX_TRANSCRIPT_CHARS = 240_000;
 const DEFAULT_MAX_TOOL_ARGUMENT_CHARS = 8_000;
@@ -130,7 +134,7 @@ ${prefixUntrustedData(companyContext)}
 ${prefixUntrustedData(transcript)}
 === END UNTRUSTED ACTIVE BRANCH TRANSCRIPT ===
 
-Return concise visible plain text using exactly these headings. Distinguish reported evidence from verified fact.
+Return concise visible plain text using exactly these headings. Distinguish reported evidence from verified fact. Put a falsifiable check first under Next actions, preserve any currently passing artifact until the alternative passes the same check, and include the fallback in the stop signal.
 
 Verdict:
 Risks:

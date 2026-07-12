@@ -305,10 +305,12 @@ Fallback 是全局的，不按每个 role 单独配置。某个 provider 出现 
 ## Advisor 模式
 
 Advisor 模式给 pi-company 原有的横向团队协作增加了一条纵向升级通道。lead
-或 coder 仍由快模型担任 executor；在制定关键方案、反复卡住、高风险操作和
-宣称完成之前，它可以调用无参数的 `company_consult_advisor`。pi-company 只
-暂停当前 executor，把有界的 Pi active branch 和只读公司快照交给已配置的
-强模型，再把建议作为同一 agent loop 的 tool result 原位返回。
+或 coder 仍由快模型担任 executor。默认 `adaptive` 策略会让它继续本地执行，
+直到出现值得升级的证据：同一 bash/写入操作连续失败、当前 issue 进入 blocked、
+reviewer 明确 request changes，或 executor 面临重大未决/高风险选择。此时
+pi-company 会在继续修改状态前强制调用无参数的 `company_consult_advisor`，但仍
+允许只读定位。它只暂停当前 executor，把有界的 Pi active branch 和只读公司
+快照交给已配置的强模型，再把建议作为同一 agent loop 的 tool result 原位返回。
 
 在 lead pane 运行 `/company-configure-models`，按三档配置：
 
@@ -321,18 +323,18 @@ Advisor 模式给 pi-company 原有的横向团队协作增加了一条纵向升
 `model_policy.roles.advisor` 时，工具不会发送 transcript，只会返回配置提示。
 只有 lead 和 coder executor 会拿到这个工具；reviewer/tester 会话保持独立。
 
-正常使用**不需要**在 prompt 里点名工具。`auto` 模式会把工具规则暴露给
-executor：非简单任务先做必要的只读定位，在第一次实质性规划或修改前咨询；
-遇到不收敛或高风险决策时咨询；实现和验证完成后、宣布完成前再咨询。短小、
-路径明确的常规工作保持本地执行。你可以在 Pi 会话的任意阶段控制它：
+正常使用**不需要**在 prompt 里点名工具。`auto` 模式同时保留两条升级路径：
+模型遇到真实不确定性时可以主动咨询；运行时则根据失败和 review 状态确定性触发。
+默认每个任务只允许一次已发送的自动咨询，避免强模型反复介入。你可以在 Pi 会话
+的任意阶段控制它：
 
 | 命令 | 当前 Pi 会话中的效果 |
 | --- | --- |
-| `/company-advisor auto` | 暴露工具，由 executor 仅在必要时咨询；`on` 是别名。 |
+| `/company-advisor auto` | 暴露工具并启用配置的 adaptive/eager 策略；`on` 是别名。 |
 | `/company-advisor once` | 武装一次真实咨询；provider payload 准备好、即将 dispatch 时才自动切到 `off`，此前的配置、队列、空上下文或 adapter 预处理失败不会消耗机会。 |
-| `/company-advisor off` | 隐藏工具；即使旧上下文残留 tool call，也会在读取或发送 transcript 前拦截。 |
+| `/company-advisor off` | 隐藏工具、立即取消 adaptive 写入门控；即使旧上下文残留 tool call，也会在读取或发送 transcript 前拦截。 |
 | `/company-advisor default` | 清除会话覆盖，重新跟随 `advisor_policy.enabled`。 |
-| `/company-advisor status` | 查看模式、来源、工具状态、模型和本轮用量；不带参数时也显示状态。 |
+| `/company-advisor status` | 查看模式、策略、来源、工具状态、模型、本轮/本任务用量和待处理 trigger 数；不带参数时也显示状态。 |
 
 这些命令不会注入 user message。模式保存在 Pi custom session entry 中，恢复
 会话或切换 session tree 时会还原，而且不会进入模型上下文。状态栏会持续显示
@@ -346,18 +348,24 @@ Pi 启动时显式传入的 `--tools` / `--exclude-tools` 是硬过滤，session
 ```yaml
 advisor_policy:
   enabled: true
-  max_uses_per_turn: 2
+  trigger_mode: adaptive
+  max_uses_per_turn: 1
+  max_uses_per_task: 1
+  repeat_failure_threshold: 2
   timeout_ms: 120000
   max_output_tokens: 4096
   max_transcript_chars: 240000
   max_company_context_chars: 24000
 ```
 
-`enabled: true` 表示项目默认 `auto`，`false` 表示默认 `off`；会话命令可以
-临时覆盖两者，不会改写 company 配置。
+`enabled: true` 表示项目默认 `auto`，`false` 表示默认 `off`。把
+`trigger_mode` 改为 `eager` 可恢复原先开工/卡住/完工 checkpoint 提示，但推荐
+使用 `adaptive`。`once` 会有意绕过自动任务预算。会话命令只临时覆盖可用性，
+不会改写 company 配置。
 
 Advisor 调用进入现有 provider 并发队列。事件日志只记录模型、状态、耗时、
-可用时的 token usage 和截断统计，不保存 transcript 或顾问正文；如果元数据
+可用时的 token usage、截断统计、trigger 原因和失败指纹哈希，不保存失败命令、
+tool output、transcript 或顾问正文；如果元数据
 写入失败，tool result 会明确返回审计 warning，不会悄悄吞掉。Advisor
 只能提供战略建议；reviewer/tester evidence、产品验收、lead brief、git 状态和
 merge gates 仍然是权威事实。

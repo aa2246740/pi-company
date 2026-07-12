@@ -102,6 +102,61 @@ const FIXTURES = {
     bytes: 2_255,
     sha256: "f3b101d9528efb3997937fa134b10e3773521bf83d576dab3183e977d12c9638",
   },
+  "circuit-fibsqrt/sim.c": {
+    repositoryPath: "tasks/circuit-fibsqrt/tests/sim.c",
+    bytes: 9_462,
+    sha256: "700645ac6156cdc88ec1e210f7c7d8d9969bb42aec969c410597e8efca796173",
+  },
+  "circuit-fibsqrt/gates.txt": {
+    repositoryPath: "tasks/circuit-fibsqrt/environment/gates.txt",
+    bytes: 438,
+    sha256: "032786f94f16605767c62bb61ce4dbba7ab7d3f1046712c975f01c9a04b6ad29",
+  },
+  "circuit-fibsqrt/test_outputs.py": {
+    repositoryPath: "tasks/circuit-fibsqrt/tests/test_outputs.py",
+    bytes: 3_710,
+    sha256: "6117b8edb7d567b30e32b16a9244bec4c131ec01e9065d52f6f53f87e36f0438",
+  },
+  "circuit-fibsqrt/solve.sh": {
+    repositoryPath: "tasks/circuit-fibsqrt/solution/solve.sh",
+    bytes: 13_686,
+    sha256: "a4ffab4183815a0eb7646abc1de1fc67695014c060d7ff16e8bca9ec94385d0b",
+  },
+  "llm-scheduler/requests_bucket_1.jsonl": {
+    repositoryPath: "tasks/llm-inference-batching-scheduler/environment/task_file/input_data/requests_bucket_1.jsonl",
+    bytes: 48_964,
+    sha256: "8b3cf1e2b06074162038064dd2c114abe308acd32cec7d365ee63ee81978f7de",
+  },
+  "llm-scheduler/requests_bucket_2.jsonl": {
+    repositoryPath: "tasks/llm-inference-batching-scheduler/environment/task_file/input_data/requests_bucket_2.jsonl",
+    bytes: 50_219,
+    sha256: "e15e2d4c4d55f875c42a6042610d6282f6c0657c39d3e0d0f087268252525cb5",
+  },
+  "llm-scheduler/cost_model.py": {
+    repositoryPath: "tasks/llm-inference-batching-scheduler/environment/task_file/scripts/cost_model.py",
+    bytes: 8_096,
+    sha256: "0cf417fd5ff0112defcd46970d37a290c0763c5a9092e91cb3ebb86c3f20e6ce",
+  },
+  "llm-scheduler/baseline_packer.py": {
+    repositoryPath: "tasks/llm-inference-batching-scheduler/environment/task_file/scripts/baseline_packer.py",
+    bytes: 4_380,
+    sha256: "547d230d5e6d93197803480cb81cab0ec6ac63fcfa0a24b246f549523f216c4e",
+  },
+  "llm-scheduler/test_outputs.py": {
+    repositoryPath: "tasks/llm-inference-batching-scheduler/tests/test_outputs.py",
+    bytes: 14_194,
+    sha256: "80b06b7c4ba0db28832b767d48be74bb462d7f5df5798d9cb58c4f1160d96ffa",
+  },
+  "llm-scheduler/cost_model_for_tests.py": {
+    repositoryPath: "tasks/llm-inference-batching-scheduler/tests/cost_model_for_tests.py",
+    bytes: 17_396,
+    sha256: "d3e810a99d40327fb8317f6512d879c52c6aeebdf5dcdc0c5e117c7df61c9ab9",
+  },
+  "llm-scheduler/solve.sh": {
+    repositoryPath: "tasks/llm-inference-batching-scheduler/solution/solve.sh",
+    bytes: 15_430,
+    sha256: "cb9efb586d76a893c3027e62029e286eb6c7583dc92dbf1840a3adc236a926d7",
+  },
 };
 
 export function ensurePinnedFixture(name, cacheRoot, proxyUrl = null) {
@@ -112,25 +167,44 @@ export function ensurePinnedFixture(name, cacheRoot, proxyUrl = null) {
 
   fs.mkdirSync(path.dirname(target), { recursive: true });
   const url = `https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/${TB21_COMMIT}/${fixture.repositoryPath}`;
-  const args = ["-fsSL", "--retry", "3", "--connect-timeout", "20"];
-  if (proxyUrl) args.push("--proxy", proxyUrl);
-  args.push(url);
-  const result = spawnSync("curl", args, {
-    encoding: null,
-    maxBuffer: 2 * 1024 * 1024,
-    timeout: 120_000,
-  });
-  if (result.status !== 0) {
-    throw new Error(`Failed to download ${name}: ${Buffer.from(result.stderr || "").toString("utf8").slice(-1_000)}`);
-  }
-  const data = Buffer.from(result.stdout || "");
+  const result = download(url, proxyUrl, 2 * 1024 * 1024);
+  let data = result.status === 0 ? Buffer.from(result.stdout || "") : Buffer.alloc(0);
+  let fallbackError = "";
   if (!verifyData(data, fixture)) {
-    throw new Error(`Downloaded fixture failed integrity verification: ${name}`);
+    const apiUrl = `https://api.github.com/repos/harbor-framework/terminal-bench-2-1/contents/${fixture.repositoryPath}?ref=${TB21_COMMIT}`;
+    const fallback = download(apiUrl, proxyUrl, 4 * 1024 * 1024);
+    if (fallback.status === 0) {
+      try {
+        const payload = JSON.parse(Buffer.from(fallback.stdout || "").toString("utf8"));
+        data = typeof payload.content === "string"
+          ? Buffer.from(payload.content.replace(/\s/g, ""), "base64")
+          : Buffer.alloc(0);
+      } catch (error) {
+        fallbackError = error instanceof Error ? error.message : String(error);
+      }
+    } else {
+      fallbackError = Buffer.from(fallback.stderr || "").toString("utf8").slice(-1_000);
+    }
+  }
+  if (!verifyData(data, fixture)) {
+    const rawError = Buffer.from(result.stderr || "").toString("utf8").slice(-1_000);
+    throw new Error(`Failed to download ${name}: ${fallbackError || rawError || "integrity mismatch"}`);
   }
   const temporary = `${target}.tmp-${process.pid}`;
   fs.writeFileSync(temporary, data);
   fs.renameSync(temporary, target);
   return target;
+}
+
+function download(url, proxyUrl, maxBuffer) {
+  const args = ["-fsSL", "--retry", "3", "--connect-timeout", "20"];
+  if (proxyUrl) args.push("--proxy", proxyUrl);
+  args.push(url);
+  return spawnSync("curl", args, {
+    encoding: null,
+    maxBuffer,
+    timeout: 120_000,
+  });
 }
 
 export function copyPinnedFixture(name, destination, cacheRoot, proxyUrl = null) {
@@ -177,6 +251,11 @@ export function compilePinnedElfFixture(destination, cacheRoot, proxyUrl = null)
 export function compilePinnedPathMystery(destination, cacheRoot, proxyUrl = null) {
   const source = ensurePinnedFixture("path-tracing-reverse/orig.c", cacheRoot, proxyUrl);
   return compile("cc", ["-O2", source, "-lm", "-o", destination], destination);
+}
+
+export function compilePinnedCircuitSimulator(destination, cacheRoot, proxyUrl = null) {
+  const source = ensurePinnedFixture("circuit-fibsqrt/sim.c", cacheRoot, proxyUrl);
+  return compile("cc", ["-O3", source, "-o", destination], destination);
 }
 
 function compile(command, args, destination) {

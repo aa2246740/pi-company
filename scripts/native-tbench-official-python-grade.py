@@ -97,20 +97,73 @@ def regex_checks(candidate: Path, fixture: Path) -> dict[str, object]:
     return {"checks": checks}
 
 
+def scheduler_checks(candidate: Path, fixture: Path, support_fixture: Path) -> dict[str, object]:
+    task_root = candidate / "task_file"
+    source = fixture.read_text(encoding="utf-8")
+    if "/app/task_file" not in source or "from .cost_model_for_tests import" not in source:
+        raise RuntimeError("Pinned scheduler verifier layout changed")
+    source = source.replace("/app/task_file", str(task_root))
+    source = source.replace(
+        "from .cost_model_for_tests import",
+        "from cost_model_for_tests import",
+    )
+
+    with tempfile.TemporaryDirectory(prefix="pi-company-scheduler-grade-") as temp:
+        module_root = Path(temp)
+        (module_root / "cost_model_for_tests.py").write_bytes(support_fixture.read_bytes())
+        sys.path.insert(0, str(module_root))
+        try:
+            namespace = load_namespace(source, str(fixture))
+            test_names = [
+                "test_output_files_exist",
+                "test_input_data_integrity",
+                "test_generate_and_schema",
+                "test_solution_shape_feasibility_and_batch_consistency",
+                "test_solution_coverage_no_duplicates",
+                "test_performance_thresholds",
+            ]
+            checks: list[dict[str, object]] = []
+            for name in test_names:
+                output = io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                        namespace[name]()
+                    checks.append({"name": name, "passed": True, "detail": "passed"})
+                except BaseException as exc:
+                    checks.append({
+                        "name": name,
+                        "passed": False,
+                        "detail": f"{type(exc).__name__}: {exc}",
+                        "trace": traceback.format_exc()[-4000:],
+                    })
+            return {"checks": checks}
+        finally:
+            sys.path.remove(str(module_root))
+            sys.modules.pop("cost_model_for_tests", None)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["dna", "regex"], required=True)
+    parser.add_argument("--mode", choices=["dna", "regex", "scheduler"], required=True)
     parser.add_argument("--candidate", type=Path, required=True)
     parser.add_argument("--fixture", type=Path, required=True)
+    parser.add_argument("--support-fixture", type=Path)
     args = parser.parse_args()
 
     if args.mode == "dna":
         result = dna_check(args.candidate.resolve(), args.fixture.resolve())
-    else:
+    elif args.mode == "regex":
         result = regex_checks(args.candidate.resolve(), args.fixture.resolve())
+    else:
+        if args.support_fixture is None:
+            parser.error("--support-fixture is required for scheduler mode")
+        result = scheduler_checks(
+            args.candidate.resolve(),
+            args.fixture.resolve(),
+            args.support_fixture.resolve(),
+        )
     print(json.dumps(result, ensure_ascii=True))
 
 
 if __name__ == "__main__":
     main()
-

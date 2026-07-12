@@ -25,7 +25,10 @@ export const DEFAULT_PROVIDER_REQUEST_POLICY: ProviderRequestPolicy = {
 
 export const DEFAULT_ADVISOR_POLICY: AdvisorPolicy = {
   enabled: true,
-  max_uses_per_turn: 2,
+  trigger_mode: "adaptive",
+  max_uses_per_turn: 1,
+  max_uses_per_task: 1,
+  repeat_failure_threshold: 2,
   timeout_ms: 120_000,
   max_output_tokens: 4_096,
   max_transcript_chars: 240_000,

@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import companyExtension from "../extensions/company.js";
 import {
   assignIssue,
+  blockTask,
   completeTask,
   createIssue,
   createPr,
@@ -153,6 +154,11 @@ describe("pi-company extension", () => {
     });
     writeYaml(companyPaths(root).config, {
       ...loadConfig(root),
+      advisor_policy: {
+        ...loadConfig(root)?.advisor_policy,
+        max_uses_per_turn: 2,
+        max_uses_per_task: 2,
+      },
       provider_request_policy: {
         max_concurrent_per_provider: 2,
         min_start_interval_ms: 0,
@@ -294,12 +300,12 @@ describe("pi-company extension", () => {
       | undefined;
     expect(advisorTool?.promptGuidelines).toHaveLength(2);
     expect(advisorTool?.promptGuidelines?.every((guideline) => guideline.includes("company_consult_advisor"))).toBe(true);
-    expect(advisorTool?.promptGuidelines?.join("\n")).toContain("read-only orientation");
-    expect(advisorTool?.promptGuidelines?.join("\n")).toContain("implementation plus verification");
+    expect(advisorTool?.promptGuidelines?.join("\n")).toContain("required Advisor trigger");
+    expect(advisorTool?.promptGuidelines?.join("\n")).toContain("Do not consult merely because a task is non-trivial");
 
     const prompt = await handlers.before_agent_start?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
-    expect(prompt.systemPrompt).toContain("may change during this agent run");
-    expect(prompt.systemPrompt).toContain("no user prompt is required");
+    expect(prompt.systemPrompt).toContain("Advisor mode is auto with adaptive strategy");
+    expect(prompt.systemPrompt).toContain("No user prompt is required");
     expect(activeToolNames()).toContain("company_consult_advisor");
     await advisorCommand.handler("off", ctx);
     expect(activeToolNames()).not.toContain("company_consult_advisor");
@@ -742,6 +748,187 @@ describe("pi-company extension", () => {
     const details = result.details.advisor as { sent: boolean; use?: number };
     expect(details.sent).toBe(false);
     expect(details).not.toHaveProperty("use");
+  });
+
+  it("requires adaptive advice after repeated tool failures, clears the gate, and enforces the task budget", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "advisor-adaptive-failure" });
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder", "Implement the assigned issue.");
+    registerAgent(root, { ...plan, status: "online" });
+    const issue = createIssue(root, "lead", "Repair a failing implementation", "Make the focused checks pass.", {
+      work_type: "implementation",
+    });
+    assignIssue(root, "lead", issue.id, "coder");
+    startTask(root, "coder", issue.id, "Beginning implementation.");
+    setModelPolicy(root, "lead", "role", "advisor", {
+      provider: "strong-provider",
+      model: "reasoner",
+      thinking: "high",
+    });
+    const { handlers, pi, tools } = fakePi({
+      "company-root": root,
+      "company-agent": "coder",
+      "company-role": "coder",
+    });
+    const { ctx } = fakeContext(plan.worktree ?? plan.cwd);
+    (ctx as unknown as { modelRegistry: unknown }).modelRegistry = {
+      refresh: vi.fn(),
+      find: vi.fn(() => fakeAdvisorModel()),
+      getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "advisor-key" })),
+    };
+    const getBranch = vi.fn(() => [
+      { type: "message", message: { role: "user", content: "Repair the implementation." } },
+      { type: "message", message: { role: "assistant", content: "The same focused check failed twice." } },
+    ]);
+    (ctx as unknown as { sessionManager: unknown }).sessionManager = {
+      getBranch,
+      getSessionId: vi.fn(() => "session-adaptive-failure"),
+    };
+    piAiMocks.completeSimple.mockResolvedValue({
+      content: [{ type: "text", text: "Change the invariant, then rerun the focused check before broad tests." }],
+      stopReason: "stop",
+      usage: { input: 120, output: 30 },
+    });
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    await handlers.before_agent_start?.({ systemPrompt: "base" }, ctx);
+    const failedResult = {
+      type: "tool_result",
+      toolName: "bash",
+      input: { command: "npm test -- focused" },
+      content: [{ type: "text", text: "Command exited with code 1" }],
+      details: undefined,
+      isError: true,
+    };
+    await handlers.tool_result?.({ ...failedResult, toolCallId: "failure-1" }, ctx);
+    await handlers.tool_result?.({ ...failedResult, toolCallId: "failure-2" }, ctx);
+
+    const readAllowed = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "read-after-trigger",
+      toolName: "read",
+      input: { path: "src/index.ts" },
+    }, ctx);
+    const writeBlocked = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "write-after-trigger",
+      toolName: "write",
+      input: { path: "src/index.ts", content: "export {};" },
+    }, ctx) as { block?: boolean; reason?: string } | undefined;
+    expect(readAllowed).toBeUndefined();
+    expect(writeBlocked).toMatchObject({ block: true });
+    expect(writeBlocked?.reason).toContain("repeated tool failures");
+    expect(writeBlocked?.reason).toContain("company_consult_advisor");
+
+    const tool = tools.find((item) => item.name === "company_consult_advisor");
+    if (!tool) throw new Error("company_consult_advisor was not registered");
+    const advice = await tool.execute("adaptive-advice", {}, undefined, undefined, ctx) as ToolResult;
+    expect(advice.content[0].text).toContain("Change the invariant");
+    const writeAllowed = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "write-after-advice",
+      toolName: "write",
+      input: { path: "src/index.ts", content: "export {};" },
+    }, ctx);
+    expect(writeAllowed).toBeUndefined();
+
+    await handlers.before_agent_start?.({ systemPrompt: "next" }, ctx);
+    getBranch.mockClear();
+    const taskLimited = await tool.execute("adaptive-advice-again", {}, undefined, undefined, ctx) as ToolResult;
+    expect(taskLimited.content[0].text).toContain("automatic use limit reached for task");
+    expect(getBranch).not.toHaveBeenCalled();
+    expect(piAiMocks.completeSimple).toHaveBeenCalledTimes(1);
+
+    const events = fs.readFileSync(companyPaths(root).events, "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line) as { type: string; data: Record<string, unknown> });
+    expect(events.filter((event) => event.type === "advisor.triggered")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "advisor.trigger_cleared")).toHaveLength(1);
+    const success = events.find((event) => event.type === "advisor.invoked" && event.data.status === "success");
+    expect(success?.data).toMatchObject({
+      task_id: issue.id,
+      automatic: true,
+      trigger_reasons: ["repeated_tool_failure"],
+    });
+    const eventText = fs.readFileSync(companyPaths(root).events, "utf8");
+    expect(eventText).not.toContain("npm test -- focused");
+    expect(eventText).not.toContain("Command exited with code 1");
+    await handlers.session_shutdown?.({}, ctx);
+  });
+
+  it("arms adaptive triggers from blocked task state and reviewer change requests, while off bypasses the gate", async () => {
+    const root = tempRoot();
+    initCompany({ root, id: "advisor-adaptive-company-state" });
+    const plan = requestAgentSpawn(root, "lead", "coder", "coder", "Resolve review feedback.");
+    registerAgent(root, { ...plan, status: "online" });
+    const issue = createIssue(root, "lead", "Resolve review feedback", "Correct the reviewed implementation.", {
+      work_type: "implementation",
+    });
+    assignIssue(root, "lead", issue.id, "coder");
+    startTask(root, "coder", issue.id, "Review pass starting.");
+    blockTask(root, "coder", issue.id, "Current approach conflicts with the observed behavior.");
+    sendCompanyMessage(root, {
+      from: "reviewer",
+      to: "coder",
+      type: "review",
+      task: issue.id,
+      text: "Verdict: REQUEST CHANGES. The current invariant is incorrect.",
+    });
+    sendCompanyMessage(root, {
+      from: "reviewer",
+      to: "coder",
+      type: "review",
+      task: issue.id,
+      text: "Follow-up note: no blocking findings in the unrelated documentation; approved as written.",
+    });
+    setModelPolicy(root, "lead", "role", "advisor", {
+      provider: "strong-provider",
+      model: "reasoner",
+      thinking: "high",
+    });
+    const { handlers, pi, commands } = fakePi({
+      "company-root": root,
+      "company-agent": "coder",
+      "company-role": "coder",
+    });
+    const { ctx } = fakeContext(plan.worktree ?? plan.cwd);
+
+    companyExtension(pi);
+    await handlers.session_start?.({}, ctx);
+    const prompt = await handlers.before_agent_start?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
+    expect(prompt.systemPrompt).toContain("Required adaptive escalation");
+    expect(prompt.systemPrompt).toContain("task is blocked");
+    expect(prompt.systemPrompt).toContain("review requested changes");
+    const blocked = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "edit-under-review-trigger",
+      toolName: "edit",
+      input: { path: "src/index.ts", oldText: "a", newText: "b" },
+    }, ctx);
+    expect(blocked).toMatchObject({ block: true });
+
+    const advisorCommand = commands.find((command) => command.name === "company-advisor");
+    if (!advisorCommand) throw new Error("company-advisor was not registered");
+    await advisorCommand.handler("off", ctx);
+    const allowedWhileOff = await handlers.tool_call?.({
+      type: "tool_call",
+      toolCallId: "edit-with-advisor-off",
+      toolName: "edit",
+      input: { path: "src/index.ts", oldText: "a", newText: "b" },
+    }, ctx);
+    expect(allowedWhileOff).toBeUndefined();
+    const triggerEvents = fs.readFileSync(companyPaths(root).events, "utf8")
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { type: string; data: Record<string, unknown> })
+      .filter((event) => event.type === "advisor.triggered");
+    expect(triggerEvents.map((event) => event.data.reason).sort()).toEqual([
+      "review_changes_requested",
+      "task_blocked",
+    ]);
+    await handlers.session_shutdown?.({}, ctx);
   });
 
   it("stays inactive in ordinary Pi sessions outside a company project", async () => {

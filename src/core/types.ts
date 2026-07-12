@@ -30,6 +30,8 @@ export type EventType =
   | "merge.requested"
   | "merge.completed"
   | "merge.blocked"
+  | "advisor.triggered"
+  | "advisor.trigger_cleared"
   | "advisor.invoked"
   | "rate_limit.reported"
   | "rate_limit.cleared";
@@ -140,8 +142,14 @@ export interface ProviderRequestPolicy {
 export interface AdvisorPolicy {
   /** Project default: auto when true, off when false. The current Pi session can override it. */
   enabled: boolean;
+  /** Adaptive escalates from runtime evidence; eager preserves the original checkpoint-heavy prompt policy. */
+  trigger_mode: "adaptive" | "eager";
   /** Claude-style max_uses guard, reset for each executor turn. */
   max_uses_per_turn: number;
+  /** Persistent cost guard for automatic consultations on one assigned issue. `once` bypasses it. */
+  max_uses_per_task: number;
+  /** Identical failing write/bash attempts needed before adaptive mode requires consultation. */
+  repeat_failure_threshold: number;
   timeout_ms: number;
   max_output_tokens: number;
   /** Hard privacy/cost ceiling applied after model-context sizing. */

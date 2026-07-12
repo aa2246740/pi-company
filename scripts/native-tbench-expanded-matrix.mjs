@@ -19,6 +19,8 @@ const defaultTasks = [
   "path-tracing-reverse",
   "regex-chess",
   "polyglot-rust-c",
+  "circuit-fibsqrt",
+  "llm-inference-batching-scheduler",
 ];
 
 const runRoot = path.resolve(readArg("--run-root") || path.join(os.tmpdir(), "pi-company-expanded-matrix"));
@@ -30,6 +32,7 @@ const validatorModel = readArg("--validator-model") || executorModel;
 const advisorModel = readArg("--advisor-model") || strongModel;
 const minFreeGiB = readArg("--min-free-gib") || "5";
 const maxRunMiB = readArg("--max-run-mib") || "250";
+const timeMultiplier = readArg("--time-multiplier") || "1";
 const retryUsageLimits = nonNegativeIntegerArg("--retry-usage-limits", 0);
 const retryTransientErrors = nonNegativeIntegerArg("--retry-transient-errors", 0);
 const keepTrials = process.argv.includes("--keep-trials");
@@ -71,6 +74,7 @@ process.stdout.write(`${JSON.stringify({
   checkpoint: checkpointPath,
   tasks: selectedTasks,
   variants: selectedVariants,
+  time_multiplier: Number(timeMultiplier),
   completed_cells: selectedTasks.reduce(
     (count, task) => count + selectedVariants.filter((variant) => completed.has(`${task}:${variant}`)).length,
     0,
@@ -122,6 +126,7 @@ function runCell(task, variant) {
     "--codex-client-compat",
     "--min-free-gib", minFreeGiB,
     "--max-run-mib", maxRunMiB,
+    "--time-multiplier", timeMultiplier,
   ];
   if (proxyUrl) args.push("--proxy", proxyUrl);
   return new Promise((resolve, reject) => {
@@ -179,9 +184,20 @@ function readCheckpoints(file) {
   for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
     if (!line.trim()) continue;
     const value = JSON.parse(line);
+    if (!checkpointMatchesProtocol(value)) continue;
     values.set(`${value.task}:${value.variant}`, value);
   }
   return values;
+}
+
+function checkpointMatchesProtocol(value) {
+  return Number(value.time_multiplier ?? 1) === Number(timeMultiplier) &&
+    value.model_matrix?.executor === `openai-codex/${executorModel}` &&
+    value.model_matrix?.tester === `openai-codex/${validatorModel}` &&
+    value.model_matrix?.reviewer === `openai-codex/${validatorModel}` &&
+    value.model_matrix?.advisor === `openai-codex/${advisorModel}` &&
+    value.advisor_policy?.trigger_mode === "adaptive" &&
+    value.advisor_policy?.max_uses_per_task === 1;
 }
 
 function parseTasks(raw) {

@@ -887,7 +887,12 @@ export function normalizeRateLimitPolicy(policy?: Partial<RateLimitPolicy> | nul
 export function normalizeAdvisorPolicy(policy?: Partial<AdvisorPolicy> | null): AdvisorPolicy {
   return {
     enabled: typeof policy?.enabled === "boolean" ? policy.enabled : DEFAULT_ADVISOR_POLICY.enabled,
+    trigger_mode: policy?.trigger_mode === "eager" || policy?.trigger_mode === "adaptive"
+      ? policy.trigger_mode
+      : DEFAULT_ADVISOR_POLICY.trigger_mode,
     max_uses_per_turn: Math.max(1, Math.floor(finitePositiveNumber(policy?.max_uses_per_turn, DEFAULT_ADVISOR_POLICY.max_uses_per_turn))),
+    max_uses_per_task: Math.max(1, Math.floor(finitePositiveNumber(policy?.max_uses_per_task, DEFAULT_ADVISOR_POLICY.max_uses_per_task))),
+    repeat_failure_threshold: Math.max(2, Math.floor(finitePositiveNumber(policy?.repeat_failure_threshold, DEFAULT_ADVISOR_POLICY.repeat_failure_threshold))),
     timeout_ms: finitePositiveNumber(policy?.timeout_ms, DEFAULT_ADVISOR_POLICY.timeout_ms),
     max_output_tokens: Math.max(256, Math.floor(finitePositiveNumber(policy?.max_output_tokens, DEFAULT_ADVISOR_POLICY.max_output_tokens))),
     max_transcript_chars: Math.max(4_000, Math.floor(finitePositiveNumber(policy?.max_transcript_chars, DEFAULT_ADVISOR_POLICY.max_transcript_chars))),

@@ -350,11 +350,13 @@ their current model until they are restarted or changed inside Pi.
 ## Advisor Mode
 
 Advisor mode adds vertical escalation to pi-company's existing horizontal team.
-A fast lead or coder remains the executor. On non-trivial work it can orient with
-read-only tools, then call the parameterless `company_consult_advisor` before its
-first substantive plan or change, when stuck or high-risk, and after implementation
-plus verification before claiming completion. Pi-company pauses only that executor,
-sends a bounded copy of its active Pi
+A fast lead or coder remains the executor. In the default `adaptive` strategy it
+continues locally until there is evidence worth escalating: the same bash/write
+attempt fails repeatedly, the assigned issue is blocked, a reviewer explicitly
+requests changes, or the executor faces a consequential unresolved or risky choice.
+Pi-company then requires the parameterless `company_consult_advisor` before more
+state-changing work, while leaving read-only orientation available. It pauses only
+that executor, sends a bounded copy of its active Pi
 branch plus a read-only company snapshot to the configured advisor model, and
 returns the advice as the tool result in the same agent loop.
 
@@ -370,17 +372,19 @@ to be launched. If `model_policy.roles.advisor` is absent, the tool sends nothin
 and returns setup guidance. Only lead and coder executor sessions receive the tool;
 reviewer and tester sessions stay independent.
 
-Normal use does **not** require a prompt that names the tool. In `auto` mode the
-active tool guidelines tell the executor when to escalate, and the fast model
-decides autonomously. Control availability at any point in the Pi session:
+Normal use does **not** require a prompt that names the tool. In `auto` mode both
+the executor and the runtime can escalate: the model may ask on genuine uncertainty,
+while deterministic runtime triggers cover observable failures and review state.
+The default task budget suppresses repeated consultations after one sent automatic
+attempt. Control availability at any point in the Pi session:
 
 | Command | Effect in the current Pi session |
 | --- | --- |
-| `/company-advisor auto` | Expose the tool and let the executor consult it only when useful. `/company-advisor on` is an alias. |
+| `/company-advisor auto` | Expose the tool and enable the configured adaptive/eager strategy. `/company-advisor on` is an alias. |
 | `/company-advisor once` | Arm one real consultation; it switches to `off` when the provider payload is ready to dispatch. Setup, queue, empty-context, and pre-payload adapter failures do not consume it. |
-| `/company-advisor off` | Hide the tool and reject a stale tool call without reading or sending the transcript. |
+| `/company-advisor off` | Hide the tool, disable any adaptive write gate immediately, and reject a stale tool call without reading or sending the transcript. |
 | `/company-advisor default` | Clear the session override and follow `advisor_policy.enabled`. |
-| `/company-advisor status` | Show mode, source, active-tool state, model, and current turn usage. With no argument, the command also shows status. |
+| `/company-advisor status` | Show mode, strategy, source, active-tool state, model, turn/task usage, and pending trigger count. With no argument, the command also shows status. |
 
 These commands do not inject a user message. The mode is stored as a Pi custom
 session entry, restored across resume/tree navigation, and excluded from model
@@ -395,19 +399,26 @@ The project default and budgets can be tuned in `.pi-company/company.yaml`:
 ```yaml
 advisor_policy:
   enabled: true
-  max_uses_per_turn: 2
+  trigger_mode: adaptive
+  max_uses_per_turn: 1
+  max_uses_per_task: 1
+  repeat_failure_threshold: 2
   timeout_ms: 120000
   max_output_tokens: 4096
   max_transcript_chars: 240000
   max_company_context_chars: 24000
 ```
 
-`enabled: true` means the project default is `auto`; `false` means `off`. A
-session command can override either value without rewriting company configuration.
+`enabled: true` means the project default is `auto`; `false` means `off`.
+`trigger_mode: eager` restores the original start/stuck/final checkpoint guidance,
+but `adaptive` is the recommended default. `once` intentionally bypasses the
+automatic per-task budget. A session command can override availability without
+rewriting company configuration.
 
 Advisor calls use the same provider concurrency queue as company agents. The event
-log records model, status, duration, token usage when available, and truncation
-statistics, but never the transcript or advice text. If that metadata write fails,
+log records model, status, duration, token usage when available, truncation
+statistics, trigger reasons, and hashed failure fingerprints, but never the failed
+command, tool output, transcript, or advice text. If that metadata write fails,
 the tool result returns an explicit audit warning instead of hiding the loss. Advisor output is strategic
 guidance only: reviewer/tester evidence, product acceptance, lead brief, git state,
 and merge gates remain authoritative.

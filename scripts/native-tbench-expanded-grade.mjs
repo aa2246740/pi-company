@@ -8,6 +8,7 @@ import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import zlib from "node:zlib";
 import {
+  compilePinnedCircuitSimulator,
   compilePinnedElfFixture,
   compilePinnedPathMystery,
   ensurePinnedFixture,
@@ -25,6 +26,8 @@ const EXPANDED_TASKS = new Set([
   "path-tracing-reverse",
   "regex-chess",
   "polyglot-rust-c",
+  "circuit-fibsqrt",
+  "llm-inference-batching-scheduler",
 ]);
 const GCODE_EXPECTED = "flag{gc0d3_iz_ch4LLenGiNg}";
 const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
@@ -38,6 +41,8 @@ export async function gradeExpandedCandidate(taskId, candidateRoot, options = {}
   if (taskId === "extract-elf") return gradeExtractElf(root, options);
   if (taskId === "path-tracing-reverse") return gradePathTracingReverse(root, options);
   if (taskId === "regex-chess") return gradeRegexChess(root, options);
+  if (taskId === "circuit-fibsqrt") return gradeCircuitFibSqrt(root, options);
+  if (taskId === "llm-inference-batching-scheduler") return gradeLlmScheduler(root, options);
   return gradePolyglot(root);
 }
 
@@ -516,13 +521,112 @@ async function runCases(executable, cases) {
   return { passed: true, detail: `${cases.length} Fibonacci cases passed` };
 }
 
-async function runPythonDriver(mode, root, fixture, options, timeoutMs) {
-  const run = await spawnCaptured("python3.13", [
+async function gradeCircuitFibSqrt(root, options) {
+  const candidate = path.join(root, "gates.txt");
+  const exists = fs.existsSync(candidate);
+  const checks = [check("gates_txt_exists", exists, exists ? "present" : "missing")];
+  if (!exists) return missingResult(checks, 7, "gates.txt");
+
+  const lines = fs.readFileSync(candidate, "utf8")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  checks.push(check("line_limit", lines.length < 32_000, `lines=${lines.length}; limit<32000`));
+  const gatePattern = /^out\d+\s*=\s*(?:[01]|~?out\d+|out\d+\s*[&|^]\s*out\d+)$/;
+  checks.push(check(
+    "gate_syntax",
+    lines.length > 0 && lines.every((line) => gatePattern.test(line)),
+    `valid=${lines.filter((line) => gatePattern.test(line)).length}/${lines.length}`,
+  ));
+
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-company-circuit-grade-"));
+  try {
+    const simulator = compilePinnedCircuitSimulator(
+      path.join(temp, "sim"),
+      graderCache(options),
+      options.proxyUrl,
+    );
+    const groups = [
+      [1, 4, 8, 12, 41, 42, 107, 220, 209, 366],
+      [12, 41, 42, 107, 220, 209].map((value) => value ** 2),
+      [12, 41, 42, 107, 220, 209].map((value) => value ** 2 - 1),
+      [12, 41, 42, 107, 220, 209].map((value) => value ** 2 + 1),
+    ];
+    for (const [index, inputs] of groups.entries()) {
+      const result = await runCircuitCases(simulator, root, inputs);
+      checks.push(check(`fibsqrt_group_${index + 1}`, result.passed, result.detail));
+    }
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+  return completeResult(checks, {
+    task: "circuit-fibsqrt",
+    terminal_bench_commit: TB21_COMMIT,
+    gate_lines: lines.length,
+    official_cases: 28,
+  });
+}
+
+async function runCircuitCases(simulator, cwd, inputs) {
+  for (const input of inputs) {
+    const run = await spawnCaptured(simulator, [String(input)], {
+      cwd,
+      timeoutMs: 120_000,
+      maxOutputBytes: 64 * 1024,
+    });
+    const actual = run.stdout.toString("utf8").trim();
+    const expected = fibSqrtExpected(input);
+    if (run.exitCode !== 0 || run.timedOut || run.outputOverflow || actual !== expected) {
+      return { passed: false, detail: `n=${input} expected=${expected} actual=${actual}; ${commandDetail(run)}` };
+    }
+  }
+  return { passed: true, detail: `${inputs.length} official cases passed` };
+}
+
+function fibSqrtExpected(input) {
+  const n = Math.floor(Math.sqrt(input));
+  let a = 0n;
+  let b = 1n;
+  for (let index = 0; index < n; index += 1) {
+    [a, b] = [b, a + b];
+  }
+  return String(a % (2n ** 32n));
+}
+
+async function gradeLlmScheduler(root, options) {
+  const verifier = ensurePinnedFixture("llm-scheduler/test_outputs.py", graderCache(options), options.proxyUrl);
+  const costModel = ensurePinnedFixture("llm-scheduler/cost_model_for_tests.py", graderCache(options), options.proxyUrl);
+  const run = await runPythonDriver("scheduler", root, verifier, options, 120_000, costModel);
+  const expectedNames = [
+    "test_output_files_exist",
+    "test_input_data_integrity",
+    "test_generate_and_schema",
+    "test_solution_shape_feasibility_and_batch_consistency",
+    "test_solution_coverage_no_duplicates",
+    "test_performance_thresholds",
+  ];
+  const reported = new Map((run.result?.checks || []).map((item) => [item.name, item]));
+  const checks = expectedNames.map((name) => {
+    const item = reported.get(name);
+    return check(name, item?.passed === true, item?.detail || run.error || "official verifier did not report this check");
+  });
+  const planPaths = [1, 2].map((bucket) => path.join(root, "task_file", "output_data", `plan_b${bucket}.jsonl`));
+  return completeResult(checks, {
+    task: "llm-inference-batching-scheduler",
+    terminal_bench_commit: TB21_COMMIT,
+    plan_bytes: planPaths.map((file) => fs.existsSync(file) ? fs.statSync(file).size : 0),
+  });
+}
+
+async function runPythonDriver(mode, root, fixture, options, timeoutMs, supportFixture = null) {
+  const args = [
     pythonDriver,
     "--mode", mode,
     "--candidate", root,
     "--fixture", fixture,
-  ], {
+  ];
+  if (supportFixture) args.push("--support-fixture", supportFixture);
+  const run = await spawnCaptured("python3.13", args, {
     timeoutMs,
     maxOutputBytes: MAX_CAPTURE_BYTES,
     env: pythonEnv(options),
@@ -710,11 +814,32 @@ async function createOracle(taskId, root, options) {
     writeDnaOracle(taskId, root, options);
     return;
   }
+  if (taskId === "llm-inference-batching-scheduler") {
+    copySchedulerDevelopmentFixtures(root, options);
+    const source = ensurePinnedFixture("llm-scheduler/solve.sh", graderCache(options), options.proxyUrl);
+    const script = path.join(root, ".scheduler-oracle.sh");
+    fs.writeFileSync(
+      script,
+      fs.readFileSync(source, "utf8").replaceAll("/app/task_file", path.join(root, "task_file")),
+      "utf8",
+    );
+    const run = await spawnCaptured("bash", [script], {
+      cwd: root,
+      timeoutMs: 120_000,
+      maxOutputBytes: 16 * 1024 * 1024,
+    });
+    fs.rmSync(script, { force: true });
+    if (run.exitCode !== 0 || run.timedOut || run.outputOverflow) {
+      throw new Error(`Oracle solution failed for ${taskId}: ${commandDetail(run)}`);
+    }
+    return;
+  }
   const solutionNames = {
     "extract-elf": "extract-elf/solve.sh",
     "path-tracing-reverse": "path-tracing-reverse/solve.sh",
     "regex-chess": "regex-chess/solve.sh",
     "polyglot-rust-c": "polyglot-rust-c/solve.sh",
+    "circuit-fibsqrt": "circuit-fibsqrt/solve.sh",
   };
   const solution = ensurePinnedFixture(solutionNames[taskId], graderCache(options), options.proxyUrl);
   const bin = path.join(root, ".oracle-bin");
@@ -730,6 +855,21 @@ async function createOracle(taskId, root, options) {
   fs.rmSync(bin, { recursive: true, force: true });
   if (run.exitCode !== 0 || run.timedOut || run.outputOverflow) {
     throw new Error(`Oracle solution failed for ${taskId}: ${commandDetail(run)}`);
+  }
+}
+
+function copySchedulerDevelopmentFixtures(root, options) {
+  const fixtures = [
+    ["llm-scheduler/requests_bucket_1.jsonl", "task_file/input_data/requests_bucket_1.jsonl"],
+    ["llm-scheduler/requests_bucket_2.jsonl", "task_file/input_data/requests_bucket_2.jsonl"],
+    ["llm-scheduler/cost_model.py", "task_file/scripts/cost_model.py"],
+    ["llm-scheduler/baseline_packer.py", "task_file/scripts/baseline_packer.py"],
+  ];
+  for (const [name, relative] of fixtures) {
+    const source = ensurePinnedFixture(name, graderCache(options), options.proxyUrl);
+    const destination = path.join(root, relative);
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.copyFileSync(source, destination);
   }
 }
 
@@ -813,6 +953,13 @@ function createNegative(taskId, root) {
     ].join("\n"), "utf8");
   } else if (taskId === "regex-chess") {
     fs.writeFileSync(path.join(root, "re.json"), "[]\n", "utf8");
+  } else if (taskId === "circuit-fibsqrt") {
+    fs.writeFileSync(path.join(root, "gates.txt"), "out0 = 0\n", "utf8");
+  } else if (taskId === "llm-inference-batching-scheduler") {
+    const output = path.join(root, "task_file", "output_data");
+    fs.mkdirSync(output, { recursive: true });
+    fs.writeFileSync(path.join(output, "plan_b1.jsonl"), "{}\n", "utf8");
+    fs.writeFileSync(path.join(output, "plan_b2.jsonl"), "{}\n", "utf8");
   }
 }
 
@@ -874,4 +1021,3 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.exitCode = 2;
   });
 }
-

@@ -25,6 +25,7 @@ import { companyPaths } from "../dist/src/core/paths.js";
 import { gradeExpandedCandidate } from "./native-tbench-expanded-grade.mjs";
 import { gradeExtraCandidate } from "./native-tbench-extra-grade.mjs";
 import {
+  compilePinnedCircuitSimulator,
   compileDeterministicDecompressor,
   compilePinnedElfFixture,
   compilePinnedPathMystery,
@@ -56,6 +57,7 @@ const proxyUrl = readArg("--proxy")
 const thinking = "high";
 const minFreeGiB = positiveNumberArg("--min-free-gib", 10);
 const maxRunMiB = positiveNumberArg("--max-run-mib", 250);
+const timeMultiplier = positiveNumberArg("--time-multiplier", 1);
 const minFreeBytes = minFreeGiB * 1024 ** 3;
 const maxRunBytes = maxRunMiB * 1024 ** 2;
 const failureLogTailBytes = 512 * 1024;
@@ -68,6 +70,8 @@ const expandedTaskIds = new Set([
   "path-tracing-reverse",
   "regex-chess",
   "polyglot-rust-c",
+  "circuit-fibsqrt",
+  "llm-inference-batching-scheduler",
 ]);
 
 const taskSpecs = {
@@ -390,12 +394,85 @@ The current repository root is the native local mapping of /app. Work autonomous
     testerFallback: "Check identical source bytes under both parsers, compilation, argv handling, Fibonacci indexing, exact output, integer range, and self-containment.",
     reviewerFallback: "Correct any Rust/C++ lexical, compilation, indexing, output, range, or self-containment defect before finishing.",
   },
+  "circuit-fibsqrt": {
+    timeoutMs: 40 * 60_000,
+    stageTimeoutCaps: {
+      plain: 40 * 60_000,
+      tester: 4 * 60_000,
+      coderImplement: 28 * 60_000,
+      reviewer: 3 * 60_000,
+      coderRevise: 5 * 60_000,
+    },
+    candidateFile: "gates.txt",
+    issueTitle: "Implement Fibonacci of integer square root with logic gates",
+    fixtures: [
+      ["circuit-fibsqrt/sim.c", "sim.c"],
+      ["circuit-fibsqrt/gates.txt", "gates.txt"],
+    ],
+    text: `The file /app/sim.c is a logic-gate simulator. Create /app/gates.txt with fewer than 32,000 lines. Each line must define one signal using only constants, copy, NOT, AND, OR, or XOR in these forms:
+
+outX = outY
+outX = 0
+outX = 1
+outX = ~outY
+outX = outY & outZ
+outX = outY | outZ
+outX = outY ^ outZ
+
+The first 32 signals receive the 32-bit input. After 32,000 simulation steps, the final 32 signals are printed as an unsigned integer. For every input N, running /app/sim N must output fib(isqrt(N)) modulo 2^32, with fib(0)=0 and fib(1)=1. For example, N=208 must output 377 and N=20000 must output 1407432322.
+
+The current repository root is the native local mapping of /app. Compile sim.c locally, test squares and their adjacent boundary values, work autonomously, and do not ask the user questions.`,
+    plainPrompt: "Design a compact gate-level sequential or combinational implementation, compile the pinned simulator, and validate square-root boundaries plus large Fibonacci wraparound cases.",
+    testerPrompt: "Develop an independent checklist for signal ordering, 32-bit bit order, sequential settling, integer-square-root boundaries, Fibonacci recurrence, modulo wraparound, parser grammar, and the 32,000-line cap.",
+    coderPrompt: "Replace the example gates.txt with a complete implementation, compile sim.c to sim, and repeatedly test the official examples plus n^2-1, n^2, and n^2+1 boundaries.",
+    reviewerPrompt: "Review it read-only with a freshly compiled simulator; test parser validity, line count, bit order, square-root boundaries, Fibonacci indexing, modulo behavior, and independence from generated side files.",
+    testerFallback: "Check parser grammar, signal order, input/output bit order, convergence, integer square root, Fibonacci recurrence, modulo 2^32, and line count.",
+    reviewerFallback: "Correct any gate syntax, bit-order, convergence, square-root, Fibonacci, wraparound, or line-limit defect before finishing.",
+  },
+  "llm-inference-batching-scheduler": {
+    timeoutMs: 25 * 60_000,
+    stageTimeoutCaps: {
+      plain: 25 * 60_000,
+      tester: 3 * 60_000,
+      coderImplement: 15 * 60_000,
+      reviewer: 3 * 60_000,
+      coderRevise: 4 * 60_000,
+    },
+    candidateFile: "task_file/output_data/plan_b1.jsonl",
+    issueTitle: "Optimize static-graph LLM inference batching",
+    fixtures: [
+      ["llm-scheduler/requests_bucket_1.jsonl", "task_file/input_data/requests_bucket_1.jsonl"],
+      ["llm-scheduler/requests_bucket_2.jsonl", "task_file/input_data/requests_bucket_2.jsonl"],
+      ["llm-scheduler/cost_model.py", "task_file/scripts/cost_model.py"],
+      ["llm-scheduler/baseline_packer.py", "task_file/scripts/baseline_packer.py"],
+    ],
+    text: `Read the two request streams under /app/task_file/input_data and create:
+
+/app/task_file/output_data/plan_b1.jsonl
+/app/task_file/output_data/plan_b2.jsonl
+
+Each JSONL record must assign one request_id to a batch_id and a shape with seq_align, heads_align=32, and hidden_align=4096. Include every request exactly once. All records in one batch must use one shape. seq_align must be a multiple of 64 and cover the aligned prompt length. Across both plans use at most eight unique shapes.
+
+Use the supplied cost_model.py and baseline_packer.py. Both buckets must satisfy all thresholds:
+- bucket 1: cost <= 3.0e11, pad_ratio <= 0.055, p95_latency_ms <= 2.1e6, sequential_timecost <= 2.7e8
+- bucket 2: cost <= 4.8e10, pad_ratio <= 0.15, p95_latency_ms <= 2.1e5, sequential_timecost <= 3.2e7
+
+Do not modify either input JSONL file. The current repository root is the native local mapping of /app. Work autonomously and do not ask the user questions.`,
+    plainPrompt: "Analyze the exact cost model, optimize shared shape selection and batch grouping across both buckets, emit both plans, and verify every schema, coverage, feasibility, and performance constraint.",
+    testerPrompt: "Develop an independent checklist for input integrity, exact coverage, duplicates, batch shape consistency, 64 alignment, global shape count, all four metrics per bucket, and JSONL schema.",
+    coderPrompt: "Use the supplied analytical model to generate both optimized plans, measure the final metrics yourself, and preserve the input files byte-for-byte.",
+    reviewerPrompt: "Review both plans read-only with an independent copy of the cost model; verify coverage, no duplicates, shape feasibility and consistency, the global eight-shape cap, input hashes, and every threshold.",
+    testerFallback: "Check input hashes, output existence, JSONL schema, exact coverage, duplicates, shape feasibility, batch consistency, global shape cap, and every performance threshold.",
+    reviewerFallback: "Correct any input-integrity, coverage, schema, shape, batching, cost, padding, latency, or sequential-time defect before finishing.",
+  },
 };
 const taskSpec = taskSpecs[taskId];
 if (!taskSpec) fail(`Unknown task ${taskId}. Supported tasks: ${Object.keys(taskSpecs).join(", ")}`);
 const taskText = taskSpec.text;
-const variantTimeoutMs = taskSpec.timeoutMs;
-const stageTimeoutCaps = taskSpec.stageTimeoutCaps;
+const variantTimeoutMs = Math.round(taskSpec.timeoutMs * timeMultiplier);
+const stageTimeoutCaps = Object.fromEntries(
+  Object.entries(taskSpec.stageTimeoutCaps).map(([stage, timeoutMs]) => [stage, Math.round(timeoutMs * timeMultiplier)]),
+);
 
 const gradeOnly = readArg("--grade-candidate");
 if (gradeOnly) {
@@ -410,7 +487,7 @@ if (gradeOnly) {
 
 const variant = readArg("--variant");
 if (!new Set(["plain", "company", "company-advisor"]).has(variant)) {
-  fail(`Usage: node scripts/native-tbench-advisor-eval.mjs --variant plain|company|company-advisor [--task ${Object.keys(taskSpecs).join("|")}] [--run-root PATH] [--executor-model MODEL] [--strong-model MODEL] [--validator-model MODEL] [--advisor-model MODEL] [--codex-client-compat] [--proxy URL] [--min-free-gib N] [--max-run-mib N] [--prepare-only] [--finalize-existing]`);
+  fail(`Usage: node scripts/native-tbench-advisor-eval.mjs --variant plain|company|company-advisor [--task ${Object.keys(taskSpecs).join("|")}] [--run-root PATH] [--executor-model MODEL] [--strong-model MODEL] [--validator-model MODEL] [--advisor-model MODEL] [--time-multiplier N] [--codex-client-compat] [--proxy URL] [--min-free-gib N] [--max-run-mib N] [--prepare-only] [--finalize-existing]`);
 }
 
 const requestedRoot = readArg("--run-root");
@@ -577,9 +654,11 @@ async function main() {
       reviewer: validatorModel,
       advisor: advisorModel,
     },
+    advisor_policy: variant === "plain" ? null : loadConfig(workspace)?.advisor_policy ?? null,
     thinking,
     codex_client_compat_version: useCodexClientCompat ? "0.144.1" : null,
     network_proxy: Boolean(proxyUrl),
+    time_multiplier: timeMultiplier,
     time_budget_ms: variantTimeoutMs,
     started_at: startedAt,
     ended_at: endedAt,
@@ -595,6 +674,7 @@ async function main() {
     tool_calls: aggregate.toolCalls,
     advisor_calls: aggregate.advisorCalls,
     advisor_successful_calls: advisorAudit.successfulCalls,
+    advisor_trigger_metrics: advisorAudit.triggerMetrics,
     advisor_audit_statuses: advisorAudit.statuses,
     advisor_failures: advisorAudit.failures,
     stage_summaries: stages.map((stage) => ({
@@ -680,6 +760,14 @@ function prepareWorkspaceFixtures(workspace) {
       proxyUrl,
     );
     generated.push("mystery");
+  }
+  if (taskId === "circuit-fibsqrt") {
+    compilePinnedCircuitSimulator(
+      path.join(workspace, "sim"),
+      path.join(sharedRoot, "fixture-cache"),
+      proxyUrl,
+    );
+    generated.push("sim");
   }
   return [...fixtures.map(([, relativeDestination]) => relativeDestination), ...generated];
 }
@@ -786,7 +874,14 @@ function setupCompany(root, advisorEnabled) {
 
   const config = loadConfig(root);
   if (!config) fail(`Company config was not created at ${root}`);
-  config.advisor_policy = { ...config.advisor_policy, enabled: advisorEnabled, max_uses_per_turn: 2 };
+  config.advisor_policy = {
+    ...config.advisor_policy,
+    enabled: advisorEnabled,
+    trigger_mode: "adaptive",
+    max_uses_per_turn: 1,
+    max_uses_per_task: 1,
+    repeat_failure_threshold: 2,
+  };
   config.provider_request_policy = {
     ...config.provider_request_policy,
     max_concurrent_per_provider: 1,
@@ -1040,13 +1135,36 @@ function readAdvisorAudit(root) {
   const statuses = [];
   const failures = [];
   let successfulCalls = 0;
+  const triggerReasons = {};
+  let triggers = 0;
+  let clearedTriggers = 0;
+  let triggeredConsultations = 0;
+  let voluntaryConsultations = 0;
   const eventsPath = companyPaths(root).events;
-  if (!fs.existsSync(eventsPath)) return { usage, statuses, failures, successfulCalls };
+  if (!fs.existsSync(eventsPath)) {
+    return {
+      usage,
+      statuses,
+      failures,
+      successfulCalls,
+      triggerMetrics: { triggers, cleared_triggers: clearedTriggers, reasons: triggerReasons, triggered_consultations: triggeredConsultations, voluntary_consultations: voluntaryConsultations },
+    };
+  }
 
   for (const line of fs.readFileSync(eventsPath, "utf8").split(/\r?\n/)) {
     if (!line.trim()) continue;
     let event;
     try { event = JSON.parse(line); } catch { continue; }
+    if (event?.type === "advisor.triggered") {
+      triggers += 1;
+      const reason = typeof event.data?.reason === "string" ? event.data.reason : "unknown";
+      triggerReasons[reason] = (triggerReasons[reason] || 0) + 1;
+      continue;
+    }
+    if (event?.type === "advisor.trigger_cleared") {
+      clearedTriggers += Array.isArray(event.data?.trigger_ids) ? event.data.trigger_ids.length : 0;
+      continue;
+    }
     if (event?.type !== "advisor.invoked") continue;
     const status = typeof event.data?.status === "string" ? event.data.status : "unknown";
     statuses.push(status);
@@ -1058,10 +1176,24 @@ function readAdvisorAudit(root) {
       continue;
     }
     successfulCalls += 1;
+    if (Array.isArray(event.data?.trigger_ids) && event.data.trigger_ids.length > 0) triggeredConsultations += 1;
+    else voluntaryConsultations += 1;
     addUsage(usage, event.data?.usage);
   }
   usage.total_tokens = usage.input + usage.output + usage.cache_read + usage.cache_write;
-  return { usage, statuses, failures, successfulCalls };
+  return {
+    usage,
+    statuses,
+    failures,
+    successfulCalls,
+    triggerMetrics: {
+      triggers,
+      cleared_triggers: clearedTriggers,
+      reasons: triggerReasons,
+      triggered_consultations: triggeredConsultations,
+      voluntary_consultations: voluntaryConsultations,
+    },
+  };
 }
 
 function combineUsage(...values) {

@@ -2714,7 +2714,10 @@ Rate limit 已过期，可以恢复正常工作`);
   it("normalizes invalid advisor policy values to bounded defaults", () => {
     const normalized = normalizeAdvisorPolicy({
       enabled: "yes" as any,
+      trigger_mode: "sometimes" as any,
       max_uses_per_turn: 0,
+      max_uses_per_task: 0,
+      repeat_failure_threshold: 1,
       timeout_ms: Number.NaN,
       max_output_tokens: 10,
       max_transcript_chars: 100,
@@ -2722,7 +2725,10 @@ Rate limit 已过期，可以恢复正常工作`);
     });
 
     expect(normalized.enabled).toBe(DEFAULT_ADVISOR_POLICY.enabled);
+    expect(normalized.trigger_mode).toBe(DEFAULT_ADVISOR_POLICY.trigger_mode);
     expect(normalized.max_uses_per_turn).toBe(DEFAULT_ADVISOR_POLICY.max_uses_per_turn);
+    expect(normalized.max_uses_per_task).toBe(DEFAULT_ADVISOR_POLICY.max_uses_per_task);
+    expect(normalized.repeat_failure_threshold).toBe(2);
     expect(normalized.timeout_ms).toBe(DEFAULT_ADVISOR_POLICY.timeout_ms);
     expect(normalized.max_output_tokens).toBe(256);
     expect(normalized.max_transcript_chars).toBe(4_000);

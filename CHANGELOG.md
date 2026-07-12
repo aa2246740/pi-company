@@ -11,7 +11,7 @@ This project follows [Semantic Versioning](https://semver.org/).
   fast executor to `model_policy.roles.advisor` inside the same Pi agent loop.
 - Added bounded active-branch serialization with tool calls/results, first-goal
   and newest-evidence retention, prompt-injection boundaries, timeout/output/context
-  budgets, and a two-use-per-turn default.
+  budgets, a one-use-per-turn default, and a persistent one-use-per-task automatic budget.
 - Advisor requests participate in the provider queue and respect provider backoff.
 - Added metadata-only `advisor.invoked` audit events; transcripts and advice text
   are never persisted by pi-company.
@@ -26,8 +26,14 @@ This project follows [Semantic Versioning](https://semver.org/).
   so mid-run active-tool changes, request-scoped provider env, and `max` thinking are supported.
 - Deferred dynamic tool registration to `session_start`, after Pi 0.80 has bound
   extension action methods.
-- Strengthened active-tool guidance for coding tasks: read-only orientation first,
-  then advisor checkpoints before substantive work and after implementation plus verification.
+- Replaced eager default checkpoints with an adaptive runtime: repeated failing
+  bash/write attempts, blocked tasks, and explicit reviewer change requests create
+  metadata-only triggers and gate state-changing tools until consultation.
+- Added `advisor_policy.trigger_mode` (`adaptive` or compatibility `eager`),
+  `max_uses_per_task`, and `repeat_failure_threshold`. Explicit `once` bypasses the
+  automatic task budget, and `off` immediately bypasses the adaptive gate.
+- Advisor guidance now asks for a falsifiable validation step and fallback while
+  preserving any locally passing artifact until an alternative passes the same check.
 
 ## 0.3.0 — OKF v3 adversarial orchestration
 
