@@ -3,6 +3,7 @@ dist/
 .pi-company/
 .impeccable/
 .ai-bridge/
+.benchmark-work/
 .DS_Store
 *.log
 .env

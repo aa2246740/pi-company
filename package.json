@@ -1,6 +1,6 @@
 {
   "name": "pi-company",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Run visible Pi agents like a local project team.",
   "license": "Apache-2.0",
   "homepage": "https://aa2246740.github.io/pi-company/",
@@ -48,17 +48,18 @@
     "yaml": "^2.8.1"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.78.0",
+    "@earendil-works/pi-ai": "^0.80.6",
+    "@earendil-works/pi-coding-agent": "^0.80.6",
     "@types/node": "^24.10.1",
     "tsx": "^4.20.6",
-    "typescript": "^5.9.3",
     "typebox": "^1.1.39",
+    "typescript": "^5.9.3",
     "vitest": "^4.0.14"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-agent-core": "*",
-    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": ">=0.80.6",
+    "@earendil-works/pi-coding-agent": ">=0.80.6",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },

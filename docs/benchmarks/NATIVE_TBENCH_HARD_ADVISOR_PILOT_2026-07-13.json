@@ -1,0 +1,303 @@
+{
+  "schema_version": 1,
+  "source_checkpoint": ".benchmark-work/native-tbench-no-ceiling-pilot-2x.jsonl",
+  "generated_at": "2026-07-12T17:58:17.473Z",
+  "protocol": {
+    "paired_tasks": 3,
+    "executor": "openai-codex/gpt-5.6-luna",
+    "tester": "openai-codex/gpt-5.6-luna",
+    "reviewer": "openai-codex/gpt-5.6-luna",
+    "advisor": "openai-codex/gpt-5.6-sol",
+    "thinking": "high"
+  },
+  "quality": {
+    "company": {
+      "rewards": 1,
+      "tasks": 3,
+      "checks_passed": 18,
+      "checks_total": 29,
+      "mean_task_score": 0.6397306397306397,
+      "reward_wilson_95": [
+        0.06149194472039621,
+        0.7923403991979522
+      ]
+    },
+    "advisor": {
+      "rewards": 2,
+      "tasks": 3,
+      "checks_passed": 25,
+      "checks_total": 29,
+      "mean_task_score": 0.8518518518518517,
+      "reward_wilson_95": [
+        0.2076596008020477,
+        0.9385080552796037
+      ]
+    },
+    "paired_reward": {
+      "advisor_wins": 1,
+      "advisor_losses": 0,
+      "ties": 2,
+      "mean_delta": 0.3333333333333333,
+      "exact_mcnemar_p_two_sided": 1
+    },
+    "paired_task_score": {
+      "mean_delta": 0.21212121212121213,
+      "median_delta": 0,
+      "bootstrap_mean_delta_95": [
+        0,
+        0.6363636363636364
+      ],
+      "exact_sign_p_two_sided": 1,
+      "exact_sign_flip_mean_p_two_sided": 1,
+      "cohen_dz": 0.5773502691896258
+    }
+  },
+  "efficiency": {
+    "company": {
+      "rewards": 1,
+      "checks_passed": 18,
+      "checks_total": 29,
+      "duration_ms": 3639804,
+      "total_tokens": 8529989,
+      "cost_usd": 2.1715134000000003,
+      "tool_calls": 380,
+      "advisor_calls": 0,
+      "advisor_successful_calls": 0,
+      "advisor_tokens": 0,
+      "advisor_cost_usd": 0
+    },
+    "advisor": {
+      "rewards": 2,
+      "checks_passed": 25,
+      "checks_total": 29,
+      "duration_ms": 3126100,
+      "total_tokens": 7918990,
+      "cost_usd": 2.2268834,
+      "tool_calls": 357,
+      "advisor_calls": 2,
+      "advisor_successful_calls": 2,
+      "advisor_tokens": 51655,
+      "advisor_cost_usd": 0.290875
+    },
+    "advisor_delta_percent": {
+      "duration_ms": -14.113507210827835,
+      "total_tokens": -7.162951792786599,
+      "cost_usd": 2.549834599224665,
+      "tool_calls": -6.052631578947365
+    }
+  },
+  "advisor_uptake": {
+    "tool_calls": 2,
+    "successful_calls": 2,
+    "tasks_with_successful_advice": 2,
+    "advisor_tokens": 51655,
+    "advisor_cost_usd": 0.290875,
+    "trigger_events": 1,
+    "cleared_trigger_events": 1,
+    "triggered_consultations": 1,
+    "voluntary_consultations": 1,
+    "trigger_reasons": {
+      "repeated_tool_failure": 1
+    },
+    "failed_audits": []
+  },
+  "tasks": [
+    {
+      "task": "protein-assembly",
+      "company": {
+        "reward": 0,
+        "checks_passed": 5,
+        "checks_total": 9,
+        "task_score": 0.5555555555555556,
+        "duration_ms": 1641683,
+        "total_tokens": 4445983,
+        "cost_usd": 0.9667174000000002,
+        "tool_calls": 155,
+        "advisor_calls": 0,
+        "advisor_successful_calls": 0,
+        "advisor_audit_statuses": [],
+        "advisor_trigger_metrics": {
+          "triggers": 0,
+          "cleared_triggers": 0,
+          "reasons": {},
+          "triggered_consultations": 0,
+          "voluntary_consultations": 0
+        },
+        "grade_metrics": {
+          "task": "protein-assembly",
+          "terminal_bench_commit": "a0c400b1138e8c2272c2fc7daa4fa35199b43bef",
+          "nucleotides": 2523,
+          "amino_acids": 841,
+          "component_indices": [
+            0,
+            -1,
+            256,
+            419,
+            659
+          ],
+          "linker_lengths": [],
+          "gc_windows": 2474,
+          "min_gc_per_50": 20,
+          "max_gc_per_50": 30
+        }
+      },
+      "advisor": {
+        "reward": 0,
+        "checks_passed": 5,
+        "checks_total": 9,
+        "task_score": 0.5555555555555556,
+        "duration_ms": 1227028,
+        "total_tokens": 4025125,
+        "cost_usd": 1.0534518000000002,
+        "tool_calls": 139,
+        "advisor_calls": 1,
+        "advisor_successful_calls": 1,
+        "advisor_audit_statuses": [
+          "success"
+        ],
+        "advisor_trigger_metrics": {
+          "triggers": 1,
+          "cleared_triggers": 1,
+          "reasons": {
+            "repeated_tool_failure": 1
+          },
+          "triggered_consultations": 1,
+          "voluntary_consultations": 0
+        },
+        "grade_metrics": {
+          "task": "protein-assembly",
+          "terminal_bench_commit": "a0c400b1138e8c2272c2fc7daa4fa35199b43bef",
+          "nucleotides": 2523,
+          "amino_acids": 841,
+          "component_indices": [
+            0,
+            -1,
+            256,
+            419,
+            659
+          ],
+          "linker_lengths": [],
+          "gc_windows": 2474,
+          "min_gc_per_50": 18,
+          "max_gc_per_50": 32
+        }
+      },
+      "reward_delta": 0,
+      "task_score_delta": 0
+    },
+    {
+      "task": "db-wal-recovery",
+      "company": {
+        "reward": 1,
+        "checks_passed": 9,
+        "checks_total": 9,
+        "task_score": 1,
+        "duration_ms": 896575,
+        "total_tokens": 1893915,
+        "cost_usd": 0.5430362,
+        "tool_calls": 115,
+        "advisor_calls": 0,
+        "advisor_successful_calls": 0,
+        "advisor_audit_statuses": [],
+        "advisor_trigger_metrics": {
+          "triggers": 0,
+          "cleared_triggers": 0,
+          "reasons": {},
+          "triggered_consultations": 0,
+          "voluntary_consultations": 0
+        },
+        "grade_metrics": {
+          "task": "db-wal-recovery",
+          "terminal_bench_commit": "a0c400b1138e8c2272c2fc7daa4fa35199b43bef",
+          "records": 11,
+          "exact_records": 11
+        }
+      },
+      "advisor": {
+        "reward": 1,
+        "checks_passed": 9,
+        "checks_total": 9,
+        "task_score": 1,
+        "duration_ms": 730962,
+        "total_tokens": 1714276,
+        "cost_usd": 0.4640901999999999,
+        "tool_calls": 105,
+        "advisor_calls": 0,
+        "advisor_successful_calls": 0,
+        "advisor_audit_statuses": [],
+        "advisor_trigger_metrics": {
+          "triggers": 0,
+          "cleared_triggers": 0,
+          "reasons": {},
+          "triggered_consultations": 0,
+          "voluntary_consultations": 0
+        },
+        "grade_metrics": {
+          "task": "db-wal-recovery",
+          "terminal_bench_commit": "a0c400b1138e8c2272c2fc7daa4fa35199b43bef",
+          "records": 11,
+          "exact_records": 11
+        }
+      },
+      "reward_delta": 0,
+      "task_score_delta": 0
+    },
+    {
+      "task": "raman-fitting",
+      "company": {
+        "reward": 0,
+        "checks_passed": 4,
+        "checks_total": 11,
+        "task_score": 0.36363636363636365,
+        "duration_ms": 1101546,
+        "total_tokens": 2190091,
+        "cost_usd": 0.6617598,
+        "tool_calls": 110,
+        "advisor_calls": 0,
+        "advisor_successful_calls": 0,
+        "advisor_audit_statuses": [],
+        "advisor_trigger_metrics": {
+          "triggers": 0,
+          "cleared_triggers": 0,
+          "reasons": {},
+          "triggered_consultations": 0,
+          "voluntary_consultations": 0
+        },
+        "grade_metrics": {
+          "task": "raman-fitting",
+          "parameters_passed": 1,
+          "parameters_total": 8
+        }
+      },
+      "advisor": {
+        "reward": 1,
+        "checks_passed": 11,
+        "checks_total": 11,
+        "task_score": 1,
+        "duration_ms": 1168110,
+        "total_tokens": 2179589,
+        "cost_usd": 0.7093414,
+        "tool_calls": 113,
+        "advisor_calls": 1,
+        "advisor_successful_calls": 1,
+        "advisor_audit_statuses": [
+          "success"
+        ],
+        "advisor_trigger_metrics": {
+          "triggers": 0,
+          "cleared_triggers": 0,
+          "reasons": {},
+          "triggered_consultations": 0,
+          "voluntary_consultations": 1
+        },
+        "grade_metrics": {
+          "task": "raman-fitting",
+          "parameters_passed": 8,
+          "parameters_total": 8
+        }
+      },
+      "reward_delta": 1,
+      "task_score_delta": 0.6363636363636364
+    }
+  ]
+}

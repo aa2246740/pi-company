@@ -1,0 +1,345 @@
+{
+  "schema_version": 1,
+  "source_checkpoint": ".benchmark-work/native-tbench-adaptive-holdout-2x.jsonl",
+  "generated_at": "2026-07-12T13:10:10.689Z",
+  "protocol": {
+    "paired_tasks": 4,
+    "executor": "openai-codex/gpt-5.6-luna",
+    "tester": "openai-codex/gpt-5.6-luna",
+    "reviewer": "openai-codex/gpt-5.6-luna",
+    "advisor": "openai-codex/gpt-5.6-sol",
+    "thinking": "high"
+  },
+  "quality": {
+    "company": {
+      "rewards": 4,
+      "tasks": 4,
+      "checks_passed": 24,
+      "checks_total": 24,
+      "mean_task_score": 1,
+      "reward_wilson_95": [
+        0.5101091635454027,
+        1
+      ]
+    },
+    "advisor": {
+      "rewards": 4,
+      "tasks": 4,
+      "checks_passed": 24,
+      "checks_total": 24,
+      "mean_task_score": 1,
+      "reward_wilson_95": [
+        0.5101091635454027,
+        1
+      ]
+    },
+    "paired_reward": {
+      "advisor_wins": 0,
+      "advisor_losses": 0,
+      "ties": 4,
+      "mean_delta": 0,
+      "exact_mcnemar_p_two_sided": 1
+    },
+    "paired_task_score": {
+      "mean_delta": 0,
+      "median_delta": 0,
+      "bootstrap_mean_delta_95": [
+        0,
+        0
+      ],
+      "exact_sign_p_two_sided": 1,
+      "exact_sign_flip_mean_p_two_sided": 1,
+      "cohen_dz": 0
+    }
+  },
+  "efficiency": {
+    "company": {
+      "rewards": 4,
+      "checks_passed": 24,
+      "checks_total": 24,
+      "duration_ms": 5746622,
+      "total_tokens": 14992602,
+      "cost_usd": 3.5460458,
+      "tool_calls": 527,
+      "advisor_calls": 0,
+      "advisor_successful_calls": 0,
+      "advisor_tokens": 0,
+      "advisor_cost_usd": 0
+    },
+    "advisor": {
+      "rewards": 4,
+      "checks_passed": 24,
+      "checks_total": 24,
+      "duration_ms": 7930807,
+      "total_tokens": 29182246,
+      "cost_usd": 5.499537600000001,
+      "tool_calls": 616,
+      "advisor_calls": 3,
+      "advisor_successful_calls": 3,
+      "advisor_tokens": 36508,
+      "advisor_cost_usd": 0.231165
+    },
+    "advisor_delta_percent": {
+      "duration_ms": 38.00815505178521,
+      "total_tokens": 94.64430523801006,
+      "cost_usd": 55.08929974903316,
+      "tool_calls": 16.88804554079697
+    }
+  },
+  "advisor_uptake": {
+    "tool_calls": 3,
+    "successful_calls": 3,
+    "tasks_with_successful_advice": 3,
+    "advisor_tokens": 36508,
+    "advisor_cost_usd": 0.231165,
+    "trigger_events": 4,
+    "cleared_trigger_events": 4,
+    "triggered_consultations": 3,
+    "voluntary_consultations": 0,
+    "trigger_reasons": {
+      "repeated_tool_failure": 2,
+      "review_changes_requested": 2
+    },
+    "failed_audits": []
+  },
+  "tasks": [
+    {
+      "task": "llm-inference-batching-scheduler",
+      "company": {
+        "reward": 1,
+        "checks_passed": 6,
+        "checks_total": 6,
+        "task_score": 1,
+        "duration_ms": 730883,
+        "total_tokens": 1889750,
+        "cost_usd": 0.548089,
+        "tool_calls": 99,
+        "advisor_calls": 0,
+        "advisor_successful_calls": 0,
+        "advisor_audit_statuses": [],
+        "advisor_trigger_metrics": {
+          "triggers": 0,
+          "cleared_triggers": 0,
+          "reasons": {},
+          "triggered_consultations": 0,
+          "voluntary_consultations": 0
+        },
+        "grade_metrics": {
+          "task": "llm-inference-batching-scheduler",
+          "terminal_bench_commit": "a0c400b1138e8c2272c2fc7daa4fa35199b43bef",
+          "plan_bytes": [
+            132800,
+            133600
+          ]
+        }
+      },
+      "advisor": {
+        "reward": 1,
+        "checks_passed": 6,
+        "checks_total": 6,
+        "task_score": 1,
+        "duration_ms": 1126396,
+        "total_tokens": 3932740,
+        "cost_usd": 0.7726138000000002,
+        "tool_calls": 123,
+        "advisor_calls": 0,
+        "advisor_successful_calls": 0,
+        "advisor_audit_statuses": [],
+        "advisor_trigger_metrics": {
+          "triggers": 0,
+          "cleared_triggers": 0,
+          "reasons": {},
+          "triggered_consultations": 0,
+          "voluntary_consultations": 0
+        },
+        "grade_metrics": {
+          "task": "llm-inference-batching-scheduler",
+          "terminal_bench_commit": "a0c400b1138e8c2272c2fc7daa4fa35199b43bef",
+          "plan_bytes": [
+            88099,
+            89512
+          ]
+        }
+      },
+      "reward_delta": 0,
+      "task_score_delta": 0
+    },
+    {
+      "task": "polyglot-rust-c",
+      "company": {
+        "reward": 1,
+        "checks_passed": 5,
+        "checks_total": 5,
+        "task_score": 1,
+        "duration_ms": 1111617,
+        "total_tokens": 2076743,
+        "cost_usd": 0.6208866,
+        "tool_calls": 116,
+        "advisor_calls": 0,
+        "advisor_successful_calls": 0,
+        "advisor_audit_statuses": [],
+        "advisor_trigger_metrics": {
+          "triggers": 0,
+          "cleared_triggers": 0,
+          "reasons": {},
+          "triggered_consultations": 0,
+          "voluntary_consultations": 0
+        },
+        "grade_metrics": {
+          "task": "polyglot-rust-c",
+          "cases": 5
+        }
+      },
+      "advisor": {
+        "reward": 1,
+        "checks_passed": 5,
+        "checks_total": 5,
+        "task_score": 1,
+        "duration_ms": 1220063,
+        "total_tokens": 1278552,
+        "cost_usd": 0.49446540000000005,
+        "tool_calls": 77,
+        "advisor_calls": 1,
+        "advisor_successful_calls": 1,
+        "advisor_audit_statuses": [
+          "success"
+        ],
+        "advisor_trigger_metrics": {
+          "triggers": 1,
+          "cleared_triggers": 1,
+          "reasons": {
+            "repeated_tool_failure": 1
+          },
+          "triggered_consultations": 1,
+          "voluntary_consultations": 0
+        },
+        "grade_metrics": {
+          "task": "polyglot-rust-c",
+          "cases": 5
+        }
+      },
+      "reward_delta": 0,
+      "task_score_delta": 0
+    },
+    {
+      "task": "circuit-fibsqrt",
+      "company": {
+        "reward": 1,
+        "checks_passed": 7,
+        "checks_total": 7,
+        "task_score": 1,
+        "duration_ms": 1549792,
+        "total_tokens": 5254078,
+        "cost_usd": 1.1287366000000003,
+        "tool_calls": 148,
+        "advisor_calls": 0,
+        "advisor_successful_calls": 0,
+        "advisor_audit_statuses": [],
+        "advisor_trigger_metrics": {
+          "triggers": 0,
+          "cleared_triggers": 0,
+          "reasons": {},
+          "triggered_consultations": 0,
+          "voluntary_consultations": 0
+        },
+        "grade_metrics": {
+          "task": "circuit-fibsqrt",
+          "terminal_bench_commit": "a0c400b1138e8c2272c2fc7daa4fa35199b43bef",
+          "gate_lines": 24241,
+          "official_cases": 28
+        }
+      },
+      "advisor": {
+        "reward": 1,
+        "checks_passed": 7,
+        "checks_total": 7,
+        "task_score": 1,
+        "duration_ms": 3179004,
+        "total_tokens": 15142382,
+        "cost_usd": 2.5990668,
+        "tool_calls": 227,
+        "advisor_calls": 1,
+        "advisor_successful_calls": 1,
+        "advisor_audit_statuses": [
+          "success"
+        ],
+        "advisor_trigger_metrics": {
+          "triggers": 1,
+          "cleared_triggers": 1,
+          "reasons": {
+            "repeated_tool_failure": 1
+          },
+          "triggered_consultations": 1,
+          "voluntary_consultations": 0
+        },
+        "grade_metrics": {
+          "task": "circuit-fibsqrt",
+          "terminal_bench_commit": "a0c400b1138e8c2272c2fc7daa4fa35199b43bef",
+          "gate_lines": 3684,
+          "official_cases": 28
+        }
+      },
+      "reward_delta": 0,
+      "task_score_delta": 0
+    },
+    {
+      "task": "regex-chess",
+      "company": {
+        "reward": 1,
+        "checks_passed": 6,
+        "checks_total": 6,
+        "task_score": 1,
+        "duration_ms": 2354330,
+        "total_tokens": 5772031,
+        "cost_usd": 1.2483335999999996,
+        "tool_calls": 164,
+        "advisor_calls": 0,
+        "advisor_successful_calls": 0,
+        "advisor_audit_statuses": [],
+        "advisor_trigger_metrics": {
+          "triggers": 0,
+          "cleared_triggers": 0,
+          "reasons": {},
+          "triggered_consultations": 0,
+          "voluntary_consultations": 0
+        },
+        "grade_metrics": {
+          "task": "regex-chess",
+          "regex_pairs": 6700,
+          "bytes": 2950071
+        }
+      },
+      "advisor": {
+        "reward": 1,
+        "checks_passed": 6,
+        "checks_total": 6,
+        "task_score": 1,
+        "duration_ms": 2405344,
+        "total_tokens": 8828572,
+        "cost_usd": 1.6333916000000002,
+        "tool_calls": 189,
+        "advisor_calls": 1,
+        "advisor_successful_calls": 1,
+        "advisor_audit_statuses": [
+          "success"
+        ],
+        "advisor_trigger_metrics": {
+          "triggers": 2,
+          "cleared_triggers": 2,
+          "reasons": {
+            "review_changes_requested": 2
+          },
+          "triggered_consultations": 1,
+          "voluntary_consultations": 0
+        },
+        "grade_metrics": {
+          "task": "regex-chess",
+          "regex_pairs": 6201,
+          "bytes": 908531
+        }
+      },
+      "reward_delta": 0,
+      "task_score_delta": 0
+    }
+  ]
+}

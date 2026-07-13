@@ -118,6 +118,7 @@ Every company agent gets a desk panel inside Pi. Agents coordinate through local
 | Recovery snapshots | If a worker pane disappears, lead sees bounded terminal text instead of waiting silently. |
 | Provider queue | Same-provider requests are limited and staggered before overload errors pile up. |
 | Role model policy | Different roles can launch with different configured Pi models. |
+| Advisor mode | Fast executors can pause at high-leverage moments and consult one explicitly configured stronger model inline. |
 
 ## What It Is
 
@@ -285,7 +286,8 @@ ahead of time. The wizard lists each target with its current setting:
 
 - default model for future and unconfigured roles
 - up to two global fallback models for provider failures
-- all built-in supported roles: lead, pm, designer, researcher, coder, reviewer, tester
+- all built-in roles: lead, pm, designer, researcher, coder, reviewer, tester
+- the inline advisor model target (it is not a persistent agent role)
 
 Targets show whether they are explicitly configured, inheriting the default, or
 falling back to Pi's current startup model before the human changes anything.
@@ -302,11 +304,20 @@ model_policy:
   roles:
     coder:
       provider: openai-codex
-      model: gpt-5.4-mini
+      model: gpt-5.6-luna
       thinking: low
+    advisor:
+      provider: openai-codex
+      model: gpt-5.6-sol
+      thinking: high
+    reviewer:
+      provider: openai-codex
+      model: gpt-5.6-terra
+      thinking: high
     tester:
-      provider: xiaomi-token-plan-cn
-      model: mimo-v2.5-pro
+      provider: openai-codex
+      model: gpt-5.6-terra
+      thinking: medium
   fallbacks:
     - provider: xiaomi-token-plan-cn
       model: mimo-v2.5-pro
@@ -335,6 +346,82 @@ company defaults.
 The next `launch-command` or `company_spawn_agent` run for that role includes
 Pi flags such as `--provider`, `--model`, and `--thinking`. Running Pi panes keep
 their current model until they are restarted or changed inside Pi.
+
+## Advisor Mode
+
+Advisor mode adds vertical escalation to pi-company's existing horizontal team.
+A fast lead or coder remains the executor. In the default `adaptive` strategy it
+continues locally until there is evidence worth escalating: the same bash/write
+attempt fails repeatedly, the assigned issue is blocked, a reviewer explicitly
+requests changes, or the executor faces a consequential unresolved or risky choice.
+Pi-company then requires the parameterless `company_consult_advisor` before more
+state-changing work, while leaving read-only orientation available. It pauses only
+that executor, sends a bounded copy of its active Pi
+branch plus a read-only company snapshot to the configured advisor model, and
+returns the advice as the tool result in the same agent loop.
+
+Configure it from the lead pane with `/company-configure-models`:
+
+1. Give `coder` a fast, inexpensive model with low or medium thinking.
+2. Give `advisor` the strongest trusted model available, usually with high thinking.
+3. Give `reviewer` and `tester` reliable models for independent validation. They
+   may be cheaper than the advisor, but should not be the executor that wrote the change.
+
+The `advisor` role model is an inline capability; no persistent advisor pane needs
+to be launched. If `model_policy.roles.advisor` is absent, the tool sends nothing
+and returns setup guidance. Only lead and coder executor sessions receive the tool;
+reviewer and tester sessions stay independent.
+
+Normal use does **not** require a prompt that names the tool. In `auto` mode both
+the executor and the runtime can escalate: the model may ask on genuine uncertainty,
+while deterministic runtime triggers cover observable failures and review state.
+The default task budget suppresses repeated consultations after one sent automatic
+attempt. Control availability at any point in the Pi session:
+
+| Command | Effect in the current Pi session |
+| --- | --- |
+| `/company-advisor auto` | Expose the tool and enable the configured adaptive/eager strategy. `/company-advisor on` is an alias. |
+| `/company-advisor once` | Arm one real consultation; it switches to `off` when the provider payload is ready to dispatch. Setup, queue, empty-context, and pre-payload adapter failures do not consume it. |
+| `/company-advisor off` | Hide the tool, disable any adaptive write gate immediately, and reject a stale tool call without reading or sending the transcript. |
+| `/company-advisor default` | Clear the session override and follow `advisor_policy.enabled`. |
+| `/company-advisor status` | Show mode, strategy, source, active-tool state, model, turn/task usage, and pending trigger count. With no argument, the command also shows status. |
+
+These commands do not inject a user message. The mode is stored as a Pi custom
+session entry, restored across resume/tree navigation, and excluded from model
+context. The footer shows `advisor:auto`, `advisor:once`, or `advisor:off`.
+Pi `0.80.6+` is required; active-tool changes made mid-run are reflected in
+the next provider request in that same agent run. Pi's startup `--tools` and
+`--exclude-tools` selection is a hard filter and still wins over session mode;
+restart Pi without that filter to make the advisor tool available.
+
+The project default and budgets can be tuned in `.pi-company/company.yaml`:
+
+```yaml
+advisor_policy:
+  enabled: true
+  trigger_mode: adaptive
+  max_uses_per_turn: 1
+  max_uses_per_task: 1
+  repeat_failure_threshold: 2
+  timeout_ms: 120000
+  max_output_tokens: 4096
+  max_transcript_chars: 240000
+  max_company_context_chars: 24000
+```
+
+`enabled: true` means the project default is `auto`; `false` means `off`.
+`trigger_mode: eager` restores the original start/stuck/final checkpoint guidance,
+but `adaptive` is the recommended default. `once` intentionally bypasses the
+automatic per-task budget. A session command can override availability without
+rewriting company configuration.
+
+Advisor calls use the same provider concurrency queue as company agents. The event
+log records model, status, duration, token usage when available, truncation
+statistics, trigger reasons, and hashed failure fingerprints, but never the failed
+command, tool output, transcript, or advice text. If that metadata write fails,
+the tool result returns an explicit audit warning instead of hiding the loss. Advisor output is strategic
+guidance only: reviewer/tester evidence, product acceptance, lead brief, git state,
+and merge gates remain authoritative.
 
 Inside Pi, only the configured lead agent can spawn persistent agents. Other
 agents should message lead when they need more role context.
@@ -398,8 +485,8 @@ The extension registers:
 - UI: status line and desk panel for the current agent
 - input hook: mirrors interactive human steering to lead
 - mailbox poller: reads local messages; wake metadata tells future launchers whether a message should wake immediately or wait for digest
-- commands: `/company-init`, `/company-start` (manual brief refresh), `/company-resume`, `/company-pause`, `/company-maintain`, `/company-status`, `/company-brief`, `/company-inbox`, `/company-ack`, `/company-send`, `/company-configure-models`
-- tools: status, lead/global brief, lifecycle maintenance, inbox, send message, issues, task updates, spawn agent, local PR gates, review, test, product acceptance, automated-test evidence, merge request, rate-limit report, model policy configuration
+- commands: `/company-init`, `/company-start` (manual brief refresh), `/company-resume`, `/company-pause`, `/company-maintain`, `/company-status`, `/company-advisor`, `/company-brief`, `/company-inbox`, `/company-ack`, `/company-send`, `/company-configure-models`
+- tools: inline advisor consultation, status, lead/global brief, lifecycle maintenance, inbox, send message, issues, task updates, spawn agent, local PR gates, review, test, product acceptance, automated-test evidence, merge request, rate-limit report, model policy configuration
 
 `company_lead_brief` is the lead's authoritative global delivery view. Lead
 must use it before telling the human that work, a feature, a PR, or the project

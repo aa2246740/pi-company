@@ -45,6 +45,7 @@ import {
   recordPreflightReport,
   requestAgentSpawn,
   requestMerge,
+  normalizeAdvisorPolicy,
   normalizeMessagePolicy,
   rateLimitAppliesToProvider,
   rateLimitIsActive,
@@ -65,7 +66,7 @@ import {
   writeRoleBundle,
   writeStructuredHandoff,
 } from "../src/core/company.js";
-import { DEFAULT_MESSAGE_POLICY, DEFAULT_RATE_LIMIT_POLICY } from "../src/core/defaults.js";
+import { DEFAULT_ADVISOR_POLICY, DEFAULT_MESSAGE_POLICY, DEFAULT_RATE_LIMIT_POLICY } from "../src/core/defaults.js";
 import { makeEvent } from "../src/core/events.js";
 import {
   activeRoleBundleIds,
@@ -202,6 +203,7 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(state.config?.id).toBe("demo");
     expect(state.agents.lead.role).toBe("lead");
     expect(state.agents.tester.role).toBe("tester");
+    expect(state.config?.advisor_policy).toEqual(DEFAULT_ADVISOR_POLICY);
     expect(fs.existsSync(companyPaths(root).events)).toBe(true);
     expect(fs.existsSync(path.join(companyPaths(root).rolesDir, "coder.md"))).toBe(true);
     expect(fs.existsSync(companyPaths(root).initLock)).toBe(true);
@@ -217,6 +219,7 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(leadRole).toContain("do not bounce routine scope, copy, flow, style, or acceptance-criteria defaults back to the human");
     expect(leadRole).toContain("execute the local merge instead of stopping at a merge request");
     expect(pmRole).toContain("ask lead once with your recommended default and fallback");
+    expect(fs.existsSync(path.join(companyPaths(root).rolesDir, "advisor.md"))).toBe(false);
     expect(fs.readFileSync(path.join(root, ".gitignore"), "utf8")).toContain(".pi-company/");
   });
 
@@ -2706,6 +2709,30 @@ Rate limit 已过期，可以恢复正常工作`);
     expect(normalized.agent_cooldown_ms).toBe(DEFAULT_MESSAGE_POLICY.agent_cooldown_ms);
     expect(normalized.agent_max_immediate_per_minute).toBe(DEFAULT_MESSAGE_POLICY.agent_max_immediate_per_minute);
     expect(normalized.org_max_immediate_per_minute).toBe(DEFAULT_MESSAGE_POLICY.org_max_immediate_per_minute);
+  });
+
+  it("normalizes invalid advisor policy values to bounded defaults", () => {
+    const normalized = normalizeAdvisorPolicy({
+      enabled: "yes" as any,
+      trigger_mode: "sometimes" as any,
+      max_uses_per_turn: 0,
+      max_uses_per_task: 0,
+      repeat_failure_threshold: 1,
+      timeout_ms: Number.NaN,
+      max_output_tokens: 10,
+      max_transcript_chars: 100,
+      max_company_context_chars: -1,
+    });
+
+    expect(normalized.enabled).toBe(DEFAULT_ADVISOR_POLICY.enabled);
+    expect(normalized.trigger_mode).toBe(DEFAULT_ADVISOR_POLICY.trigger_mode);
+    expect(normalized.max_uses_per_turn).toBe(DEFAULT_ADVISOR_POLICY.max_uses_per_turn);
+    expect(normalized.max_uses_per_task).toBe(DEFAULT_ADVISOR_POLICY.max_uses_per_task);
+    expect(normalized.repeat_failure_threshold).toBe(2);
+    expect(normalized.timeout_ms).toBe(DEFAULT_ADVISOR_POLICY.timeout_ms);
+    expect(normalized.max_output_tokens).toBe(256);
+    expect(normalized.max_transcript_chars).toBe(4_000);
+    expect(normalized.max_company_context_chars).toBe(DEFAULT_ADVISOR_POLICY.max_company_context_chars);
   });
 
   it("blocks tester passes that contain caveats", () => {
