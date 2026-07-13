@@ -5,7 +5,11 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
-### Advisor mode
+## 0.4.0 - Advisor mode
+
+Adds selective vertical escalation to pi-company: fast executors keep working,
+while a configured stronger model can provide bounded strategic advice at the
+right moment.
 
 - Added parameterless `company_consult_advisor` for synchronous escalation from a
   fast executor to `model_policy.roles.advisor` inside the same Pi agent loop.
